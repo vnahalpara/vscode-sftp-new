@@ -304,6 +304,15 @@
         "type": "string",
         "description": "Extra parameters append to SSH command using by \"Open SSH in Terminal\"",
         "default": "\"cd \"${remotePath}\"; exec \\$SHELL -l\""
+      },
+      "ssh_prefix": {
+        "type": "string",
+        "description": "Command/prefix prepended before the generated ssh command in \"Open SSH in Terminal\" (e.g. \"sshpass -p mypass\"). Use the token ::/:: to embed a literal backslash."
+      },
+      "post_connect": {
+        "type": ["string", "array"],
+        "items": { "type": "string" },
+        "description": "Shell command(s) to run in the terminal after the SSH connection is established. A single string or an array of strings."
       }
     }
   },

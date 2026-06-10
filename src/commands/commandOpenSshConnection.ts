@@ -25,10 +25,16 @@ function adaptPath(filepath) {
 }
 
 function getSshCommand(
-  config: { host: string; port: number; username: string },
+  config: { host: string; port: number; username: string; ssh_prefix?: string },
   extraOption?: string
 ) {
   let sshStr = `ssh -t ${config.username}@${config.host} -p ${config.port}`;
+  // A custom prefix (e.g. "sshpass -p secret") is prepended to the ssh command.
+  // "::/::" is a JSON-friendly token for a literal backslash.
+  if (config.ssh_prefix && config.ssh_prefix !== 'undefined') {
+    const prefix = config.ssh_prefix.replace(/::\/::/g, '\\');
+    sshStr = `${prefix} ${sshStr}`;
+  }
   if (extraOption) {
     sshStr += ` ${extraOption}`;
   }
@@ -78,6 +84,7 @@ export default checkCommand({
       host: remoteConfig.host,
       port: remoteConfig.port,
       username: remoteConfig.username,
+      ssh_prefix: remoteConfig.ssh_prefix,
     };
     const terminal = vscode.window.createTerminal(remoteConfig.name);
     let sshCommand;
@@ -100,5 +107,15 @@ export default checkCommand({
 
     terminal.sendText(sshCommand);
     terminal.show();
+
+    // Run post_connect command(s) once the SSH session has had time to connect.
+    if (remoteConfig.post_connect) {
+      const commands = Array.isArray(remoteConfig.post_connect)
+        ? remoteConfig.post_connect
+        : [remoteConfig.post_connect];
+      setTimeout(() => {
+        commands.forEach(cmd => terminal.sendText(cmd));
+      }, 2000);
+    }
   },
 });

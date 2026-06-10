@@ -15,6 +15,7 @@ import { reportError, isValidFile, isConfigFile, isInWorkspace } from '../helper
 import { downloadFile, uploadFile } from '../fileHandlers';
 
 let workspaceWatcher: vscode.Disposable;
+let configWatcher: vscode.FileSystemWatcher;
 
 async function handleConfigSave(uri: vscode.Uri) {
   const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
@@ -34,6 +35,22 @@ async function handleConfigSave(uri: vscode.Uri) {
   } catch (error) {
     reportError(error);
   } finally {
+    if (app.remoteExplorer) {
+      app.remoteExplorer.refresh();
+    }
+  }
+}
+
+function handleConfigDelete(uri: vscode.Uri) {
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+  if (!workspaceFolder) {
+    return;
+  }
+
+  const workspacePath = workspaceFolder.uri.fsPath;
+  findAllFileService(service => service.workspace === workspacePath).forEach(disposeFileService);
+
+  if (app.remoteExplorer) {
     app.remoteExplorer.refresh();
   }
 }
@@ -126,11 +143,24 @@ function init() {
     onDidSaveFile: handleFileSave,
     onDidSaveSftpConfig: handleConfigSave,
   });
+
+  // onDidSaveTextDocument only fires for documents open in the editor, so a
+  // config file created (or deleted) outside the editor — e.g. via the file
+  // explorer, a terminal, or git — is missed. A FileSystemWatcher catches those.
+  if (configWatcher) {
+    configWatcher.dispose();
+  }
+  configWatcher = vscode.workspace.createFileSystemWatcher('**/.vscode/sftp.json');
+  configWatcher.onDidCreate(handleConfigSave);
+  configWatcher.onDidDelete(handleConfigDelete);
 }
 
 function destory() {
   if (workspaceWatcher) {
     workspaceWatcher.dispose();
+  }
+  if (configWatcher) {
+    configWatcher.dispose();
   }
 }
 

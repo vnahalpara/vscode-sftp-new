@@ -1,10 +1,11 @@
-# sftp sync extension for VS Code
+# Vaibhav SFTP Plus — SFTP sync extension for VS Code
 
-New maintained and updated version by [@Natizyskunk](https://github.com/Natizyskunk/) 😀 <!-- and [@satiromarra](https://github.com/satiromarra) --> <br>
-(Forked from the no longer maintained [liximomo's SFTP plugin](https://github.com/liximomo/vscode-sftp.git))
+A patched build of the SFTP/FTP sync extension, updated to work with current Node.js / VS Code versions (fixes the `isDate is not a function` crash by upgrading `ssh2`).
 
-- VS Code marketplace : https://marketplace.visualstudio.com/items?itemName=Natizyskunk.sftp <br>
-- VSIX release : https://github.com/Natizyskunk/vscode-sftp/releases/
+Maintained by [@vnahalpara](https://github.com/vnahalpara). <br>
+Based on the SFTP extension by [@Natizyskunk](https://github.com/Natizyskunk/), originally forked from [liximomo's SFTP plugin](https://github.com/liximomo/vscode-sftp.git).
+
+- VSIX release : https://github.com/vnahalpara/vscode-sftp-new/releases/
 
 ## INFOS - 2023/06/23
 This is the main repository for the SFTP extension since [@liximomo](https://github.com/liximomo) has set his own to deprecated in favor of this one in the VSCode marketplace.
