@@ -1,21 +1,20 @@
 {
-  "name": "sftp",
-  "displayName": "SFTP",
-  "description": "SFTP/FTP sync",
+  "name": "vaibhav-sftp-plus",
+  "displayName": "Vaibhav SFTP Plus",
+  "description": "SFTP/FTP file synchronization for VS Code (patched for current Node/VS Code).",
   "version": "1.16.4",
-  "publisher": "Natizyskunk",
-  "author": "Natizyskunk <natan.fourie@hotmail.fr> (https://github.com/Natizyskunk)",
+  "publisher": "vaibhavupdated",
+  "author": "Vaibhav (https://github.com/vnahalpara)",
   "engines": {
     "vscode": "^1.64.2"
   },
   "bugs": {
-    "url": "https://github.com/Natizyskunk/vscode-sftp/issues",
-    "email": "natan.fourie@hotmail.fr"
+    "url": "https://github.com/vnahalpara/vscode-sftp-new/issues"
   },
-  "homepage": "https://github.com/Natizyskunk/vscode-sftp/blob/master/README.md",
+  "homepage": "https://github.com/vnahalpara/vscode-sftp-new/blob/master/README.md",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Natizyskunk/vscode-sftp.git"
+    "url": "https://github.com/vnahalpara/vscode-sftp-new.git"
   },
   "license": "MIT",
   "categories": [
@@ -244,6 +243,11 @@
         "category": "SFTP"
       },
       {
+        "command": "sftp.goto.folder",
+        "title": "Go To Folder",
+        "category": "SFTP"
+      },
+      {
         "command": "sftp.create.file",
         "title": "Create File",
         "category": "SFTP"
@@ -405,6 +409,10 @@
         },
         {
           "command": "sftp.create.folder",
+          "when": "false"
+        },
+        {
+          "command": "sftp.goto.folder",
           "when": "false"
         },
         {
@@ -599,6 +607,11 @@
         },
         {
           "command": "sftp.create.folder",
+          "group": "7_modification",
+          "when": "view == remoteExplorer && viewItem != file"
+        },
+        {
+          "command": "sftp.goto.folder",
           "group": "7_modification",
           "when": "view == remoteExplorer && viewItem != file"
         },
