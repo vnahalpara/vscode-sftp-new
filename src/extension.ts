@@ -6,6 +6,7 @@ import app from './app';
 import initCommands from './initCommands';
 import { reportError } from './helper';
 import fileActivityMonitor from './modules/fileActivityMonitor';
+import * as vpnTunnel from './core/vpnTunnel';
 import { tryLoadConfigs } from './modules/config';
 import {
   getAllFileService,
@@ -47,6 +48,9 @@ export async function activate(context: vscode.ExtensionContext) {
   } catch (error) {
     reportError(error, 'initCommands');
   }
+
+  // Writable location for generated VPN tunnel configs (contains private keys).
+  vpnTunnel.init(context.globalStoragePath);
 
   const workspaceFolders = getWorkspaceFolders();
   if (!workspaceFolders) {
@@ -104,4 +108,5 @@ export async function activate(context: vscode.ExtensionContext) {
 export function deactivate() {
   fileActivityMonitor.destory();
   getAllFileService().forEach(disposeFileService);
+  vpnTunnel.disposeAll();
 }

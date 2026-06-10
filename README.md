@@ -247,6 +247,53 @@ local -> hopa -> hopb -> target
 }
 ```
 
+### VPN Tunnel (per-connection static IP)
+
+Some servers only accept SSH/SFTP from an allowlisted **static IP**. Instead of routing
+your whole machine through a VPN (which needs admin rights), this routes **only this one
+SFTP connection** through a userspace WireGuard tunnel that exposes a local SOCKS5 proxy.
+The rest of your machine is untouched and no root/admin is required. **SFTP only.**
+
+**One-time setup**
+
+1. Install [`wireproxy`](https://github.com/whyvl/wireproxy) — download the prebuilt binary for
+   your OS/arch from the [releases page](https://github.com/whyvl/wireproxy/releases) (or build it
+   with `go install github.com/whyvl/wireproxy/cmd/wireproxy@latest`). It is not in Homebrew core.
+   Make sure the binary is on your `PATH`, or point `vpn.wireproxyPath` at it.
+   On macOS, downloaded binaries may need the quarantine flag cleared:
+   `xattr -d com.apple.quarantine /path/to/wireproxy`.
+2. In your VPN provider's dashboard, do the **WireGuard Manual Setup** for the static-IP
+   location and download the `.conf` (it contains your private key). For Surfshark this is
+   *VPN → Manual Setup → WireGuard*, then the **Static IP** location (e.g.
+   `us-nyc-st004.prod.surfshark.com`). Save it somewhere like `~/surfshark/us-nyc-st004.conf`.
+3. Ask the server admin to allowlist that location's **egress IP** (the IP the VPN shows).
+
+```json
+{
+  "name": "Locked-down server",
+  "host": "1.2.3.4",
+  "protocol": "sftp",
+  "port": 22,
+  "username": "username",
+  "remotePath": "/var/www",
+  "vpn": {
+    "type": "wireguard",
+    "configFile": "~/surfshark/us-nyc-st004.conf",
+    "wireproxyPath": "wireproxy", // optional; defaults to PATH lookup
+    "socksPort": 0,               // optional; 0 = pick a free port
+    "healthCheckTimeout": 15000   // optional; ms to wait for the tunnel
+  }
+}
+```
+
+Notes:
+- The downloaded `.conf` holds your WireGuard private key — keep it out of source control.
+  The extension writes a working copy into its storage with `0600` permissions and never logs it.
+- WireGuard needs outbound **UDP 51820**; corporate firewalls that block it will fail with a
+  clear error in the SFTP output channel.
+- Composable with `hop`: the VPN carries the first outbound connection, then hops proceed inside it.
+- Connections sharing the same `configFile` reuse a single `wireproxy` process.
+
 ### Configuration in User Setting
 You can use `remote` to tell sftp to get the configuration from [remote-fs](https://github.com/liximomo/vscode-remote-fs).
 

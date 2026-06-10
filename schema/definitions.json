@@ -313,6 +313,38 @@
         "type": ["string", "array"],
         "items": { "type": "string" },
         "description": "Shell command(s) to run in the terminal after the SSH connection is established. A single string or an array of strings."
+      },
+      "vpn": {
+        "type": "object",
+        "description": "Route only this connection through a userspace WireGuard SOCKS5 tunnel (wireproxy). Requires the wireproxy binary. SFTP only.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["wireguard"],
+            "description": "Tunnel type. Only \"wireguard\" is supported.",
+            "default": "wireguard"
+          },
+          "configFile": {
+            "type": "string",
+            "description": "Path to the WireGuard .conf downloaded from your VPN provider (e.g. ~/surfshark/us-nyc-st004.conf). Contains the private key."
+          },
+          "wireproxyPath": {
+            "type": "string",
+            "description": "Path to the wireproxy binary. Defaults to looking it up on PATH.",
+            "default": "wireproxy"
+          },
+          "socksPort": {
+            "type": "number",
+            "description": "Local SOCKS5 port for the tunnel. 0 (default) picks a free port at runtime.",
+            "default": 0
+          },
+          "healthCheckTimeout": {
+            "type": "number",
+            "description": "Milliseconds to wait for the tunnel's SOCKS port to come up before failing.",
+            "default": 15000
+          }
+        },
+        "required": ["configFile"]
       }
     }
   },

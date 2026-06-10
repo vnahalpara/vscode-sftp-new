@@ -1,4 +1,5 @@
 import CustomError from '../customError';
+import { VpnOption } from '../vpnTunnel';
 
 export interface ConnectOption {
   // common
@@ -17,6 +18,7 @@ export interface ConnectOption {
   agent?: string;
   sock?: any;
   hop?: ConnectOption | ConnectOption[];
+  vpn?: VpnOption;
   limitOpenFilesOnRemote?: boolean | number;
 
   // ftp-only

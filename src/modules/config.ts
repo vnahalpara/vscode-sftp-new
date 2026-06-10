@@ -31,6 +31,13 @@ const configScheme = {
   algorithms: Joi.any(),
   sshConfigPath: Joi.string(),
   sshCustomParams: Joi.string(),
+  vpn: {
+    type: Joi.string().valid('wireguard'),
+    configFile: Joi.string().required(),
+    wireproxyPath: Joi.string(),
+    socksPort: Joi.number().integer(),
+    healthCheckTimeout: Joi.number().integer(),
+  },
   ssh_prefix: Joi.string(),
   post_connect: Joi.alternatives([Joi.string(), Joi.array().items(Joi.string())]).optional(),
 
