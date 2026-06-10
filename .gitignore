@@ -10,6 +10,10 @@ INSTALL_DEBUG.md
 ### Extensions ###
 *.vsix
 
+### Local VPN configs (contain WireGuard private keys — never commit) ###
+Surfshark_Config/
+*.wireguard.conf
+
 ### VS Code ###
 .vscode/**
 !.vscode/tasks.json
@@ -35,3 +39,4 @@ bower_components
 .bower-cache
 .bower-registry
 .bower-tmp
+Surfshark_Config/us-nyc-st004.wireguard.conf
