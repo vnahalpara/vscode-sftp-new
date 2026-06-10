@@ -7,7 +7,12 @@ import initCommands from './initCommands';
 import { reportError } from './helper';
 import fileActivityMonitor from './modules/fileActivityMonitor';
 import { tryLoadConfigs } from './modules/config';
-import { getAllFileService, createFileService, disposeFileService } from './modules/serviceManager';
+import {
+  getAllFileService,
+  createFileService,
+  disposeFileService,
+  findAllFileService,
+} from './modules/serviceManager';
 import { getWorkspaceFolders, setContextValue } from './host';
 import RemoteExplorer from './modules/remoteExplorer';
 
@@ -18,11 +23,20 @@ async function setupWorkspaceFolder(dir) {
   });
 }
 
-function setup(workspaceFolders: vscode.WorkspaceFolder[]) {
-  fileActivityMonitor.init();
-  const pendingInits = workspaceFolders.map(folder => setupWorkspaceFolder(folder.uri.fsPath));
+async function setup(workspaceFolders: vscode.WorkspaceFolder[]) {
+  // Load every workspace folder's config first, isolating failures so one bad
+  // folder doesn't prevent the others from initializing.
+  await Promise.all(
+    workspaceFolders.map(folder =>
+      setupWorkspaceFolder(folder.uri.fsPath).catch(error =>
+        reportError(error, `setup workspace folder ${folder.uri.fsPath}`)
+      )
+    )
+  );
 
-  return Promise.all(pendingInits);
+  // Start watching files only after all services exist. Otherwise a config save
+  // firing mid-setup would run handleConfigSave against incomplete state.
+  fileActivityMonitor.init();
 }
 
 // this method is called when your extension is activated
@@ -51,9 +65,37 @@ export async function activate(context: vscode.ExtensionContext) {
       app.remoteExplorer.refresh();
     }
   });
+  // Create the Remote Explorer up front so config events that fire during (or
+  // right after) setup can safely refresh it. Its constructor doesn't depend on
+  // any FileService existing yet.
+  app.remoteExplorer = new RemoteExplorer(context);
+
+  // Initialize/dispose services as workspace folders are added or removed at
+  // runtime. Without this, folders opened after activation are ignored and
+  // services for removed folders leak in the Trie.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(async event => {
+      await Promise.all(
+        event.added.map(folder =>
+          setupWorkspaceFolder(folder.uri.fsPath).catch(error =>
+            reportError(error, `setup workspace folder ${folder.uri.fsPath}`)
+          )
+        )
+      );
+      event.removed.forEach(folder => {
+        findAllFileService(service => service.workspace === folder.uri.fsPath).forEach(
+          disposeFileService
+        );
+      });
+      if (app.remoteExplorer) {
+        app.remoteExplorer.refresh();
+      }
+    })
+  );
+
   try {
     await setup(workspaceFolders);
-    app.remoteExplorer = new RemoteExplorer(context);
+    app.remoteExplorer.refresh();
   } catch (error) {
     reportError(error);
   }
