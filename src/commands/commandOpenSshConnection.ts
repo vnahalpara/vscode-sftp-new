@@ -3,6 +3,8 @@ import { COMMAND_OPEN_CONNECTION_IN_TERMINAL } from '../constants';
 import { getAllFileService } from '../modules/serviceManager';
 import { ExplorerRoot } from '../modules/remoteExplorer';
 import { interpolate } from '../utils';
+import { reportError } from '../helper';
+import * as vpnTunnel from '../core/vpnTunnel';
 import { checkCommand } from './abstract/createCommand';
 
 const isWindows = process.platform === 'win32';
@@ -25,10 +27,18 @@ function adaptPath(filepath) {
 }
 
 function getSshCommand(
-  config: { host: string; port: number; username: string; ssh_prefix?: string },
+  config: {
+    host: string;
+    port: number;
+    username: string;
+    ssh_prefix?: string;
+    proxyCommand?: string;
+  },
   extraOption?: string
 ) {
-  let sshStr = `ssh -t ${config.username}@${config.host} -p ${config.port}`;
+  // Route ssh through the VPN's local SOCKS5 proxy when present.
+  const proxyOpt = config.proxyCommand ? `-o "ProxyCommand=${config.proxyCommand}" ` : '';
+  let sshStr = `ssh ${proxyOpt}-t ${config.username}@${config.host} -p ${config.port}`;
   // A custom prefix (e.g. "sshpass -p secret") is prepended to the ssh command.
   // "::/::" is a JSON-friendly token for a literal backslash.
   if (config.ssh_prefix && config.ssh_prefix !== 'undefined') {
@@ -80,13 +90,38 @@ export default checkCommand({
       remoteConfig = item.config;
     }
 
+    // If this connection uses a VPN, bring the tunnel up and route ssh through
+    // its SOCKS5 proxy so the terminal egresses from the same (allowlisted) IP
+    // as file transfers. Requires `nc` with SOCKS support (default on macOS/Linux).
+    let proxyCommand;
+    if (remoteConfig.vpn) {
+      try {
+        const socksPort = await vpnTunnel.acquire(remoteConfig.vpn);
+        proxyCommand = `nc -X 5 -x 127.0.0.1:${socksPort} %h %p`;
+      } catch (error) {
+        reportError(error, 'open ssh in terminal (vpn)');
+        return;
+      }
+    }
+
     const sshConfig = {
       host: remoteConfig.host,
       port: remoteConfig.port,
       username: remoteConfig.username,
       ssh_prefix: remoteConfig.ssh_prefix,
+      proxyCommand,
     };
     const terminal = vscode.window.createTerminal(remoteConfig.name);
+
+    // Release the tunnel reference when this terminal is closed.
+    if (remoteConfig.vpn) {
+      const sub = vscode.window.onDidCloseTerminal(closed => {
+        if (closed === terminal) {
+          vpnTunnel.release(remoteConfig.vpn);
+          sub.dispose();
+        }
+      });
+    }
     let sshCommand;
     if (shouldUseAgent(remoteConfig)) {
       sshCommand = getSshCommand(sshConfig);
