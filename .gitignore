@@ -14,6 +14,10 @@ INSTALL_DEBUG.md
 Surfshark_Config/
 *.wireguard.conf
 
+### Local scratch / synced content ###
+plan*.md
+/project/
+
 ### VS Code ###
 .vscode/**
 !.vscode/tasks.json

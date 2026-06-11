@@ -345,6 +345,30 @@
           }
         },
         "required": ["configFile"]
+      },
+      "database": {
+        "type": "array",
+        "description": "MySQL/MariaDB databases reachable over this SSH connection (SFTP only).",
+        "items": {
+          "type": "object",
+          "properties": {
+            "host": {
+              "type": "string",
+              "description": "DB host from the remote server's perspective. Use localhost for a DB on the SSH host.",
+              "default": "localhost"
+            },
+            "port": {
+              "type": "number",
+              "description": "DB port.",
+              "default": 3306
+            },
+            "username": { "type": "string", "description": "DB user." },
+            "password": { "type": "string", "description": "DB password." },
+            "name": { "type": "string", "description": "Database (schema) name." },
+            "label": { "type": "string", "description": "Optional display name in the Databases tree." }
+          },
+          "required": ["username", "password", "name"]
+        }
       }
     }
   },

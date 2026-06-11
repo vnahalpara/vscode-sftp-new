@@ -294,6 +294,53 @@ Notes:
 - Composable with `hop`: the VPN carries the first outbound connection, then hops proceed inside it.
 - Connections sharing the same `configFile` reuse a single `wireproxy` process.
 
+### Database (MySQL over SSH)
+
+Browse and search MySQL/MariaDB databases that live behind your SSH server (e.g. a
+Cloudways `localhost` database) — the connection is tunneled over the same SSH session, so
+no DB port needs to be exposed. **SFTP connections only.**
+
+Add a `database` array to a connection in `sftp.json`:
+
+```json
+{
+  "name": "My Server",
+  "host": "1.2.3.4",
+  "protocol": "sftp",
+  "username": "user",
+  "remotePath": "/var/www",
+  "database": [
+    {
+      "host": "localhost",
+      "port": 3306,
+      "username": "db_user",
+      "password": "db_pass",
+      "name": "my_database",
+      "label": "main (wp)"
+    }
+  ]
+}
+```
+
+- `host`/`port` are resolved **from the remote server's perspective** (`localhost` = MySQL on
+  the SSH host). `port` defaults to `3306`. `name` is the database (schema) name. `label` is an
+  optional tree display name.
+- Multiple databases per connection are supported (array).
+- Composes with `vpn`/`hop` automatically — DB traffic rides the SSH connection.
+
+Then use the **Databases** view in the SFTP sidebar:
+
+- **Search Database…** — the headline feature: find a string across *every* text column of the
+  whole database (or one table). Streams matches as it scans, shows progress, and is cancelable.
+- **New Query / Run Query** — open a `.sql` editor bound to a database; run the selection or the
+  whole file with `Cmd/Ctrl+Enter`. Bare `SELECT`s get an automatic `LIMIT`
+  (`sftp.db.defaultLimit`, default 500); `UPDATE`/`DELETE` without a `WHERE` prompts first.
+- **Select Top 100 / Show Structure** — right-click a table. Results open in a sortable grid with
+  cell-copy and **Export CSV**.
+
+> Passwords are stored in `sftp.json` as plaintext (same as the SSH `password` field today). Keep
+> the file out of source control.
+
 ### Configuration in User Setting
 You can use `remote` to tell sftp to get the configuration from [remote-fs](https://github.com/liximomo/vscode-remote-fs).
 

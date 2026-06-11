@@ -356,6 +356,43 @@ export default class SSHClient extends RemoteClient {
     return socket;
   }
 
+  // Run a command on the remote host, optionally piping `input` to its stdin.
+  // Used as the DB transport fallback when TCP forwarding is disabled.
+  exec(cmd: string, input?: string): Promise<{ stdout: string; stderr: string; code: number }> {
+    return new Promise((resolve, reject) => {
+      this._client.exec(cmd, (err, stream) => {
+        if (err) {
+          return reject(err);
+        }
+        let stdout = '';
+        let stderr = '';
+        stream.on('data', (d: Buffer) => {
+          stdout += d.toString();
+        });
+        stream.stderr.on('data', (d: Buffer) => {
+          stderr += d.toString();
+        });
+        stream.on('close', (code: number) => resolve({ stdout, stderr, code: code || 0 }));
+        if (input !== undefined) {
+          stream.end(input);
+        }
+      });
+    });
+  }
+
+  // Open a forwarded TCP stream from the remote host to dstHost:dstPort over this
+  // SSH connection (same primitive as _makeHopping). Used to tunnel DB traffic.
+  openForwardStream(dstHost: string, dstPort: number): Promise<any> {
+    return new Promise((resolve, reject) => {
+      this._client.forwardOut('127.0.0.1', this._option.port, dstHost, dstPort, (error, stream) => {
+        if (error) {
+          return reject(error);
+        }
+        resolve(stream);
+      });
+    });
+  }
+
   private _makeHopping(sshClient: SSHClient, dstHost, dstPort): Promise<any> {
     logger.info(`hopping from ${sshClient._option.host} to ${dstHost}`);
     return new Promise((resolve, reject) => {

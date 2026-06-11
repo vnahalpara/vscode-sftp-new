@@ -1,14 +1,18 @@
+import * as vscode from 'vscode';
 import * as LRU from 'lru-cache';
 import StatusBarItem from './ui/statusBarItem';
 import { COMMAND_TOGGLE_OUTPUT } from './constants';
 import AppState from './modules/appState';
 import RemoteExplorer from './modules/remoteExplorer';
+import DbExplorer from './modules/dbExplorer';
 
 interface App {
   fsCache: LRU.Cache<string, string>;
   state: AppState;
   sftpBarItem: StatusBarItem;
   remoteExplorer: RemoteExplorer;
+  dbExplorer: DbExplorer;
+  context: vscode.ExtensionContext;
 }
 
 const app: App = Object.create(null);
