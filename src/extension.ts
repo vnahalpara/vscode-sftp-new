@@ -16,6 +16,8 @@ import {
 } from './modules/serviceManager';
 import { getWorkspaceFolders, setContextValue } from './host';
 import RemoteExplorer from './modules/remoteExplorer';
+import DbExplorer from './modules/dbExplorer';
+import * as dbConnectionManager from './core/dbConnectionManager';
 
 async function setupWorkspaceFolder(dir) {
   const configs = await tryLoadConfigs(dir);
@@ -43,6 +45,7 @@ async function setup(workspaceFolders: vscode.WorkspaceFolder[]) {
 // this method is called when your extension is activated
 // your extension is activated the very first time the command is executed
 export async function activate(context: vscode.ExtensionContext) {
+  app.context = context;
   try {
     initCommands(context);
   } catch (error) {
@@ -73,6 +76,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // right after) setup can safely refresh it. Its constructor doesn't depend on
   // any FileService existing yet.
   app.remoteExplorer = new RemoteExplorer(context);
+  app.dbExplorer = new DbExplorer(context);
 
   // Initialize/dispose services as workspace folders are added or removed at
   // runtime. Without this, folders opened after activation are ignored and
@@ -109,4 +113,5 @@ export function deactivate() {
   fileActivityMonitor.destory();
   getAllFileService().forEach(disposeFileService);
   vpnTunnel.disposeAll();
+  dbConnectionManager.disposeAll();
 }

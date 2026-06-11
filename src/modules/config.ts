@@ -40,6 +40,16 @@ const configScheme = {
   },
   ssh_prefix: Joi.string(),
   post_connect: Joi.alternatives([Joi.string(), Joi.array().items(Joi.string())]).optional(),
+  database: Joi.array().items(
+    Joi.object({
+      host: Joi.string(),
+      port: Joi.number().integer(),
+      username: Joi.string().required(),
+      password: Joi.string().required(),
+      name: Joi.string().required(),
+      label: Joi.string(),
+    })
+  ),
 
   secure: Joi.any().valid(true, false, 'control', 'implicit'),
   secureOptions: nullable(Joi.object()),

@@ -64,3 +64,12 @@ export const COMMAND_REMOTEEXPLORER_VIEW_CONTENT = 'sftp.viewContent';
 export const COMMAND_CREATE_FOLDER = 'sftp.create.folder';
 export const COMMAND_CREATE_FILE = 'sftp.create.file';
 export const COMMAND_GOTO_FOLDER = 'sftp.goto.folder';
+
+export const COMMAND_DB_OPEN_TABLE = 'sftp.db.openTable';
+export const COMMAND_DB_FIND_TABLE = 'sftp.db.findTable';
+export const COMMAND_DB_SEARCH = 'sftp.db.search';
+export const COMMAND_DB_NEW_QUERY = 'sftp.db.newQuery';
+export const COMMAND_DB_RUN_QUERY = 'sftp.db.runQuery';
+export const COMMAND_DB_SELECT_TOP = 'sftp.db.selectTop';
+export const COMMAND_DB_SHOW_STRUCTURE = 'sftp.db.showStructure';
+export const COMMAND_DB_REFRESH = 'sftp.db.refresh';

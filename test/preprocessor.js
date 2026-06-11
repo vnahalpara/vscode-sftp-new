@@ -2,10 +2,11 @@ const tsc = require('typescript');
 const tsConfig = require('../tsconfig.json');
 
 module.exports = {
+  // Jest 28+ requires process() to return { code } rather than a raw string.
   process(src, path) {
-    if (path.endsWith('.ts')) {
-      return tsc.transpile(src, tsConfig.compilerOptions, path, []);
-    }
-    return src;
+    const code = path.endsWith('.ts')
+      ? tsc.transpile(src, tsConfig.compilerOptions, path, [])
+      : src;
+    return { code };
   },
 };

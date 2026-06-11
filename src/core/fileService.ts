@@ -158,6 +158,7 @@ function getHostInfo(config) {
     'concurrency',
     'syncOption',
     'sshConfigPath',
+    'database',
   ];
 
   return Object.keys(config).reduce((obj, key) => {
