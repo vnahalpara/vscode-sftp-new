@@ -2,7 +2,7 @@
   "name": "vaibhav-sftp-plus",
   "displayName": "Vaibhav SFTP Plus",
   "description": "SFTP/FTP file synchronization for VS Code (patched for current Node/VS Code).",
-  "version": "1.18.2",
+  "version": "1.19.0",
   "publisher": "vaibhavupdated",
   "author": "Vaibhav (https://github.com/vnahalpara)",
   "engines": {
@@ -79,6 +79,49 @@
           "type": "number",
           "default": 500,
           "description": "Row limit auto-appended to bare SELECT queries in the database SQL runner."
+        },
+        "sftp.clone.domainSuffix": {
+          "type": "string",
+          "default": ".local.com",
+          "description": "Default local hostname suffix for site clones (hostname = <name><suffix>)."
+        },
+        "sftp.clone.sitesRoot": {
+          "type": "string",
+          "default": "~/Sites",
+          "description": "Default parent folder for local site clones (path = <sitesRoot>/<name>)."
+        },
+        "sftp.clone.ssl": {
+          "type": "object",
+          "default": {},
+          "properties": {
+            "certPath": {
+              "type": "string"
+            },
+            "keyPath": {
+              "type": "string"
+            }
+          },
+          "description": "Wildcard SSL cert/key for *.local.com used by generated local vhosts (set once)."
+        },
+        "sftp.clone.localDb": {
+          "type": "object",
+          "default": {
+            "host": "127.0.0.1",
+            "username": "root",
+            "password": "root"
+          },
+          "properties": {
+            "host": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            },
+            "password": {
+              "type": "string"
+            }
+          },
+          "description": "Default local MySQL connection used when importing cloned databases."
         }
       }
     },
@@ -303,6 +346,51 @@
         }
       },
       {
+        "command": "sftp.clone.create",
+        "title": "Clone Site to Local",
+        "category": "SFTP"
+      },
+      {
+        "command": "sftp.clone.resyncDatabase",
+        "title": "Clone: Resync Database",
+        "category": "SFTP"
+      },
+      {
+        "command": "sftp.clone.resyncMedia",
+        "title": "Clone: Resync Media",
+        "category": "SFTP"
+      },
+      {
+        "command": "sftp.clone.resyncCode",
+        "title": "Clone: Resync Code",
+        "category": "SFTP"
+      },
+      {
+        "command": "sftp.clone.localize",
+        "title": "Clone: Localize (write env.php)",
+        "category": "SFTP"
+      },
+      {
+        "command": "sftp.clone.provision",
+        "title": "Clone: Provision Local Site",
+        "category": "SFTP"
+      },
+      {
+        "command": "sftp.clone.status",
+        "title": "Clone: Status",
+        "category": "SFTP"
+      },
+      {
+        "command": "sftp.clone.openLocal",
+        "title": "Clone: Open Local Site",
+        "category": "SFTP"
+      },
+      {
+        "command": "sftp.clone.restoreSnapshot",
+        "title": "Clone: Restore DB Snapshot",
+        "category": "SFTP"
+      },
+      {
         "command": "sftp.create.file",
         "title": "Create File",
         "category": "SFTP"
@@ -360,6 +448,42 @@
         },
         {
           "command": "sftp.db.refresh",
+          "when": "sftp.enabled"
+        },
+        {
+          "command": "sftp.clone.create",
+          "when": "sftp.enabled"
+        },
+        {
+          "command": "sftp.clone.resyncDatabase",
+          "when": "sftp.enabled"
+        },
+        {
+          "command": "sftp.clone.resyncMedia",
+          "when": "sftp.enabled"
+        },
+        {
+          "command": "sftp.clone.resyncCode",
+          "when": "sftp.enabled"
+        },
+        {
+          "command": "sftp.clone.localize",
+          "when": "sftp.enabled"
+        },
+        {
+          "command": "sftp.clone.provision",
+          "when": "sftp.enabled"
+        },
+        {
+          "command": "sftp.clone.status",
+          "when": "sftp.enabled"
+        },
+        {
+          "command": "sftp.clone.openLocal",
+          "when": "sftp.enabled"
+        },
+        {
+          "command": "sftp.clone.restoreSnapshot",
           "when": "sftp.enabled"
         },
         {

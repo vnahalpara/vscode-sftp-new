@@ -1,5 +1,4 @@
-import { RemoteFileSystem } from './fs';
-import { SSHClient } from './remote-client';
+import { getSshClient } from './sshAccess';
 import { DbClient, DatabaseConfig } from './dbClient';
 
 // One DbClient per (connection, database), reused across the tree, SQL runner and search.
@@ -17,15 +16,7 @@ export function getDbClient(fileService: any, config: any, dbConfig: DatabaseCon
     return existing;
   }
 
-  const sshProvider = async () => {
-    if (config.protocol && config.protocol !== 'sftp') {
-      throw new Error('Database connections require an SFTP (SSH) connection.');
-    }
-    const remoteFs = (await fileService.getRemoteFileSystem(config)) as RemoteFileSystem;
-    return remoteFs.getClient() as SSHClient;
-  };
-
-  const client = new DbClient(dbConfig, sshProvider);
+  const client = new DbClient(dbConfig, () => getSshClient(fileService, config));
   clients.set(key, client);
   return client;
 }

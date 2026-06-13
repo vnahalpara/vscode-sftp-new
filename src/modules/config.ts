@@ -50,6 +50,30 @@ const configScheme = {
       label: Joi.string(),
     })
   ),
+  local: {
+    provisioner: Joi.string().valid('native', 'localwp'),
+    platform: Joi.string().valid('auto', 'magento2', 'wordpress'),
+    hostname: Joi.string(),
+    path: Joi.string(),
+    phpVersion: Joi.string(),
+    ssl: {
+      certPath: Joi.string(),
+      keyPath: Joi.string(),
+    },
+    mediaPaths: Joi.array().items(Joi.string()),
+    mediaProxy: Joi.boolean(),
+    codeMethod: Joi.string().valid('auto', 'git', 'rsync'),
+    dbExcludes: Joi.array().items(Joi.string()),
+    database: {
+      host: Joi.string(),
+      username: Joi.string(),
+      password: Joi.string().allow(''),
+      name: Joi.string(),
+    },
+    magento: {
+      envOverrides: Joi.object(),
+    },
+  },
 
   secure: Joi.any().valid(true, false, 'control', 'implicit'),
   secureOptions: nullable(Joi.object()),

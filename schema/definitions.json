@@ -369,6 +369,44 @@
           },
           "required": ["username", "password", "name"]
         }
+      },
+      "local": {
+        "type": "object",
+        "description": "Clone this live site to a local dev environment (Magento/WordPress over SSH).",
+        "properties": {
+          "provisioner": { "type": "string", "enum": ["native", "localwp"], "default": "native" },
+          "platform": { "type": "string", "enum": ["auto", "magento2", "wordpress"], "default": "auto" },
+          "hostname": { "type": "string", "description": "Local hostname, e.g. careshop.local.com. Defaults to <name><sftp.clone.domainSuffix>." },
+          "path": { "type": "string", "description": "Local site path. Defaults to <sftp.clone.sitesRoot>/<name>." },
+          "phpVersion": { "type": "string", "default": "auto" },
+          "ssl": {
+            "type": "object",
+            "properties": {
+              "certPath": { "type": "string" },
+              "keyPath": { "type": "string" }
+            }
+          },
+          "mediaPaths": { "type": "array", "items": { "type": "string" }, "description": "Media folders relative to remotePath (e.g. pub/media)." },
+          "mediaProxy": { "type": "boolean", "description": "Proxy missing media to the live URL (native nginx)." },
+          "codeMethod": { "type": "string", "enum": ["auto", "git", "rsync"], "default": "auto" },
+          "dbExcludes": { "type": "array", "items": { "type": "string" }, "description": "Extra tables to dump structure-only." },
+          "database": {
+            "type": "object",
+            "description": "Local DB target. Defaults to the global sftp.clone.localDb setting.",
+            "properties": {
+              "host": { "type": "string" },
+              "username": { "type": "string" },
+              "password": { "type": "string" },
+              "name": { "type": "string" }
+            }
+          },
+          "magento": {
+            "type": "object",
+            "properties": {
+              "envOverrides": { "type": "object", "description": "Per-project env.php system.default overrides, merged verbatim (survive every resync)." }
+            }
+          }
+        }
       }
     }
   },

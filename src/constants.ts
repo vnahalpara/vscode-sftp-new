@@ -73,3 +73,13 @@ export const COMMAND_DB_RUN_QUERY = 'sftp.db.runQuery';
 export const COMMAND_DB_SELECT_TOP = 'sftp.db.selectTop';
 export const COMMAND_DB_SHOW_STRUCTURE = 'sftp.db.showStructure';
 export const COMMAND_DB_REFRESH = 'sftp.db.refresh';
+
+export const COMMAND_CLONE_CREATE = 'sftp.clone.create';
+export const COMMAND_CLONE_RESYNC_DB = 'sftp.clone.resyncDatabase';
+export const COMMAND_CLONE_RESYNC_MEDIA = 'sftp.clone.resyncMedia';
+export const COMMAND_CLONE_RESYNC_CODE = 'sftp.clone.resyncCode';
+export const COMMAND_CLONE_LOCALIZE = 'sftp.clone.localize';
+export const COMMAND_CLONE_PROVISION = 'sftp.clone.provision';
+export const COMMAND_CLONE_STATUS = 'sftp.clone.status';
+export const COMMAND_CLONE_OPEN_LOCAL = 'sftp.clone.openLocal';
+export const COMMAND_CLONE_RESTORE_SNAPSHOT = 'sftp.clone.restoreSnapshot';

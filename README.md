@@ -58,6 +58,52 @@ To install just follow these steps from within VSCode:
 5. Reload VSCode.
 6. Voilà!
 
+## Platform support (Windows & macOS)
+
+The extension and all of its features run on **both Windows and macOS** (and Linux). The DB
+commands run `mysql` **on the remote server** over SSH, so nothing extra is installed locally
+for database support. Two optional, terminal-only conveniences rely on Unix helper tools — see
+the notes below.
+
+| Feature | Windows | macOS |
+|---|---|---|
+| SFTP/FTP sync (upload / download / diff / sync) | ✅ | ✅ |
+| Remote Explorer, Go To Folder | ✅ | ✅ |
+| Database: browse, data view (paging/sort/filter), search, SQL runner, cell/row edit, Find Table | ✅ | ✅ |
+| VPN tunnel for SFTP **and** database traffic | ✅ | ✅ |
+| Open SSH in Terminal (plain) | ✅ | ✅ |
+| Open SSH in Terminal **through the VPN** | ⚠️ needs `nc` (see note) | ✅ |
+| `ssh_prefix` using `sshpass` | ⚠️ `sshpass` is Unix-only | ✅ |
+
+### Install the .vsix (both platforms)
+- **UI:** Extensions panel → `…` menu → **Install from VSIX…** → pick `vaibhav-sftp-plus-<version>.vsix` → reload.
+- **CLI:**
+  - macOS / Linux: `code --install-extension vaibhav-sftp-plus-<version>.vsix --force`
+  - Windows (PowerShell): `code --install-extension .\vaibhav-sftp-plus-<version>.vsix --force`
+
+### VPN tunnel — install `wireproxy`
+Download the binary for your OS from the [wireproxy releases](https://github.com/whyvl/wireproxy/releases):
+- **macOS:** grab `wireproxy_darwin_arm64` (Apple Silicon) or `_amd64` (Intel), put it on your `PATH`,
+  then clear the quarantine flag: `xattr -d com.apple.quarantine /path/to/wireproxy`.
+- **Windows:** grab `wireproxy_windows_amd64.exe`, save it somewhere like `C:\tools\wireproxy.exe`,
+  and point the config at it:
+  ```json
+  "vpn": { "type": "wireguard", "configFile": "C:\\Users\\you\\surfshark\\nyc.conf", "wireproxyPath": "C:\\tools\\wireproxy.exe" }
+  ```
+- If the binary isn't on `PATH`, set `vpn.wireproxyPath` to its full path on either OS.
+
+### Database — nothing to install locally
+The DB features tunnel through the same SSH connection and run `mysql` **on the server**, so they
+work on Windows and macOS identically. Only the remote server needs the `mysql` client (Cloudways
+and most hosts have it).
+
+### Terminal-only notes
+- **Open SSH in Terminal through the VPN** adds an `ssh -o ProxyCommand="nc -X 5 -x …"`. `nc` with
+  SOCKS support ships on macOS/Linux but **not on Windows** by default. File transfers and database
+  traffic still go through the VPN on Windows — only this terminal shortcut needs `nc`.
+- **`ssh_prefix: "sshpass -p …"`** uses `sshpass`, a Unix tool (`brew install hudochenkov/sshpass/sshpass`
+  on macOS). On Windows, prefer key-based auth instead of `sshpass`.
+
 ## Documentation
 - [Home](https://github.com/Natizyskunk/vscode-sftp/wiki)
 - [Settings](https://github.com/Natizyskunk/vscode-sftp/wiki/Setting)

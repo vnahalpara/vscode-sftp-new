@@ -20,6 +20,28 @@ export function buildMysqlCommand(dbConfig: DatabaseConfig): string {
   return parts.join(' ');
 }
 
+// Build a mysqldump command. Tables in `noDataTables` are dumped structure-only:
+// pass 1 dumps their schema with --no-data; pass 2 dumps everything else (with data + routines).
+export function buildMysqldumpCommand(dbConfig: DatabaseConfig, noDataTables: string[]): string {
+  const base = [`MYSQL_PWD=${shellSingle(dbConfig.password)}`, 'mysqldump', `--user=${shellSingle(dbConfig.username)}`];
+  if (dbConfig.host) {
+    base.push(`--host=${shellSingle(dbConfig.host)}`);
+  }
+  if (dbConfig.port) {
+    base.push(`--port=${dbConfig.port}`);
+  }
+  base.push('--single-transaction', '--quick', '--no-tablespaces', '--default-character-set=utf8mb4');
+  const baseStr = base.join(' ');
+  const db = shellSingle(dbConfig.name);
+
+  if (noDataTables.length === 0) {
+    return `${baseStr} --routines ${db}`;
+  }
+  const tables = noDataTables.map(shellSingle).join(' ');
+  const ignores = noDataTables.map(t => `--ignore-table=${shellSingle(dbConfig.name + '.' + t)}`).join(' ');
+  return `{ ${baseStr} --no-data ${db} ${tables}; ${baseStr} --routines ${ignores} ${db}; }`;
+}
+
 function unescapeCell(s: string): string {
   if (s.indexOf('\\') === -1) {
     return s;
