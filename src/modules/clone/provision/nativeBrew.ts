@@ -8,6 +8,8 @@ export interface DoctorCheck {
   name: string;
   ok: boolean;
   fix?: string;
+  // 'warn' checks surface a heads-up but never block provisioning; default is a hard requirement.
+  level?: 'error' | 'warn';
 }
 
 export function siteSlug(name: string): string {
@@ -39,7 +41,45 @@ export async function doctor(rc: any, phpVersion: string): Promise<DoctorCheck[]
     const sslOk = fse.existsSync(rc.ssl.certPath) && fse.existsSync(rc.ssl.keyPath);
     checks.push({ name: 'SSL cert', ok: sslOk, fix: 'Set sftp.clone.ssl.certPath/keyPath to an existing *.local.com cert' });
   }
+  await pushSearchEngineCheck(checks, rc);
   return checks;
+}
+
+// Magento search engine reachability: reads the store's configured engine/host/port from the
+// cloned DB and pings it. Warn-only — a remote/down engine shouldn't block provisioning, but the
+// user gets a clear heads-up (so category/search pages aren't mysteriously broken).
+async function pushSearchEngineCheck(checks: DoctorCheck[], rc: any): Promise<void> {
+  try {
+    const db = rc.localDb;
+    const dbq = async (sql: string) =>
+      (await run(
+        `MYSQL_PWD=${shellSingle(db.password)} mysql --user=${shellSingle(db.username)} --host=${shellSingle(db.host)} ` +
+          `-N -e ${shellSingle(sql)} ${shellSingle(db.name)} 2>/dev/null`
+      )).stdout.trim();
+
+    const engine = await dbq(`SELECT value FROM core_config_data WHERE path='catalog/search/engine' LIMIT 1`);
+    if (!engine || engine === 'mysql') {
+      return; // not a clone with an external search engine (or DB not imported yet)
+    }
+    const key = engine.indexOf('opensearch') === 0 ? 'opensearch' : engine; // opensearch | elasticsearch7 | elasticsearch8
+    const host = (await dbq(`SELECT value FROM core_config_data WHERE path='catalog/search/${key}_server_hostname' LIMIT 1`)) || 'localhost';
+    const port = (await dbq(`SELECT value FROM core_config_data WHERE path='catalog/search/${key}_server_port' LIMIT 1`)) || '9200';
+    const reachable =
+      (await run(
+        `(curl -sk -o /dev/null --max-time 4 http://${host}:${port} || curl -sk -o /dev/null --max-time 4 https://${host}:${port}) && echo ok || true`
+      )).stdout.indexOf('ok') !== -1;
+    const isLocal = host === 'localhost' || host === '127.0.0.1';
+    checks.push({
+      name: `search ${engine} @ ${host}:${port}`,
+      ok: reachable,
+      level: 'warn',
+      fix: isLocal
+        ? 'brew install opensearch && brew services start opensearch'
+        : `live search host "${host}" isn't reachable locally — point catalog/search/${key}_server_hostname at localhost (or a local engine) and reindex`,
+    });
+  } catch (e) {
+    // best-effort; never block provisioning on the search probe
+  }
 }
 
 export interface ProvisionResult {
@@ -97,18 +137,16 @@ export async function provision(rc: any, phpVersion: string): Promise<ProvisionR
     throw new Error(`nginx config test failed:\n${test.stdout.trim()}`);
   }
 
-  // restart php-fpm (user-level: listens on a unix socket)
+  // restart php-fpm + nginx (both run as user-level brew LaunchAgents on macOS — no root needed)
   await run(`brew services restart ${shellSingle('php@' + phpVersion)}`);
+  await run('brew services restart nginx');
 
-  // privileged: /etc/hosts entry + nginx on :443 needs root -> one visible terminal command
+  // privileged: only the /etc/hosts entry needs root -> one visible terminal command (sudo password)
   const hostsLine = `127.0.0.1 ${rc.hostname}`;
   const hasHost = (await run(`grep -qF ${shellSingle(rc.hostname)} /etc/hosts && echo yes || true`)).stdout.indexOf('yes') !== -1;
-  const parts: string[] = [];
   if (!hasHost) {
-    parts.push(`echo ${shellSingle(hostsLine)} | sudo tee -a /etc/hosts`);
+    runInTerminal(`provision ${rc.name}`, `echo ${shellSingle(hostsLine)} | sudo tee -a /etc/hosts`);
   }
-  parts.push('sudo brew services restart nginx');
-  runInTerminal(`provision ${rc.name}`, parts.join(' && '));
 
   const notes: string[] = [];
   if (!includesServers) {
@@ -116,8 +154,10 @@ export async function provision(rc: any, phpVersion: string): Promise<ProvisionR
   }
   return {
     message:
-      `Wrote vhost + php-fpm pool and restarted php-fpm. Finish in the opened terminal ` +
-      `(enter your password for /etc/hosts + nginx restart).` +
+      `Wrote vhost + php-fpm pool and restarted php-fpm + nginx.` +
+      (hasHost
+        ? ` Ready.`
+        : ` Finish in the opened terminal: enter your password to add the /etc/hosts entry.`) +
       (notes.length ? ` Note: ${notes.join('; ')}.` : ''),
     vhostPath,
     poolPath,

@@ -7,7 +7,7 @@ import { parseDu, parsePhpVersion } from '../detect';
 import { expandHome, defaultMediaPaths } from '../cloneConfig';
 import { authedGitUrl } from '../codePull';
 import { pathsConflict, shouldPinPhpVersion } from '../cloneOrchestrator';
-import { phpExport, buildEnvPhp } from '../platform/magentoEnv';
+import { phpExport, buildEnvPhp, searchIndexPrefix } from '../platform/magentoEnv';
 import { magentoVhost, phpFpmPool } from '../provision/templates';
 
 describe('buildMysqldumpCommand', () => {
@@ -147,13 +147,14 @@ describe('magento env.php generation', () => {
     expect(phpExport(null, 0)).toBe('null');
   });
 
-  it('buildEnvPhp localizes URLs + keeps preserved values + merges envOverrides', () => {
+  it('buildEnvPhp localizes URLs + keeps preserved values + merges envOverrides + names search index', () => {
     const out = buildEnvPhp({
       preserved: { 'crypt.key': 'KEY', 'backend.frontName': 'kewadmin', 'install.date': 'D', 'db.table_prefix': '' },
       localDb: { host: '127.0.0.1', username: 'root', password: 'root', name: 'kdb' },
       hostname: 'k.local.com',
       scheme: 'https',
       envOverrides: { pixel_open: { cloudflare_turnstile: { enabled: '0' } } },
+      indexPrefix: 'kewlab-en248',
     });
     expect(out.indexOf('<?php\nreturn [')).toBe(0);
     expect(out).toContain(`'key' => 'KEY'`);
@@ -163,7 +164,29 @@ describe('magento env.php generation', () => {
     expect(out).toContain(`'dbname' => 'kdb'`);
     expect(out).toContain(`'enable' => '0'`); // 2FA off
     expect(out).toContain(`'cloudflare_turnstile'`); // envOverrides merged into system.default
+    expect(out).toContain(`'opensearch_index_prefix' => 'kewlab-en248'`);
+    expect(out).toContain(`'elasticsearch7_index_prefix' => 'kewlab-en248'`);
     expect(out.trim().endsWith('];')).toBe(true);
+  });
+
+  it('buildEnvPhp omits the search-index block when no prefix is given', () => {
+    const out = buildEnvPhp({
+      preserved: {},
+      localDb: { host: '127.0.0.1', username: 'root', password: 'root', name: 'kdb' },
+      hostname: 'k.local.com',
+      scheme: 'http',
+      envOverrides: {},
+    });
+    expect(out.indexOf('index_prefix')).toBe(-1);
+  });
+});
+
+describe('searchIndexPrefix', () => {
+  it('builds a valid lowercase OpenSearch prefix from the project name', () => {
+    expect(searchIndexPrefix('kewlab-cloudways-en248')).toBe('kewlab-cloudways-en248');
+    expect(searchIndexPrefix('iotivedo_AWS Live new')).toBe('iotivedo_aws-live-new');
+    expect(searchIndexPrefix('--Weird__Name!!')).toBe('weird__name-');
+    expect(searchIndexPrefix('')).toBe('magento2');
   });
 });
 

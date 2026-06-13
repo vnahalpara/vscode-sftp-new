@@ -2,7 +2,7 @@
   "name": "vaibhav-sftp-plus",
   "displayName": "Vaibhav SFTP Plus",
   "description": "SFTP/FTP file synchronization for VS Code (patched for current Node/VS Code).",
-  "version": "1.19.0",
+  "version": "1.19.1",
   "publisher": "vaibhavupdated",
   "author": "Vaibhav (https://github.com/vnahalpara)",
   "engines": {

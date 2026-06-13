@@ -53,6 +53,18 @@ export interface EnvPhpOptions {
   hostname: string;
   scheme: 'http' | 'https';
   envOverrides: { [key: string]: any };
+  indexPrefix?: string;
+}
+
+// A valid lowercase OpenSearch/Elasticsearch index prefix from the project name, so multiple
+// clones sharing one local engine don't collide on the default "magento2" index.
+export function searchIndexPrefix(name: string): string {
+  const slug = (name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-_]+/, '');
+  return slug || 'magento2';
 }
 
 // Build a localized Magento app/etc/env.php: preserved live values (crypt.key, table_prefix, …)
@@ -64,22 +76,30 @@ export function buildEnvPhp(opts: EnvPhpOptions): string {
   const pv = (key: string) => p[key];
   const baseUrl = `${opts.scheme}://${opts.hostname}/`;
 
-  const systemDefault = deepMerge(
-    {
-      web: {
-        unsecure: { base_url: baseUrl },
-        secure: {
-          base_url: baseUrl,
-          use_in_frontend: '1',
-          use_in_adminhtml: '1',
-        },
-        cookie: { cookie_domain: opts.hostname },
+  const base: any = {
+    web: {
+      unsecure: { base_url: baseUrl },
+      secure: {
+        base_url: baseUrl,
+        use_in_frontend: '1',
+        use_in_adminhtml: '1',
       },
-      payment: { checkmo: { active: '1' } },
-      twofactorauth: { general: { enable: '0' } },
+      cookie: { cookie_domain: opts.hostname },
     },
-    opts.envOverrides || {}
-  );
+    payment: { checkmo: { active: '1' } },
+    twofactorauth: { general: { enable: '0' } },
+  };
+  if (opts.indexPrefix) {
+    // Namespace this project's search indices (works whichever engine the store uses).
+    base.catalog = {
+      search: {
+        opensearch_index_prefix: opts.indexPrefix,
+        elasticsearch7_index_prefix: opts.indexPrefix,
+        elasticsearch8_index_prefix: opts.indexPrefix,
+      },
+    };
+  }
+  const systemDefault = deepMerge(base, opts.envOverrides || {});
 
   const env: any = {
     backend: { frontName: pv('backend.frontName') || 'admin' },

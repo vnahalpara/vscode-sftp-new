@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as fse from 'fs-extra';
 import { PlatformAdapter, DetectContext } from '../types';
 import { shellSingle } from '../../../core/dbExec';
-import { buildEnvPhp } from './magentoEnv';
+import { buildEnvPhp, searchIndexPrefix } from './magentoEnv';
 
 // Tables whose data is regenerated/disposable — dumped structure-only (DATA skipped).
 // Glob patterns (`*` = any) matched in TypeScript against the live table list.
@@ -65,17 +65,19 @@ export const magentoAdapter: PlatformAdapter = {
 
   async localize(rc: any, preserved: { [key: string]: any }) {
     const scheme: 'http' | 'https' = rc.ssl ? 'https' : 'http';
+    const indexPrefix = searchIndexPrefix(rc.name);
     const contents = buildEnvPhp({
       preserved: preserved || {},
       localDb: rc.localDb,
       hostname: rc.hostname,
       scheme,
       envOverrides: (rc.magento && rc.magento.envOverrides) || {},
+      indexPrefix,
     });
     const envPath = path.join(rc.localPath, 'app', 'etc', 'env.php');
     fse.ensureDirSync(path.dirname(envPath));
     fse.writeFileSync(envPath, contents, 'utf8');
-    return { message: `env.php written → ${scheme}://${rc.hostname}/ (db ${rc.localDb.name})` };
+    return { message: `env.php written → ${scheme}://${rc.hostname}/ (db ${rc.localDb.name}, search index "${indexPrefix}")` };
   },
 };
 

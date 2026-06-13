@@ -49,18 +49,19 @@ export async function runProvision(target: { fileService: any; config: any }): P
     return;
   }
 
-  // Doctor
+  // Doctor — hard requirements block; 'warn' checks (e.g. search engine down) only surface a notice.
   const checks = await doctor(rc, php);
-  const missing = checks.filter(c => !c.ok);
-  if (missing.length) {
-    const fixes = missing.map(m => `• ${m.name}: ${m.fix}`).join('\n');
+  const errors = checks.filter(c => !c.ok && c.level !== 'warn');
+  const warnings = checks.filter(c => !c.ok && c.level === 'warn');
+  if (errors.length) {
+    const fixes = errors.map(m => `• ${m.name}: ${m.fix}`).join('\n');
     const pick = await vscode.window.showWarningMessage(
       `Local stack not ready for ${rc.name}:\n${fixes}`,
       { modal: true },
       'Run brew installs in terminal'
     );
     if (pick) {
-      const cmds = missing
+      const cmds = errors
         .filter(m => m.fix && /^brew /.test(m.fix))
         .map(m => m.fix)
         .join(' && ');
@@ -69,6 +70,11 @@ export async function runProvision(target: { fileService: any; config: any }): P
       }
     }
     return; // user resolves, then re-runs provision
+  }
+  if (warnings.length) {
+    vscode.window.showWarningMessage(
+      `Provisioning ${rc.name} with warnings — ${warnings.map(w => `${w.name}: ${w.fix}`).join('; ')}.`
+    );
   }
 
   await vscode.window.withProgress(
@@ -89,22 +95,24 @@ export async function runProvision(target: { fileService: any; config: any }): P
       state = setStep(state, 'provision', 'done', nowIso(), pr.message);
       saveState(rc.workspace, rc.key, state, nowIso());
 
-      // build (composer + di:compile) for git-cloned source (no vendor)
+      // build: composer install + di:compile only when vendor is missing (git source); always
+      // flush cache + reindex so the local search engine gets this project's catalog.
       const vendorReady = fse.existsSync(path.join(rc.localPath, 'vendor', 'autoload.php'));
+      const buildSteps: string[] = [];
       if (!vendorReady) {
-        runInTerminal(
-          `build ${rc.name}`,
-          `cd ${shellSingle(rc.localPath)} && composer install && php bin/magento setup:di:compile && php bin/magento cache:flush`
-        );
-        state = setStep(state, 'build', 'pending', nowIso(), 'composer install + di:compile running in terminal');
-        saveState(rc.workspace, rc.key, state, nowIso());
+        buildSteps.push('composer install', 'php bin/magento setup:di:compile');
       }
+      buildSteps.push('php bin/magento cache:flush', 'php bin/magento indexer:reindex');
+      runInTerminal(`build ${rc.name}`, `cd ${shellSingle(rc.localPath)} && ${buildSteps.join(' && ')}`);
+      const buildMsg = vendorReady ? 'cache:flush + reindex' : 'composer install + di:compile + reindex';
+      state = setStep(state, 'build', 'pending', nowIso(), `${buildMsg} running in terminal`);
+      saveState(rc.workspace, rc.key, state, nowIso());
     }
   );
 
   const url = rc.ssl ? `https://${rc.hostname}` : `http://${rc.hostname}`;
   const action = await vscode.window.showInformationMessage(
-    `Provisioned ${rc.name}. Finish the terminal step(s) (sudo + composer), then open ${url}.`,
+    `Provisioned ${rc.name}. Finish the terminal step(s) (/etc/hosts password + build/reindex), then open ${url}.`,
     'Open'
   );
   if (action === 'Open') {
