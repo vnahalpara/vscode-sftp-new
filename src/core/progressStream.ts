@@ -14,6 +14,6 @@ export default class ProgressStream extends Transform {
     } catch {
       // never let a progress callback break the transfer
     }
-    callback(null, chunk);
+    callback(undefined, chunk);
   }
 }

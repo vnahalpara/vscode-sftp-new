@@ -1,6 +1,13 @@
 import { Readable } from 'stream';
 import ProgressStream from '../progressStream';
 
+function readableFrom(chunks: Buffer[]): Readable {
+  const r = new Readable({ read() { /* push-driven below */ } });
+  chunks.forEach(c => r.push(c));
+  r.push(null);
+  return r;
+}
+
 function collect(stream: NodeJS.ReadableStream): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -12,14 +19,14 @@ function collect(stream: NodeJS.ReadableStream): Promise<Buffer> {
 
 describe('ProgressStream', () => {
   it('passes all bytes through unchanged', async () => {
-    const source = Readable.from([Buffer.from('hello '), Buffer.from('world')]);
+    const source = readableFrom([Buffer.from('hello '), Buffer.from('world')]);
     const progress = new ProgressStream(() => undefined);
     const out = await collect(source.pipe(progress));
     expect(out.toString()).toBe('hello world');
   });
 
   it('reports cumulative byte counts', async () => {
-    const source = Readable.from([Buffer.from('hello '), Buffer.from('world')]);
+    const source = readableFrom([Buffer.from('hello '), Buffer.from('world')]);
     const seen: number[] = [];
     const progress = new ProgressStream(n => seen.push(n));
     await collect(source.pipe(progress));

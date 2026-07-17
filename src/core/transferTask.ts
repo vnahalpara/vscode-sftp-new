@@ -1,5 +1,6 @@
 import { Readable } from 'stream';
 import * as fileOperations from './fileBaseOperations';
+import ProgressStream from './progressStream';
 import { FileSystem, FileType } from './fs';
 import { Task } from './scheduler';
 import logger from '../logger';
@@ -26,6 +27,7 @@ export interface TransferOption {
   perserveTargetMode: boolean;
   useTempFile?: boolean;
   openSsh?: boolean;
+  size?: number;
 }
 
 export default class TransferTask implements Task {
@@ -38,6 +40,7 @@ export default class TransferTask implements Task {
   private readonly _TransferOption: TransferOption;
   private _handle: Readable;
   private _cancelled: boolean;
+  onProgress?: (transferred: number, total: number) => void;
   // private _fileStatus: FileStatus;
 
   constructor(
@@ -76,6 +79,10 @@ export default class TransferTask implements Task {
 
   get transferType() {
     return this._transferDirection;
+  }
+
+  get size(): number {
+    return this._TransferOption.size || 0;
   }
 
   async run() {
@@ -174,7 +181,16 @@ export default class TransferTask implements Task {
       if (useTempFile) {
         logger.info("uploading temp file: " + uploadTarget);
       }
-      await targetFs.put(this._handle, uploadTarget, {
+      let input: Readable = this._handle;
+      if (this.onProgress) {
+        const progressStream = new ProgressStream(transferred =>
+          this.onProgress!(transferred, this.size)
+        );
+        // forward source errors so `put`'s `input.once('error')` still tears down the writer
+        this._handle.once('error', err => progressStream.emit('error', err));
+        input = this._handle.pipe(progressStream);
+      }
+      await targetFs.put(input, uploadTarget, {
         mode,
         fd: uploadFd,
         autoClose: false,
