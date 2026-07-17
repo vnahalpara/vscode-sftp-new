@@ -16,6 +16,7 @@ import {
 } from '../../constants';
 import { getAllFileService } from '../serviceManager';
 import { getExtensionSetting } from '../ext';
+import { sizeDescription } from './sizeDescription';
 
 type Id = number;
 
@@ -43,6 +44,7 @@ function makePreivewUrl(uri: vscode.Uri) {
 interface ExplorerChild {
   resource: Resource;
   isDirectory: boolean;
+  size?: number;
 }
 
 export interface ExplorerRoot extends ExplorerChild {
@@ -116,6 +118,10 @@ export default class RemoteTreeData
     return {
       label: customLabel,
       resourceUri: item.resource.uri,
+      description: sizeDescription(
+        { isDirectory: item.isDirectory, isRoot, size: (item as ExplorerChild).size },
+        getExtensionSetting().showSizeInRemoteExplorer
+      ),
       collapsibleState: item.isDirectory ? vscode.TreeItemCollapsibleState.Collapsed : undefined,
       contextValue: isRoot ? 'root' : item.isDirectory ? 'folder' : 'file',
       command: item.isDirectory
@@ -163,6 +169,8 @@ export default class RemoteTreeData
         });
         const mapItem = this._map.get(newResource.uri.query);
         if (mapItem) {
+          // keep the size current across refreshes (the cache persists items)
+          (mapItem as ExplorerChild).size = file.size;
           return mapItem;
         } else {
           const newItem = {
@@ -170,6 +178,7 @@ export default class RemoteTreeData
               remotePath: file.fspath,
             }),
             isDirectory,
+            size: file.size,
           };
           this._map.set(newItem.resource.uri.query, newItem);
           return newItem;
