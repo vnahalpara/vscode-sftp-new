@@ -469,6 +469,37 @@ describe('transfer algorithm', () => {
       );
     });
 
+    test('tasks carry source file size', async () => {
+      fillFs({
+        local: {
+          a: file('abcde'), // 5 bytes
+          b: file('xy'), // 2 bytes
+        },
+        remote: {},
+      });
+
+      const tasks: TransferTask[] = [];
+      const collect = (t: TransferTask) => tasks.push(t);
+      await sync(
+        {
+          srcFsPath: '/local',
+          srcFs: localFs,
+          targetFs: localFs,
+          targetFsPath: '/remote',
+          transferDirection: TransferDirection.LOCAL_TO_REMOTE,
+          transferOption: { perserveTargetMode: false },
+        },
+        collect
+      );
+
+      const byTarget: { [k: string]: number } = {};
+      tasks.forEach(t => {
+        byTarget[t.targetFsPath] = t.size;
+      });
+      expect(byTarget['/remote/a'.replace(/\//g, path.sep)]).toBe(5);
+      expect(byTarget['/remote/b'.replace(/\//g, path.sep)]).toBe(2);
+    });
+
     test('sync both direction --skipCreate"', async () => {
       fillFs({
         local: {
