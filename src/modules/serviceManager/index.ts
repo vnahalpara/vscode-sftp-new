@@ -101,26 +101,27 @@ export function createFileService(config: any, workspace: string) {
   service.setWatcherService(watcherService);
   service.beforeTransfer(task => {
     const { localFsPath, transferType } = task;
-    app.sftpBarItem.showMsg(
-      `${transferType} ${path.basename(localFsPath)}`,
-      simplifyPath(localFsPath)
-    );
+    const filename = path.basename(localFsPath);
+    const filepath = simplifyPath(localFsPath);
+    app.transferAggregator.onTaskStart(task, {
+      direction: transferType,
+      filename,
+      filepath,
+    });
+    task.onProgress = transferred =>
+      app.transferAggregator.onTaskProgress(task, transferred);
   });
   service.afterTransfer((error, task) => {
     const { localFsPath, transferType } = task;
-    const filename = path.basename(localFsPath);
-    const filepath = simplifyPath(localFsPath);
     if (task.isCancelled()) {
       logger.info(`cancel transfer ${localFsPath}`);
-      app.sftpBarItem.showMsg(`cancelled ${filename}`, filepath, 2000 * 2);
+      app.transferAggregator.onTaskDone(task, { cancelled: true });
     } else if (error) {
-      // if ((error as any).reported !== true) {
       reportError(error, `when ${transferType} ${localFsPath}`);
-      // }
-      app.sftpBarItem.showMsg(`failed ${filename}`, filepath, 2000 * 2);
+      app.transferAggregator.onTaskDone(task, { error: true });
     } else {
       logger.info(`${transferType} ${localFsPath}`);
-      app.sftpBarItem.showMsg(`done ${filename}`, filepath, 2000 * 2);
+      app.transferAggregator.onTaskDone(task, {});
     }
   });
 
