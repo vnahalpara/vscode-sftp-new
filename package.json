@@ -2,7 +2,7 @@
   "name": "vaibhav-sftp-plus",
   "displayName": "Vaibhav SFTP Plus",
   "description": "SFTP/FTP file synchronization for VS Code (patched for current Node/VS Code).",
-  "version": "1.20.0",
+  "version": "1.20.1",
   "publisher": "vaibhavupdated",
   "author": "Vaibhav (https://github.com/vnahalpara)",
   "engines": {
@@ -74,6 +74,11 @@
           "type": "boolean",
           "default": false,
           "description": "\"Download\" instead of \"View Content\" when open file in Remote Explorer"
+        },
+        "sftp.showSizeInRemoteExplorer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show each file's size (B/KB/MB/GB) on the right side of its row in the Remote Explorer"
         },
         "sftp.db.defaultLimit": {
           "type": "number",
