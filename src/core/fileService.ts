@@ -11,7 +11,7 @@ import upath from './upath';
 import Ignore from './ignore';
 import { FileSystem } from './fs';
 import Scheduler from './scheduler';
-import { createRemoteIfNoneExist, removeRemoteFs } from './remoteFs';
+import { createRemoteIfNoneExist, removeRemoteFs, reconnectRemoteFs } from './remoteFs';
 import TransferTask from './transferTask';
 import localFs from './localFs';
 
@@ -468,6 +468,15 @@ export default class FileService {
       this._eventEmitter.emit(Event.AFTER_TRANSFER, err, task);
     });
 
+    app.transferAggregator.beginOperation();
+    let ended = false;
+    const finish = () => {
+      if (!ended) {
+        ended = true;
+        app.transferAggregator.endOperation();
+      }
+    };
+
     let runningPromise: Promise<void> | null = null;
     let isStopped: boolean = false;
     const transferScheduler: TransferScheduler = {
@@ -477,12 +486,14 @@ export default class FileService {
       stop() {
         isStopped = true;
         scheduler.empty();
+        finish();
       },
       add(task: TransferTask) {
         if (isStopped) {
           return;
         }
 
+        app.transferAggregator.registerTask(task);
         scheduler.add(task);
       },
       run() {
@@ -492,6 +503,7 @@ export default class FileService {
 
         if (scheduler.size <= 0) {
           fileService._removeScheduler(transferScheduler);
+          finish();
           return Promise.resolve();
         }
 
@@ -500,6 +512,7 @@ export default class FileService {
             scheduler.onIdle(() => {
               runningPromise = null;
               fileService._removeScheduler(transferScheduler);
+              finish();
               resolve();
             });
             scheduler.start();
@@ -519,6 +532,12 @@ export default class FileService {
 
   getRemoteFileSystem(config: ServiceConfig): Promise<FileSystem> {
     return createRemoteIfNoneExist(getHostInfo(config));
+  }
+
+  // Drop the active profile's cached connection and reconnect. Returns null when
+  // nothing is currently connected for this service's active profile.
+  reconnect(): Promise<FileSystem> | null {
+    return reconnectRemoteFs(getHostInfo(this.getConfig()));
   }
 
   getConfig(useProfile = app.state.profile): ServiceConfig {
