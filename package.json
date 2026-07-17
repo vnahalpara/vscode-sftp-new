@@ -2,7 +2,7 @@
   "name": "vaibhav-sftp-plus",
   "displayName": "Vaibhav SFTP Plus",
   "description": "SFTP/FTP file synchronization for VS Code (patched for current Node/VS Code).",
-  "version": "1.19.1",
+  "version": "1.20.0",
   "publisher": "vaibhavupdated",
   "author": "Vaibhav (https://github.com/vnahalpara)",
   "engines": {
@@ -144,6 +144,11 @@
       {
         "command": "sftp.cancelAllTransfer",
         "title": "Cancel All Transfers",
+        "category": "SFTP"
+      },
+      {
+        "command": "sftp.reconnect",
+        "title": "Reconnect",
         "category": "SFTP"
       },
       {
@@ -337,6 +342,16 @@
         "category": "SFTP"
       },
       {
+        "command": "sftp.db.exportDatabase",
+        "title": "Export Database…",
+        "category": "SFTP"
+      },
+      {
+        "command": "sftp.db.exportTable",
+        "title": "Export Table…",
+        "category": "SFTP"
+      },
+      {
         "command": "sftp.db.refresh",
         "title": "Refresh Databases",
         "category": "SFTP",
@@ -447,6 +462,14 @@
           "when": "false"
         },
         {
+          "command": "sftp.db.exportDatabase",
+          "when": "sftp.enabled"
+        },
+        {
+          "command": "sftp.db.exportTable",
+          "when": "sftp.enabled"
+        },
+        {
           "command": "sftp.db.refresh",
           "when": "sftp.enabled"
         },
@@ -492,6 +515,10 @@
         },
         {
           "command": "sftp.cancelAllTransfer",
+          "when": "sftp.enabled"
+        },
+        {
+          "command": "sftp.reconnect",
           "when": "sftp.enabled"
         },
         {
@@ -785,6 +812,16 @@
           "command": "sftp.db.showStructure",
           "group": "1_db@4",
           "when": "view == dbExplorer && viewItem == table"
+        },
+        {
+          "command": "sftp.db.exportTable",
+          "group": "2_export@0",
+          "when": "view == dbExplorer && viewItem == table"
+        },
+        {
+          "command": "sftp.db.exportDatabase",
+          "group": "2_export@0",
+          "when": "view == dbExplorer && viewItem == database"
         },
         {
           "command": "sftp.openConnectInTerminal",
