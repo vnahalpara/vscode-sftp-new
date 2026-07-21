@@ -18,6 +18,7 @@ export const COMMAND_CONFIG = 'sftp.config';
 export const COMMAND_SET_PROFILE = 'sftp.setProfile';
 export const COMMAND_CANCEL_ALL_TRANSFER = 'sftp.cancelAllTransfer';
 export const COMMAND_OPEN_CONNECTION_IN_TERMINAL = 'sftp.openConnectInTerminal';
+export const COMMAND_RECONNECT = 'sftp.reconnect';
 
 export const COMMAND_FORCE_UPLOAD = 'sftp.forceUpload';
 export const COMMAND_UPLOAD = 'sftp.upload';
@@ -64,6 +65,7 @@ export const COMMAND_REMOTEEXPLORER_VIEW_CONTENT = 'sftp.viewContent';
 export const COMMAND_CREATE_FOLDER = 'sftp.create.folder';
 export const COMMAND_CREATE_FILE = 'sftp.create.file';
 export const COMMAND_GOTO_FOLDER = 'sftp.goto.folder';
+export const COMMAND_GET_SIZE = 'sftp.getSize';
 
 export const COMMAND_DB_OPEN_TABLE = 'sftp.db.openTable';
 export const COMMAND_DB_FIND_TABLE = 'sftp.db.findTable';
@@ -72,6 +74,8 @@ export const COMMAND_DB_NEW_QUERY = 'sftp.db.newQuery';
 export const COMMAND_DB_RUN_QUERY = 'sftp.db.runQuery';
 export const COMMAND_DB_SELECT_TOP = 'sftp.db.selectTop';
 export const COMMAND_DB_SHOW_STRUCTURE = 'sftp.db.showStructure';
+export const COMMAND_DB_EXPORT_DATABASE = 'sftp.db.exportDatabase';
+export const COMMAND_DB_EXPORT_TABLE = 'sftp.db.exportTable';
 export const COMMAND_DB_REFRESH = 'sftp.db.refresh';
 
 export const COMMAND_CLONE_CREATE = 'sftp.clone.create';

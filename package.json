@@ -311,6 +311,11 @@
         "category": "SFTP"
       },
       {
+        "command": "sftp.getSize",
+        "title": "Get Size",
+        "category": "SFTP"
+      },
+      {
         "command": "sftp.db.openTable",
         "title": "Open Table Data",
         "category": "SFTP"
@@ -894,6 +899,11 @@
         {
           "command": "sftp.goto.folder",
           "group": "7_modification",
+          "when": "view == remoteExplorer && viewItem != file"
+        },
+        {
+          "command": "sftp.getSize",
+          "group": "5_info",
           "when": "view == remoteExplorer && viewItem != file"
         },
         {
