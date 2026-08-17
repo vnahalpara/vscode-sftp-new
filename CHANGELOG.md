@@ -1,3 +1,9 @@
+## 1.22.0 - 2026-08-18
+* New Feature : **Manage Server** — right-click a connection root in the Remote Explorer (directly below *Open SSH in Terminal*) to open a live server-management page in Chrome. VS Code starts a token-authenticated HTTP server bound to `127.0.0.1` only, and streams that host's metrics over Server-Sent Events using the connection's existing SSH channel. No agent is installed on the server.
+* Removed : the in-editor **Open Monitoring** webview, replaced by Manage Server. The `sftp.monitor.*` settings are replaced one-for-one by `sftp.serverManager.*` (`browser`, `interval`, `slowInterval`, `historyMinutes`).
+* Security : the server manager API never returns `password`, `passphrase`, `ssh_prefix`, `interactiveAuth`, `git.password` or `database[].password` — profiles are redacted through an allowlist before they reach the browser.
+* Note : metric history is held in memory only and does not survive a VS Code restart. Services, web server, logs, terminal and database management follow in later releases.
+
 ## 1.16.3 - 2023-06-16
 * [#356] New Feature : Upload to all profiles (Pull request [#313](https://github.com/Natizyskunk/vscode-sftp/pull/313) from @wewawa vscode-sftp:create_multi_command).
 * [#357] Fix : Correcting Typo 'avaliable' => 'available' (Pull request [#343](https://github.com/Natizyskunk/vscode-sftp/pull/343) from @kjo-sdds vscode-sftp:develop).
