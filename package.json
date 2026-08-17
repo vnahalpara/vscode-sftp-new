@@ -80,20 +80,30 @@
           "default": true,
           "description": "Show each file's size (B/KB/MB/GB) on the right side of its row in the Remote Explorer"
         },
-        "sftp.monitor.interval": {
+        "sftp.serverManager.browser": {
+          "type": "string",
+          "enum": [
+            "chrome",
+            "default",
+            "chrome-app"
+          ],
+          "default": "chrome",
+          "description": "How Manage Server opens the browser. 'chrome' opens a normal Chrome tab, 'default' uses your default browser, 'chrome-app' opens a standalone Chrome window with no address bar."
+        },
+        "sftp.serverManager.interval": {
           "type": "number",
           "default": 2000,
-          "description": "Monitoring dashboard refresh interval in ms for CPU, memory, load, network and processes."
+          "description": "Milliseconds between live metric samples."
         },
-        "sftp.monitor.slowInterval": {
+        "sftp.serverManager.slowInterval": {
           "type": "number",
-          "default": 10000,
-          "description": "Monitoring dashboard refresh interval in ms for disk usage and process metadata (user, args, threads)."
+          "default": 15000,
+          "description": "Milliseconds between slow-lane samples (disks, processes, addresses)."
         },
-        "sftp.monitor.historyMinutes": {
+        "sftp.serverManager.historyMinutes": {
           "type": "number",
-          "default": 5,
-          "description": "How many minutes of load history the monitoring dashboard's chart keeps."
+          "default": 60,
+          "description": "Minutes of metric history held in memory for the charts. History is not persisted across VS Code restarts."
         },
         "sftp.db.defaultLimit": {
           "type": "number",
@@ -162,8 +172,8 @@
         "category": "SFTP"
       },
       {
-        "command": "sftp.openMonitoring",
-        "title": "Open Monitoring",
+        "command": "sftp.manageServer",
+        "title": "Manage Server",
         "category": "SFTP"
       },
       {
@@ -544,7 +554,7 @@
           "when": "sftp.enabled"
         },
         {
-          "command": "sftp.openMonitoring",
+          "command": "sftp.manageServer",
           "when": "sftp.enabled"
         },
         {
@@ -863,7 +873,7 @@
           "when": "view == remoteExplorer && viewItem == root"
         },
         {
-          "command": "sftp.openMonitoring",
+          "command": "sftp.manageServer",
           "group": "navigation@1",
           "when": "view == remoteExplorer && viewItem == root"
         },

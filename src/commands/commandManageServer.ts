@@ -1,22 +1,31 @@
 import * as vscode from 'vscode';
-import { COMMAND_OPEN_MONITORING } from '../constants';
+import { COMMAND_MANAGE_SERVER } from '../constants';
 import { checkCommand } from './abstract/createCommand';
 import { getAllFileService } from '../modules/serviceManager';
 import { ExplorerRoot } from '../modules/remoteExplorer';
-import { openMonitor } from '../modules/monitor';
+import { ensureSession, openInBrowser } from '../modules/serverManager';
+
+async function open(fileService: any, config: any): Promise<void> {
+  if (config.protocol && config.protocol !== 'sftp') {
+    // FTP has no exec channel, so there is nothing to manage.
+    vscode.window.showErrorMessage('Manage Server requires an SFTP (SSH) connection.');
+    return;
+  }
+  try {
+    const url = await ensureSession(fileService, config);
+    await openInBrowser(url);
+  } catch (error) {
+    vscode.window.showErrorMessage(`Manage Server: ${(error as Error).message}`);
+  }
+}
 
 export default checkCommand({
-  id: COMMAND_OPEN_MONITORING,
+  id: COMMAND_MANAGE_SERVER,
 
   async handleCommand(exploreItem?: ExplorerRoot) {
     if (exploreItem && exploreItem.explorerContext) {
       const { config, fileService } = exploreItem.explorerContext;
-      if (config.protocol && config.protocol !== 'sftp') {
-        // FTP has no exec channel, so there is no way to read /proc at all.
-        vscode.window.showErrorMessage('Monitoring requires an SFTP (SSH) connection.');
-        return;
-      }
-      await openMonitor(fileService, config);
+      await open(fileService, config);
       return;
     }
 
@@ -38,7 +47,7 @@ export default checkCommand({
     }, []);
 
     if (items.length <= 0) {
-      vscode.window.showInformationMessage('SFTP: no SFTP connection to monitor.');
+      vscode.window.showInformationMessage('SFTP: no SFTP connection to manage.');
       return;
     }
 
@@ -48,6 +57,6 @@ export default checkCommand({
     if (!picked) {
       return;
     }
-    await openMonitor(picked.fileService, picked.config);
+    await open(picked.fileService, picked.config);
   },
 });
