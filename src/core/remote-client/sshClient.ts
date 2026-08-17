@@ -380,6 +380,20 @@ export default class SSHClient extends RemoteClient {
     });
   }
 
+  // Like `exec`, but hands back the live channel instead of buffering until the
+  // command closes, so callers can read output incrementally and write to stdin
+  // while it runs. Used by the monitoring sampler loop.
+  execStream(cmd: string): Promise<any> {
+    return new Promise((resolve, reject) => {
+      this._client.exec(cmd, (err, stream) => {
+        if (err) {
+          return reject(err);
+        }
+        resolve(stream);
+      });
+    });
+  }
+
   // Open a forwarded TCP stream from the remote host to dstHost:dstPort over this
   // SSH connection (same primitive as _makeHopping). Used to tunnel DB traffic.
   openForwardStream(dstHost: string, dstPort: number): Promise<any> {
