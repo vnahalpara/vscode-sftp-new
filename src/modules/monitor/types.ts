@@ -51,6 +51,42 @@ export interface RawDisk {
   writeMs: number;
 }
 
+export interface RawMount {
+  device: string;
+  // Basename of `device`, which is how /proc/diskstats names it (vda1, nvme0n1p2).
+  deviceName: string;
+  fstype: string;
+  mount: string;
+  totalBytes: number;
+  usedBytes: number;
+}
+
+export interface RawPsRow {
+  pid: number;
+  user: string;
+  threads: number;
+  args: string;
+}
+
+export interface RawAddr {
+  name: string;
+  address: string;
+}
+
+export interface HostFacts {
+  hostname: string;
+  prettyName: string;
+  distroId: string;
+  cpuModel: string;
+  arch: string;
+  cores: number;
+  pageSize: number;
+  // The server's own clock at open, so nothing downstream depends on the
+  // workstation's clock being correct.
+  serverEpochMs: number;
+  linux: boolean;
+}
+
 export interface RawProc {
   pid: number;
   comm: string;

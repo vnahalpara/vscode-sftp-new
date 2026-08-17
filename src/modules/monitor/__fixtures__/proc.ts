@@ -136,3 +136,44 @@ export const PID_STATS_NEXT = `==> /proc/1/stat <==
 ==> /proc/209906/stat <==
 209906 (impostor) S 1 209906 209906 0 -1 4194304 5000 0 0 0 5000 5000 0 0 20 0 4 0 999999 700000000 4096 18446744073709551615 1 1 0 0 0 0 0 0 4096 0 0 0 0 17 5 0 0 0 0 0 0 0 0 0 0 0 0 0
 `;
+
+// `df -PT -B1`. -P forces one line per filesystem, -B1 reports bytes. The
+// third row's mount point deliberately contains a space.
+export const DF = `Filesystem     Type     1B-blocks        Used   Available Capacity Mounted on
+/dev/vda1      ext4   111669149696 25554579456 80530636800      25% /
+tmpfs          tmpfs    4160000000           0  4160000000       0% /dev/shm
+/dev/vdb1      xfs    536870912000 10737418240 526133493760       2% /mnt/my data
+overlay        overlay 111669149696 25554579456 80530636800      25% /var/lib/docker/overlay2/abc/merged
+`;
+
+// `ps -eo pid=,user=,nlwp=,args=` — no header, args last since it has spaces.
+export const PS = `    1 root         1 /sbin/init
+  831 mysql        9 /usr/sbin/mariadbd
+209906 meilise+    23 /usr/local/bin/meilisearch --http-addr 127.0.0.1:7700
+`;
+
+export const IP_ADDR = `1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever
+2: eth0    inet 66.154.126.186/24 brd 66.154.126.255 scope global eth0\\       valid_lft forever preferred_lft forever
+`;
+
+export const OS_RELEASE = `PRETTY_NAME="Ubuntu 22.04.5 LTS (Jammy Jellyfish)"
+NAME="Ubuntu"
+VERSION_ID="22.04"
+ID=ubuntu
+ID_LIKE=debian
+`;
+
+export const CPUINFO = `processor\t: 0
+vendor_id\t: GenuineIntel
+model name\t: Intel(R) Xeon(R) CPU E5-2650 v2 @ 2.60GHz
+cpu MHz\t\t: 2599.998
+processor\t: 1
+model name\t: Intel(R) Xeon(R) CPU E5-2650 v2 @ 2.60GHz
+`;
+
+// An ARM host, where /proc/cpuinfo carries no "model name" field at all.
+export const CPUINFO_ARM = `processor\t: 0
+BogoMIPS\t: 50.00
+Features\t: fp asimd evtstrm
+CPU implementer\t: 0x41
+`;

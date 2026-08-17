@@ -1,4 +1,15 @@
-import { RawCpu, RawCpuLine, RawMem, RawLoad, RawNetIf, RawDisk, RawProc } from './types';
+import {
+  RawCpu,
+  RawCpuLine,
+  RawMem,
+  RawLoad,
+  RawNetIf,
+  RawDisk,
+  RawProc,
+  RawMount,
+  RawPsRow,
+  RawAddr,
+} from './types';
 
 function num(s: string | undefined): number {
   const n = Number(s);
@@ -128,6 +139,88 @@ export function parseDiskstats(text: string): RawDisk[] {
     });
   });
   return out;
+}
+
+// Filesystems that are memory, an image, or a container overlay rather than
+// storage an operator can run out of.
+const PSEUDO_FS = [
+  'tmpfs',
+  'devtmpfs',
+  'squashfs',
+  'overlay',
+  'proc',
+  'sysfs',
+  'ramfs',
+  'devpts',
+  'cgroup',
+  'cgroup2',
+  'autofs',
+  'efivarfs',
+];
+
+export function parseDf(text: string): RawMount[] {
+  const out: RawMount[] = [];
+  text.split('\n').forEach((line, i) => {
+    if (i === 0 || !line.trim()) {
+      return;
+    }
+    // Six fixed columns, then the mount point — which may contain spaces, so it
+    // is everything remaining rather than a seventh whitespace-delimited field.
+    const m = /^(\S+)\s+(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
+    if (!m) {
+      return;
+    }
+    const fstype = m[2];
+    if (PSEUDO_FS.indexOf(fstype) !== -1) {
+      return;
+    }
+    const device = m[1];
+    out.push({
+      device,
+      deviceName: device.slice(device.lastIndexOf('/') + 1),
+      fstype,
+      totalBytes: num(m[3]),
+      usedBytes: num(m[4]),
+      mount: m[7].trim(),
+    });
+  });
+  return out;
+}
+
+export function parsePs(text: string): RawPsRow[] {
+  const out: RawPsRow[] = [];
+  text.split('\n').forEach(line => {
+    const m = /^\s*(\d+)\s+(\S+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (!m) {
+      return;
+    }
+    out.push({ pid: num(m[1]), user: m[2], threads: num(m[3]), args: m[4] });
+  });
+  return out;
+}
+
+export function parseAddr(text: string): RawAddr[] {
+  const out: RawAddr[] = [];
+  text.split('\n').forEach(line => {
+    const m = /^\d+:\s+(\S+)\s+inet\s+(\S+)/.exec(line);
+    if (m) {
+      out.push({ name: m[1], address: m[2] });
+    }
+  });
+  return out;
+}
+
+export function parseOsRelease(text: string): { prettyName: string; id: string } {
+  const get = (key: string) => {
+    const m = new RegExp('^' + key + '=(.*)$', 'm').exec(text);
+    return m ? m[1].replace(/^"|"$/g, '') : '';
+  };
+  return { prettyName: get('PRETTY_NAME'), id: get('ID') };
+}
+
+export function parseCpuModel(text: string): string {
+  const m = /^model name\s*:\s*(.+)$/m.exec(text);
+  return m ? m[1].trim() : '';
 }
 
 export function parsePidStats(text: string): RawProc[] {
