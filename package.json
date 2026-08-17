@@ -80,6 +80,21 @@
           "default": true,
           "description": "Show each file's size (B/KB/MB/GB) on the right side of its row in the Remote Explorer"
         },
+        "sftp.monitor.interval": {
+          "type": "number",
+          "default": 2000,
+          "description": "Monitoring dashboard refresh interval in ms for CPU, memory, load, network and processes."
+        },
+        "sftp.monitor.slowInterval": {
+          "type": "number",
+          "default": 10000,
+          "description": "Monitoring dashboard refresh interval in ms for disk usage and process metadata (user, args, threads)."
+        },
+        "sftp.monitor.historyMinutes": {
+          "type": "number",
+          "default": 5,
+          "description": "How many minutes of load history the monitoring dashboard's chart keeps."
+        },
         "sftp.db.defaultLimit": {
           "type": "number",
           "default": 500,
@@ -144,6 +159,11 @@
       {
         "command": "sftp.openConnectInTerminal",
         "title": "Open SSH in Terminal",
+        "category": "SFTP"
+      },
+      {
+        "command": "sftp.openMonitoring",
+        "title": "Open Monitoring",
         "category": "SFTP"
       },
       {
@@ -524,6 +544,10 @@
           "when": "sftp.enabled"
         },
         {
+          "command": "sftp.openMonitoring",
+          "when": "sftp.enabled"
+        },
+        {
           "command": "sftp.cancelAllTransfer",
           "when": "sftp.enabled"
         },
@@ -835,7 +859,12 @@
         },
         {
           "command": "sftp.openConnectInTerminal",
-          "group": "navigation",
+          "group": "navigation@0",
+          "when": "view == remoteExplorer && viewItem == root"
+        },
+        {
+          "command": "sftp.openMonitoring",
+          "group": "navigation@1",
           "when": "view == remoteExplorer && viewItem == root"
         },
         {
