@@ -70,10 +70,44 @@ the notes below.
 | SFTP/FTP sync (upload / download / diff / sync) | ✅ | ✅ |
 | Remote Explorer, Go To Folder | ✅ | ✅ |
 | Database: browse, data view (paging/sort/filter), search, SQL runner, cell/row edit, Find Table | ✅ | ✅ |
+| Live monitoring dashboard (**Linux servers only**) | ✅ | ✅ |
 | VPN tunnel for SFTP **and** database traffic | ✅ | ✅ |
 | Open SSH in Terminal (plain) | ✅ | ✅ |
 | Open SSH in Terminal **through the VPN** | ⚠️ needs `nc` (see note) | ✅ |
 | `ssh_prefix` using `sshpass` | ⚠️ `sshpass` is Unix-only | ✅ |
+
+The Windows and macOS columns above describe your **workstation**. The monitoring dashboard reads
+`/proc` on the server, so the **server** must be Linux regardless of which one you run VS Code on.
+
+## Monitoring
+
+Right-click a connection root in the Remote Explorer → **Open Monitoring** (or run
+`SFTP: Open Monitoring` from the command palette) to open a live dashboard for that server in a new
+tab. It shows:
+
+- CPU: aggregate and per-core usage, plus the user / system / nice / iowait / steal split
+- Load: 1m / 5m / 15m chart over the last 5 minutes, with a hover readout
+- Memory: used / cached / free donut and a swap meter
+- Network: per-interface throughput and totals since boot
+- Storage: per-mount usage plus read/write throughput, latency and IOPS
+- Processes: sortable, filterable table with **instantaneous** CPU (not `ps`'s lifetime average)
+
+Nothing is installed on the server. Everything is collected over the connection's existing SSH
+channel: one long-lived channel streams `/proc` reads, paced from the editor side so closing the tab
+ends the remote loop rather than orphaning it, plus a slower `df`/`ps` batch. VPN-routed connections
+are monitored through the tunnel automatically, since they share that same channel.
+
+Polling continues while the tab is hidden, so the load chart has unbroken history when you switch
+back. Process CPU is percent of one core and is deliberately not capped at 100 — a multi-threaded
+runaway reads above it.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `sftp.monitor.interval` | `2000` | Refresh interval (ms) for CPU, memory, load, network, processes |
+| `sftp.monitor.slowInterval` | `10000` | Refresh interval (ms) for disk usage and process metadata |
+| `sftp.monitor.historyMinutes` | `5` | Minutes of load history kept by the chart |
+
+Requires an SFTP (SSH) connection — FTP has no exec channel, so monitoring is unavailable there.
 
 ### Install the .vsix (both platforms)
 - **UI:** Extensions panel → `…` menu → **Install from VSIX…** → pick `vaibhav-sftp-plus-<version>.vsix` → reload.
