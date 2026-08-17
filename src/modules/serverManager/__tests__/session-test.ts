@@ -279,4 +279,55 @@ describe('ManagedSession', () => {
     expect(sink.ended).toBe(true);
     expect(h.session.subscriberCount()).toBe(0);
   });
+
+  it('arms the grace timer when the last subscriber leaves while still connecting', async () => {
+    const h = harness();
+    const off = h.session.subscribe(new FakeSink());
+    off();                        // before readFacts has resolved
+    await h.session.whenSettled();
+
+    h.runTimers();
+
+    expect(h.collector.stopped).toBe(1);
+    expect(h.session.isRunning()).toBe(false);
+  });
+
+  it('clears the collector when the channel closes, so a later subscriber reconnects', async () => {
+    const h = harness();
+    h.session.subscribe(new FakeSink());
+    await h.session.whenSettled();
+
+    h.collector.onClosed();
+    expect(h.session.isRunning()).toBe(false);
+
+    h.session.subscribe(new FakeSink());
+    await h.session.whenSettled();
+    expect(h.collector.started).toBe(2);
+  });
+
+  it('reconnects rather than sampling a dead collector on refresh', async () => {
+    const h = harness();
+    h.session.subscribe(new FakeSink());
+    await h.session.whenSettled();
+    h.collector.onClosed();
+
+    await h.session.refresh();
+
+    expect(h.factsCalls()).toBe(2);
+    expect(h.collector.slowCalls).toBe(0);
+  });
+
+  it('returns to online once samples resume after a transient error', async () => {
+    const h = harness();
+    h.session.subscribe(new FakeSink());
+    await h.session.whenSettled();
+
+    h.collector.onError(new Error('one bad sample'));
+    expect(h.session.state().status).toBe('offline');
+
+    h.collector.onSnapshot({ at: 7 } as any);
+
+    expect(h.session.state().status).toBe('online');
+    expect(h.session.isRunning()).toBe(true);
+  });
 });

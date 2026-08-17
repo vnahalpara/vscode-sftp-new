@@ -175,17 +175,26 @@ export class ManagedSession {
     collector.onSnapshot = snapshot => {
       this._lastSnapshot = snapshot;
       this._lastSeen = this._deps.now();
+      // A snapshot means the channel is alive. Only transition (and emit a
+      // `state` frame) when we were not already online — an error can be
+      // transient, and a fresh `state` frame on every tick would be noise.
+      if (this._status !== 'online') {
+        this._setStatus('online', null);
+      }
       this.sse.send('tick', { snapshot, history: collector.history().points() });
     };
     collector.onSlow = slow => {
       this._lastSlow = slow;
       this.sse.send('slow', slow);
     };
+    // A transient error (one bad sample) does not mean the channel is gone;
+    // only `onClosed` does. Leaving the collector running lets onSnapshot
+    // recover status to `online` the moment samples resume.
     collector.onError = error => {
       this._setStatus('offline', error.message);
     };
     collector.onClosed = () => {
-      this._setStatus('offline', this._error || 'The connection closed.');
+      this._collectorDied(this._error || 'The connection closed.');
     };
 
     this._collector = collector;
@@ -202,6 +211,13 @@ export class ManagedSession {
       return;
     }
     this._setStatus('online', null);
+    // A subscriber may have unsubscribed while readFacts()/start() were still
+    // in flight. _scheduleStop() no-ops while _collector is null, so that
+    // unsubscribe would otherwise be lost and the collector would run forever
+    // with nobody listening. Check again now that _collector is set.
+    if (this.sse.count() === 0) {
+      this._scheduleStop();
+    }
   }
 
   private _scheduleStop(): void {
@@ -215,6 +231,23 @@ export class ManagedSession {
         this._stopCollector();
       }
     }, this._opts.graceMs);
+  }
+
+  // A dead collector must not be left in _collector: isRunning() would lie,
+  // subscribe() would refuse to reconnect, and refresh() would call slowNow()
+  // on a corpse. Null the field first so a re-entrant callback finds nothing
+  // left to do.
+  private _collectorDied(message: string): void {
+    const collector = this._collector;
+    this._collector = null;
+    if (collector) {
+      try {
+        collector.stop();
+      } catch (error) {
+        // Already gone is exactly what we wanted.
+      }
+    }
+    this._setStatus('offline', message);
   }
 
   private _stopCollector(): void {
