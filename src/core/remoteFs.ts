@@ -141,3 +141,23 @@ export function removeRemoteFs(option) {
     delete fsTable[identity];
   }
 }
+
+// Force a fresh connection for an already-connected server. Tears the
+// (possibly silently-dead) cached connection down completely and builds a brand
+// new one, then reconnects eagerly so the returned promise reflects the new
+// connection's success/failure. Returns null when there is no existing
+// connection for this option, so we never spin up an idle server here.
+//
+// We rebuild via removeRemoteFs + createRemoteIfNoneExist (rather than
+// invalidating and reusing the cached instance) so that a delayed `close` event
+// from the old socket can't fire the old instance's disconnect handler against
+// the freshly created connection.
+export function reconnectRemoteFs(option): Promise<FileSystem> | null {
+  const identity = hashOption(option);
+  if (fsTable[identity] === undefined) {
+    return null;
+  }
+
+  removeRemoteFs(option);
+  return createRemoteIfNoneExist(option);
+}
