@@ -43,6 +43,21 @@ describe('samplerScript', () => {
   it('uses no gawk-only awk functions', () => {
     expect(GAWK_ONLY.test(samplerScript(300))).toBe(false);
   });
+
+  it('falls back to whole seconds where date has no %3N (busybox)', () => {
+    const s = samplerScript(300);
+    expect(s).toContain('date +%s%3N');
+    expect(s).toContain('*[!0-9]*');
+    expect(s).toContain('$(($(date +%s)*1000))');
+  });
+
+  it('contains no unexpanded template interpolation', () => {
+    // A stray ${...} would mean a TypeScript interpolation leaked into the
+    // shell script instead of being substituted.
+    ['${', '[object', 'undefined', 'NaN'].forEach(bad =>
+      expect(samplerScript(300).indexOf(bad)).toBe(-1)
+    );
+  });
 });
 
 describe('slowBatchCommand', () => {

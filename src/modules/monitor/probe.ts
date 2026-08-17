@@ -9,7 +9,15 @@ import { TICK, END } from './frame';
 export function samplerScript(idleTimeoutSec: number): string {
   return [
     `while read -r -t ${idleTimeoutSec} _; do`,
-    `  echo "${TICK} $(date +%s%3N)"`,
+    // `%3N` is GNU date. busybox date (Alpine and many containers) does not
+    // support it and emits a non-numeric string, which would parse as 0 and
+    // leave every rate uncomputable forever. Fall back to whole seconds.
+    // Known limitation of the fallback: its granularity is 1s, so on such a
+    // host two ticks at the 1s interval can share a timestamp and the second
+    // is dropped as non-monotonic. The 2s default is unaffected.
+    `  ms=$(date +%s%3N 2>/dev/null)`,
+    `  case "$ms" in ''|*[!0-9]*) ms=$(($(date +%s)*1000));; esac`,
+    `  echo "${TICK} $ms"`,
     `  echo "--stat"; cat /proc/stat`,
     `  echo "--mem"; cat /proc/meminfo`,
     `  echo "--load"; cat /proc/loadavg`,
