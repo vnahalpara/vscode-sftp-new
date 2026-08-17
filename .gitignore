@@ -44,3 +44,6 @@ bower_components
 .bower-registry
 .bower-tmp
 Surfshark_Config/us-nyc-st004.wireguard.conf
+
+### Web UI build output ###
+media/webui
