@@ -1,7 +1,23 @@
 import * as http from 'http';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
 import { tokenFrom, safeJoin, contentType, createServer, listen, Handler } from '../httpServer';
 import { Route } from '../router';
+
+// The @types/node version pinned here predates fs.rmSync and the recursive
+// option on fs.rmdirSync, so temp-dir cleanup needs a manual walk.
+function removeDirRecursive(dir: string): void {
+  for (const entry of fs.readdirSync(dir)) {
+    const full = path.join(dir, entry);
+    if (fs.statSync(full).isDirectory()) {
+      removeDirRecursive(full);
+    } else {
+      fs.unlinkSync(full);
+    }
+  }
+  fs.rmdirSync(dir);
+}
 
 describe('tokenFrom', () => {
   it('prefers the query parameter', () => {
@@ -167,5 +183,87 @@ describe('createServer', () => {
     const res = await get('/some/spa/route');
     expect(res.status).toBe(200);
     expect(res.body).toContain('bootstrap');
+  });
+});
+
+describe('createServer static file serving', () => {
+  // No test above ever serves a real file — root is always a path that does
+  // not exist, so the whole static-file branch (including its error
+  // handling) had zero positive coverage. This block points root at a real
+  // temp directory with real files on disk.
+  let server: http.Server;
+  let port: number;
+  let root: string;
+
+  // root ignores file permission bits, so the permission-based error test
+  // below is meaningless (and would fail to trip) when running as root.
+  const canTestPerms = !(process.getuid && process.getuid() === 0);
+
+  beforeAll(async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'sftp-webui-'));
+    fs.writeFileSync(path.join(root, 'index.html'), '<!doctype html><title>real index</title>');
+    fs.mkdirSync(path.join(root, 'assets'));
+    fs.writeFileSync(path.join(root, 'assets', 'app.js'), 'console.log("app");');
+
+    server = createServer({
+      root,
+      routes: [],
+      hasToken: () => false,
+      fallbackHtml: () => '<!doctype html><title>bootstrap</title>',
+    });
+    port = await listen(server);
+  });
+
+  afterAll(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    removeDirRecursive(root);
+  });
+
+  function get(pathname: string): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = http.get({ host: '127.0.0.1', port, path: pathname }, res => {
+        let body = '';
+        res.on('data', chunk => (body += chunk));
+        res.on('end', () => resolve({ status: res.statusCode || 0, headers: res.headers, body }));
+      });
+      req.on('error', reject);
+    });
+  }
+
+  it('serves the real index.html at the root', async () => {
+    const res = await get('/');
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('real index');
+    expect(res.headers['content-type']).toBe('text/html; charset=utf-8');
+  });
+
+  it('serves a nested asset with the right content-type', async () => {
+    const res = await get('/assets/app.js');
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toBe('text/javascript; charset=utf-8');
+  });
+
+  it('falls through to the shell page for a missing file, rather than 404ing', async () => {
+    const res = await get('/nope/missing.js');
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('bootstrap');
+  });
+
+  (canTestPerms ? it : it.skip)('turns a read failure into a 500 and keeps serving afterwards', async () => {
+    const unreadable = path.join(root, 'unreadable.css');
+    fs.writeFileSync(unreadable, 'body {}');
+    fs.chmodSync(unreadable, 0o000);
+    try {
+      const res = await get('/unreadable.css');
+      expect(res.status).toBe(500);
+
+      // The important part: an open failure must not have taken the server
+      // down. A follow-up request still gets served normally.
+      const again = await get('/');
+      expect(again.status).toBe(200);
+      expect(again.body).toContain('real index');
+    } finally {
+      fs.chmodSync(unreadable, 0o644);
+    }
   });
 });

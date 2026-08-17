@@ -145,8 +145,21 @@ function fail(ctx: Ctx, error: Error): void {
 function serveStatic(deps: ServerDeps, ctx: Ctx, pathname: string): void {
   const target = safeJoin(deps.root, pathname === '/' ? '/index.html' : pathname);
   if (target && fs.existsSync(target) && fs.statSync(target).isFile()) {
-    ctx.res.writeHead(200, { 'content-type': contentType(target) });
-    fs.createReadStream(target).pipe(ctx.res);
+    const stream = fs.createReadStream(target);
+    // pipe() does not forward the source's 'error' event, and an unhandled
+    // 'error' on a stream throws synchronously — which in an extension host
+    // means taking the whole extension process down. The file can vanish or
+    // lose read permission between the statSync above and the open below.
+    stream.on('error', error => {
+      stream.destroy();
+      fail(ctx, error as Error);
+    });
+    // Hold the header back until the file is actually open, so a failure to
+    // open is answered with a real 500 rather than a truncated 200.
+    stream.on('open', () => {
+      ctx.res.writeHead(200, { 'content-type': contentType(target) });
+      stream.pipe(ctx.res);
+    });
     return;
   }
   // No build on disk, or a client-side route: hand back the shell page.
