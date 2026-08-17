@@ -1,3 +1,9 @@
+## 1.22.1 - 2026-08-18
+* Fix : Manage Server showed a green **online** badge for a connection whose sampler channel failed to open. `Collector.start()` reports that failure through a callback instead of throwing, so the session claimed "online" over the top of the "offline" it had just set. The status is now only promoted when nothing has already marked the connection dead.
+* Fix : **Reconnect**, **Export Database** and **Export Table** were contributed in `package.json` but their handler files had never been committed, so all three appeared in the command palette and failed with "command not found". The handlers now ship.
+* Fix : a clean checkout of the repository did not compile — `fileService.ts` had imported `reconnectRemoteFs` since the transfer-progress work, but the function itself was only ever present in an uncommitted working tree.
+* New Feature : database and table **export** over the existing SSH channel (mysqldump on the server, gzipped, downloaded over SFTP), plus per-row delete and a custom SQL runner in the data browser. Both confirm before writing, and the SQL runner warns separately when an `UPDATE`/`DELETE` carries no `WHERE`.
+
 ## 1.22.0 - 2026-08-18
 * New Feature : **Manage Server** — right-click a connection root in the Remote Explorer (directly below *Open SSH in Terminal*) to open a live server-management page in Chrome. VS Code starts a token-authenticated HTTP server bound to `127.0.0.1` only, and streams that host's metrics over Server-Sent Events using the connection's existing SSH channel. No agent is installed on the server.
 * Removed : the in-editor **Open Monitoring** webview, replaced by Manage Server. The `sftp.monitor.*` settings are replaced one-for-one by `sftp.serverManager.*` (`browser`, `interval`, `slowInterval`, `historyMinutes`).
