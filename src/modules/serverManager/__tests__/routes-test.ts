@@ -2,13 +2,17 @@ import { buildRoutes } from '../routes';
 import { matchRoute, Route } from '../router';
 import { Ctx, Handler } from '../httpServer';
 
-function fakeSession(overrides: any = {}) {
+// Distinctive on purpose: a three-letter needle like 'tok' could pass even
+// against a leaky implementation, which would make the assertion worthless.
+const SECRET_TOKEN = 'TOKEN-SHOULD-NEVER-APPEAR-8f3a9c2b';
+
+function fakeSession(overrides: any = {}, token: string = 'tok') {
   const written: string[] = [];
   return {
     written,
     session: {
       id: 'abc',
-      token: 'tok',
+      token,
       state: () => ({
         id: 'abc',
         profile: { id: 'abc', name: 'prod', host: '10.0.0.5', port: 22, username: 'deploy' },
@@ -110,14 +114,21 @@ describe('buildRoutes', () => {
     });
   });
 
-  it('never exposes the token in the session payload', async () => {
-    const { session } = fakeSession();
-    store.set('tok', session);
-    const { ctx, res } = fakeCtx('tok');
+  it('never exposes the token in any response body', async () => {
+    const { session } = fakeSession({}, SECRET_TOKEN);
+    store.set(SECRET_TOKEN, session);
 
-    await find(routes, 'GET', '/api/session')(ctx);
+    const sessionCtx = fakeCtx(SECRET_TOKEN);
+    await find(routes, 'GET', '/api/session')(sessionCtx.ctx);
+    expect(sessionCtx.res.body).not.toContain(SECRET_TOKEN);
 
-    expect(res.body).not.toContain('tok');
+    const hostCtx = fakeCtx(SECRET_TOKEN);
+    await find(routes, 'GET', '/api/host')(hostCtx.ctx);
+    expect(hostCtx.res.body).not.toContain(SECRET_TOKEN);
+
+    const activityCtx = fakeCtx(SECRET_TOKEN);
+    await find(routes, 'GET', '/api/activity')(activityCtx.ctx);
+    expect(activityCtx.res.body).not.toContain(SECRET_TOKEN);
   });
 
   it('answers 404 when the token maps to no session', async () => {
@@ -213,5 +224,34 @@ describe('buildRoutes', () => {
 
     expect(unsubscribe).toHaveBeenCalled();
     expect(cancel).toHaveBeenCalledWith(7);
+  });
+
+  it('tolerates the client close event firing twice', async () => {
+    const unsubscribe = jest.fn();
+    const { session } = fakeSession({ subscribe: jest.fn(() => unsubscribe) });
+    store.set('tok', session);
+
+    const cancel = jest.fn();
+    routes = buildRoutes({
+      sessions: { get: token => store.get(token) },
+      pingMs: 25000,
+      schedule: () => 7,
+      cancel,
+    });
+
+    let closeHandler = () => undefined;
+    const { ctx } = fakeCtx('tok');
+    (ctx.req as any).on = (event: string, handler: any) => {
+      if (event === 'close') {
+        closeHandler = handler;
+      }
+    };
+
+    await find(routes, 'GET', '/api/stream')(ctx);
+    closeHandler();
+    closeHandler();
+
+    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(unsubscribe).toHaveBeenCalledTimes(2);
   });
 });
