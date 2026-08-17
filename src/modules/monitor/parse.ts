@@ -1,4 +1,4 @@
-import { RawCpu, RawCpuLine, RawMem, RawLoad } from './types';
+import { RawCpu, RawCpuLine, RawMem, RawLoad, RawNetIf, RawDisk, RawProc } from './types';
 
 function num(s: string | undefined): number {
   const n = Number(s);
@@ -82,4 +82,84 @@ export function parseLoadavg(text: string): RawLoad {
 
 export function parseUptime(text: string): number {
   return num(text.trim().split(/\s+/)[0]);
+}
+
+export function parseNetDev(text: string): RawNetIf[] {
+  const out: RawNetIf[] = [];
+  text.split('\n').forEach(line => {
+    const colon = line.indexOf(':');
+    if (colon === -1) {
+      return;
+    }
+    const name = line.slice(0, colon).trim();
+    // A real interface name contains no whitespace or pipe, which is what
+    // separates it from a header row that happens to hold a colon.
+    if (!name || /[\s|]/.test(name)) {
+      return;
+    }
+    const f = line
+      .slice(colon + 1)
+      .trim()
+      .split(/\s+/);
+    if (f.length < 9) {
+      return;
+    }
+    out.push({ name, rxBytes: num(f[0]), txBytes: num(f[8]) });
+  });
+  return out;
+}
+
+export function parseDiskstats(text: string): RawDisk[] {
+  const out: RawDisk[] = [];
+  text.split('\n').forEach(line => {
+    const f = line.trim().split(/\s+/);
+    // major, minor, name, plus at least the 11 legacy stat fields.
+    if (f.length < 14) {
+      return;
+    }
+    out.push({
+      name: f[2],
+      reads: num(f[3]),
+      readBytes: num(f[5]) * 512,
+      readMs: num(f[6]),
+      writes: num(f[7]),
+      writeBytes: num(f[9]) * 512,
+      writeMs: num(f[10]),
+    });
+  });
+  return out;
+}
+
+export function parsePidStats(text: string): RawProc[] {
+  const out: RawProc[] = [];
+  text.split('\n').forEach(line => {
+    const open = line.indexOf('(');
+    // comm may itself contain '(' and ')', so the closing paren is the LAST one.
+    const close = line.lastIndexOf(')');
+    if (open === -1 || close === -1 || close < open) {
+      return;
+    }
+    const pid = num(line.slice(0, open).trim());
+    if (!pid) {
+      return;
+    }
+    // Fields after comm are 3..52, so index 0 here is field 3 (state).
+    const rest = line
+      .slice(close + 2)
+      .trim()
+      .split(/\s+/);
+    if (rest.length < 22) {
+      return;
+    }
+    out.push({
+      pid,
+      comm: line.slice(open + 1, close),
+      utime: num(rest[11]),
+      stime: num(rest[12]),
+      threads: num(rest[17]),
+      startTime: num(rest[19]),
+      rssPages: num(rest[21]),
+    });
+  });
+  return out;
 }

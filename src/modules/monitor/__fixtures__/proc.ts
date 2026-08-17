@@ -79,3 +79,60 @@ export const LOADAVG = `0.07 0.06 0.01 2/456 123456
 
 export const UPTIME = `1234567.89 9876543.21
 `;
+
+// Note the ens5 row: a large counter runs straight into the colon with no
+// space, which is why the parser splits on the first colon and not on
+// whitespace.
+export const NET_DEV = `Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 1234567    1234    0    0    0     0          0         0  1234567    1234    0    0    0     0       0          0
+  eth0: 4500000000 3210000    0    0    0     0          0         0 1845000000 2100000    0    0    0     0       0          0
+ ens5:9999999999 1111    0    0    0     0          0         0 8888888888    2222    0    0    0     0       0          0
+`;
+
+// Same interfaces 2s later: eth0 received 2000 bytes and sent 1696 bytes.
+export const NET_DEV_NEXT = `Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 1234567    1234    0    0    0     0          0         0  1234567    1234    0    0    0     0       0          0
+  eth0: 4500002000 3210020    0    0    0     0          0         0 1845001696 2100010    0    0    0     0       0          0
+ ens5:9999999999 1111    0    0    0     0          0         0 8888888888    2222    0    0    0     0       0          0
+`;
+
+// major minor name reads merged sectors_read ms_read writes merged
+// sectors_written ms_write in_flight io_ms weighted_ms
+export const DISKSTATS = ` 252       0 vda 500000 1000 20000000 400000 800000 2000 120000000 900000 0 300000 1300000
+ 252       1 vda1 499000 900 19900000 399000 799000 1900 119000000 899000 0 299000 1290000
+   7       0 loop0 10 0 80 5 0 0 0 0 0 5 5
+`;
+
+// 2s later on vda1: 100 more reads covering 1600 sectors in 20ms, and 50 more
+// writes covering 800 sectors in 10ms. loop0 is idle throughout.
+export const DISKSTATS_NEXT = ` 252       0 vda 500100 1000 20001600 400020 800050 2000 120000800 900010 0 300030 1300030
+ 252       1 vda1 499100 900 19901600 399020 799050 1900 119000800 899010 0 299030 1290030
+   7       0 loop0 10 0 80 5 0 0 0 0 0 5 5
+`;
+
+// Output shape of `head -1 /proc/[0-9]*/stat`. The third entry's comm contains
+// both spaces and parentheses — the classic /proc/pid/stat parser bug.
+export const PID_STATS = `==> /proc/1/stat <==
+1 (systemd) S 0 1 1 0 -1 4194560 20000 100000 50 100 300 900 200 400 20 0 1 0 5 170000000 3200 18446744073709551615 1 1 0 0 0 0 0 671173123 4096 0 0 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0
+
+==> /proc/831/stat <==
+831 (mariadbd) S 1 831 831 0 -1 4194304 900000 0 0 0 45000 12000 0 0 20 0 9 0 900 3400000000 25100 18446744073709551615 1 1 0 0 0 0 0 0 4096 0 0 0 0 17 1 0 0 0 0 0 0 0 0 0 0 0 0 0
+
+==> /proc/209906/stat <==
+209906 (meili (search) x) S 1 209906 209906 0 -1 4194304 5000 0 0 0 600 300 0 0 20 0 23 0 12000 700000000 12288 18446744073709551615 1 1 0 0 0 0 0 0 4096 0 0 0 0 17 5 0 0 0 0 0 0 0 0 0 0 0 0 0
+`;
+
+// 2s later: pid 1 idle; mariadbd burned 100 utime + 20 stime jiffies; pid
+// 209906 was replaced by a different process reusing the same pid, which shows
+// up as a different starttime (999999 rather than 12000).
+export const PID_STATS_NEXT = `==> /proc/1/stat <==
+1 (systemd) S 0 1 1 0 -1 4194560 20000 100000 50 100 300 900 200 400 20 0 1 0 5 170000000 3200 18446744073709551615 1 1 0 0 0 0 0 671173123 4096 0 0 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0
+
+==> /proc/831/stat <==
+831 (mariadbd) S 1 831 831 0 -1 4194304 900000 0 0 0 45100 12020 0 0 20 0 9 0 900 3400000000 25100 18446744073709551615 1 1 0 0 0 0 0 0 4096 0 0 0 0 17 1 0 0 0 0 0 0 0 0 0 0 0 0 0
+
+==> /proc/209906/stat <==
+209906 (impostor) S 1 209906 209906 0 -1 4194304 5000 0 0 0 5000 5000 0 0 20 0 4 0 999999 700000000 4096 18446744073709551615 1 1 0 0 0 0 0 0 4096 0 0 0 0 17 5 0 0 0 0 0 0 0 0 0 0 0 0 0
+`;
