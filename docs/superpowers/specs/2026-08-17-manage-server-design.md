@@ -103,9 +103,14 @@ A **session** is one profile being managed. It is keyed by
 with same-named profiles do not collide.
 
 - The HTTP server is a singleton, started lazily on the first Manage Server invocation.
+- Each session gets its own random 32-byte token, and **the token is what identifies the session**
+  on every request. The opening URL is `http://127.0.0.1:<port>/?t=<token>` — there is no host id
+  in the path, so one window can never request another window's host.
 - Invoking Manage Server on a second profile creates a **second session** and opens a second Chrome
-  window at `/#/host/<id>`. The first keeps running. Each window's sidebar shows only its own
+  window with its own token. The first keeps running. Each window's sidebar shows only its own
   profile, which is exactly the requested behaviour and needs no special-casing.
+- Invoking it twice on the *same* profile reuses the existing session and token rather than
+  double-sampling the host.
 - A session owns one `Collector`. It starts when a browser tab connects to that session's SSE
   stream and stops after a 30 s grace period once the last tab for it disconnects — so a page
   reload does not tear down the SSH channel.
@@ -142,8 +147,8 @@ over all SFTP services when invoked from the palette with no node. Non-SFTP conf
 front with a message naming the reason — FTP has no exec channel.
 
 ```ts
-const session = await serverManager.ensureSession(context, fileService, config);
-await serverManager.openInBrowser(session.url);
+const url = await serverManager.ensureSession(fileService, config);
+await serverManager.openInBrowser(url);
 ```
 
 `package.json` — the new command takes the slot `sftp.openMonitoring` occupies today, so it renders
@@ -317,6 +322,9 @@ that can reach them needs care:
 - **Per-session random 32-byte token.** Passed once as `?t=` on the opening URL, then held in
   `sessionStorage` and sent on every API call and WebSocket upgrade. Port plus token together
   defeat "any local process can curl your API".
+- **Auth applies to `/api/*` and `/ws/*` only.** The shell page and its assets are not secret — the
+  data behind them is — and requiring a token for asset requests would break every `<script src>`
+  the UI build emits.
 - **The API never returns `password`, `ssh_prefix`, `git.password`, or `database[].password`.**
   Redaction happens in `registry.ts` at the boundary, not in the UI.
 - **Every privileged action is logged** to the Activity ring and the SFTP output channel.
