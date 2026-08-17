@@ -42,7 +42,14 @@ export function matchRoute<H>(
     for (let i = 0; i < have.length; i++) {
       const declared = have[i];
       if (declared.charAt(0) === ':') {
-        params[declared.slice(1)] = decodeURIComponent(want[i]);
+        // A decode failure means the caller sent something that cannot be a real
+        // parameter value, so this route does not match—return null.
+        try {
+          params[declared.slice(1)] = decodeURIComponent(want[i]);
+        } catch {
+          matched = false;
+          break;
+        }
       } else if (declared !== want[i]) {
         matched = false;
         break;

@@ -53,4 +53,9 @@ describe('matchRoute', () => {
     const m = matchRoute(routes, 'GET', '/api/host/refresh');
     expect(m && m.handler).toBe('literal');
   });
+
+  it('treats a malformed percent-encoded segment as no match rather than throwing', () => {
+    expect(() => matchRoute(ROUTES, 'POST', '/api/services/%/restart')).not.toThrow();
+    expect(matchRoute(ROUTES, 'POST', '/api/services/%/restart')).toBeNull();
+  });
 });
