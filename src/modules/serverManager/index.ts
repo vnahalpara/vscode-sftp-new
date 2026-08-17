@@ -23,6 +23,7 @@ interface Running {
 }
 
 let running: Running | null = null;
+let starting: Promise<Running> | null = null;
 // webpack rewrites __dirname in the bundle, so the extension's install
 // directory has to be handed to us at activation time — the same way
 // vpnTunnel receives globalStoragePath.
@@ -48,27 +49,44 @@ async function ensureServer(): Promise<Running> {
   if (running) {
     return running;
   }
-  // media/webui does not exist until the UI milestone; until then every request
-  // falls through to the bootstrap page, which is exactly what we want. An
-  // uninitialised root degrades the same way: a path that cannot exist.
-  const root = extensionRoot
-    ? path.join(extensionRoot, 'media', 'webui')
-    : path.join(__filename, 'media', 'webui');
-  const server = createServer({
-    root,
-    routes: buildRoutes({
-      sessions: { get: token => byToken.get(token) },
-      pingMs: PING_MS,
-      schedule: (fn, ms) => setInterval(fn, ms),
-      cancel: handle => clearInterval(handle),
-    }),
-    hasToken: token => byToken.has(token),
-    fallbackHtml: bootstrapHtml,
-  });
-  const port = await listen(server);
-  running = { server, port };
-  logger.info(`server manager listening on 127.0.0.1:${port}`, 'serverManager');
-  return running;
+  // Two rapid invocations — a double-clicked menu item — would otherwise both
+  // reach listen(), and the first server would be overwritten and leaked with
+  // its loopback port still bound and out of disposeAll's reach.
+  if (!starting) {
+    starting = (async () => {
+      // media/webui does not exist until the UI milestone; until then every
+      // request falls through to the bootstrap page, which is exactly what we
+      // want. An uninitialised root degrades the same way: a path that cannot
+      // exist.
+      const root = extensionRoot
+        ? path.join(extensionRoot, 'media', 'webui')
+        : path.join(__filename, 'media', 'webui');
+      const server = createServer({
+        root,
+        routes: buildRoutes({
+          sessions: { get: token => byToken.get(token) },
+          pingMs: PING_MS,
+          schedule: (fn, ms) => setInterval(fn, ms),
+          cancel: handle => clearInterval(handle),
+        }),
+        hasToken: token => byToken.has(token),
+        fallbackHtml: bootstrapHtml,
+      });
+      const port = await listen(server);
+      running = { server, port };
+      logger.info(`server manager listening on 127.0.0.1:${port}`, 'serverManager');
+      return running;
+    })();
+    // Drop the latch however it settles: a failed bind must not wedge every
+    // later invocation onto the same rejected promise. The catch() is on a
+    // throwaway branch so the rejection still reaches the real caller.
+    starting
+      .catch(() => undefined)
+      .then(() => {
+        starting = null;
+      });
+  }
+  return starting;
 }
 
 // Resolves to the URL to open. A second invocation on the same profile returns
@@ -116,25 +134,37 @@ export async function ensureSession(fileService: any, config: any): Promise<stri
 }
 
 export async function openInBrowser(target: string): Promise<void> {
+  const openDefault = () => vscode.env.openExternal(vscode.Uri.parse(target));
+
   const launch = browserCommand(settings().browser, target, process.platform);
   if (!launch) {
-    await vscode.env.openExternal(vscode.Uri.parse(target));
+    await openDefault();
     return;
   }
   try {
-    const child = spawn(launch.cmd, launch.args, { detached: true, stdio: 'ignore' });
-    child.on('error', async error => {
+    // windowsHide keeps the `cmd /c start` hop from flashing a console window.
+    const child = spawn(launch.cmd, launch.args, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    // Deliberately not an async handler: openInBrowser has already resolved by
+    // the time 'error' fires, so a rejection here would be unhandled. Log the
+    // fallback's own failure instead of letting it escape.
+    child.on('error', error => {
       // Chrome is not installed, or is not where we guessed. Fall back rather
       // than fail the command.
       logger.warn(
         `chrome launch failed (${error.message}); using the default browser`,
         'serverManager'
       );
-      await vscode.env.openExternal(vscode.Uri.parse(target));
+      Promise.resolve(openDefault()).catch(fallbackError => {
+        logger.error(fallbackError, 'serverManager');
+      });
     });
     child.unref();
   } catch (error) {
-    await vscode.env.openExternal(vscode.Uri.parse(target));
+    await openDefault();
   }
 }
 
@@ -142,6 +172,9 @@ export function disposeAll(): void {
   byToken.forEach(session => session.dispose());
   byToken.clear();
   byProfile.clear();
+  // Clear the latch too, so a dispose racing a start cannot leave a stale
+  // in-flight promise that later invocations would join.
+  starting = null;
   if (running) {
     running.server.close();
     running = null;
