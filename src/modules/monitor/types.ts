@@ -144,6 +144,33 @@ export interface RawAddr {
   address: string;
 }
 
+export interface SlowData {
+  mounts: RawMount[];
+  psRows: RawPsRow[];
+  addrs: RawAddr[];
+}
+
+export interface Snapshot {
+  // Server clock in ms, straight from the sampler's `date +%s%3N`.
+  at: number;
+  cpu: CpuMetrics | null;
+  mem: MemMetrics;
+  load: RawLoad;
+  uptimeSec: number;
+  net: NetMetrics[];
+  disks: DiskMetrics[];
+  procs: ProcMetrics[];
+}
+
+// The previous raw sample, carried between ticks so rates can be derived.
+export interface SampleState {
+  at: number;
+  cpu: RawCpu | null;
+  net: RawNetIf[] | null;
+  disks: RawDisk[] | null;
+  procs: RawProc[] | null;
+}
+
 export interface HostFacts {
   hostname: string;
   prettyName: string;

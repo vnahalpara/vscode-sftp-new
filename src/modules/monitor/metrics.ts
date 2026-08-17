@@ -11,7 +11,19 @@ import {
   DiskMetrics,
   ProcMetrics,
   LoadPoint,
+  Snapshot,
+  SampleState,
 } from './types';
+import { splitSections } from './frame';
+import {
+  parseStat,
+  parseMeminfo,
+  parseLoadavg,
+  parseUptime,
+  parseNetDev,
+  parseDiskstats,
+  parsePidStats,
+} from './parse';
 
 function pct(part: number, whole: number): number {
   if (whole <= 0) {
@@ -232,4 +244,52 @@ export class History {
       this._points = this._points.slice(this._points.length - this._capacity);
     }
   }
+}
+
+export function emptyState(): SampleState {
+  return { at: 0, cpu: null, net: null, disks: null, procs: null };
+}
+
+// Parse one framed block into a Snapshot, deriving every rate against `state`,
+// then advance `state` to this sample. Returns null when the block carries
+// nothing usable or arrives out of order.
+export function buildSnapshot(
+  state: SampleState,
+  block: string,
+  opts: ProcOpts
+): Snapshot | null {
+  const { at, sections } = splitSections(block);
+  if (!sections.stat || !sections.mem) {
+    return null;
+  }
+  // A non-monotonic timestamp means a duplicated or reordered block; deriving
+  // rates from it would divide by zero or by a negative interval.
+  if (state.at && at <= state.at) {
+    return null;
+  }
+
+  const elapsedMs = state.at ? at - state.at : 0;
+  const cpu = parseStat(sections.stat);
+  const net = sections.net ? parseNetDev(sections.net) : [];
+  const disks = sections.disk ? parseDiskstats(sections.disk) : [];
+  const procs = sections.pids ? parsePidStats(sections.pids) : [];
+
+  const snapshot: Snapshot = {
+    at,
+    cpu: cpuMetrics(state.cpu, cpu),
+    mem: memMetrics(parseMeminfo(sections.mem)),
+    load: sections.load ? parseLoadavg(sections.load) : { one: 0, five: 0, fifteen: 0 },
+    uptimeSec: sections.up ? parseUptime(sections.up) : 0,
+    net: netMetrics(state.net, net, elapsedMs),
+    disks: diskMetrics(state.disks, disks, elapsedMs),
+    procs: procMetrics(state.procs, procs, elapsedMs, opts),
+  };
+
+  state.at = at;
+  state.cpu = cpu;
+  state.net = net;
+  state.disks = disks;
+  state.procs = procs;
+
+  return snapshot;
 }
