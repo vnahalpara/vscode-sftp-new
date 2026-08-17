@@ -51,9 +51,17 @@ export class Collector {
 
   async start(): Promise<void> {
     // A restart after a dropped connection reuses this instance, so clear the
-    // stopped flag and the half-read buffer before opening again.
+    // stopped flag, the half-read buffer, and the previous sample. Resetting
+    // the sample matters: if the server rebooted, its clock and counters went
+    // backwards, and a stale state.at would make every new block look
+    // out-of-order and be dropped forever. One tick of null rates is the cost.
+    // Clearing timers first makes start() safe to call twice: without it a
+    // reconnect leaks the previous pair of intervals, which keep ticking (and
+    // keep the process alive) with no channel to write to.
+    this._clearTimers();
     this._stopped = false;
     this._framer = new Framer();
+    this._state = emptyState();
     let channel: SamplerChannel;
     try {
       channel = await this._transport.openSampler(samplerScript(IDLE_TIMEOUT_SEC));

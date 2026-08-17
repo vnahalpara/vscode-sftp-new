@@ -251,6 +251,23 @@ describe('Collector', () => {
     c.stop();
   });
 
+  it('accepts blocks again after a restart even if the server clock went backwards', async () => {
+    const t = new FakeTransport();
+    const c = collector(t);
+    const seen: Snapshot[] = [];
+    c.onSnapshot = s => seen.push(s);
+    await c.start();
+    t.channel.emit(block(9000, false));
+    expect(seen.length).toBe(1);
+
+    // Server rebooted: its clock now reports an earlier time than we last saw.
+    t.channel = new FakeChannel();
+    await c.start();
+    t.channel.emit(block(1000, false));
+    expect(seen.length).toBe(2);
+    c.stop();
+  });
+
   it('ignores a malformed block without breaking the stream', async () => {
     const t = new FakeTransport();
     const c = collector(t);
