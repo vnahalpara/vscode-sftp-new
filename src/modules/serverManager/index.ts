@@ -24,6 +24,10 @@ interface Running {
 
 let running: Running | null = null;
 let starting: Promise<Running> | null = null;
+// Bumped by disposeAll(). An in-flight start compares the generation it began
+// in against this before adopting the server it just bound, so a dispose that
+// lands mid-start orphans that start rather than being overwritten by it.
+let generation = 0;
 // webpack rewrites __dirname in the bundle, so the extension's install
 // directory has to be handed to us at activation time — the same way
 // vpnTunnel receives globalStoragePath.
@@ -52,41 +56,58 @@ async function ensureServer(): Promise<Running> {
   // Two rapid invocations — a double-clicked menu item — would otherwise both
   // reach listen(), and the first server would be overwritten and leaked with
   // its loopback port still bound and out of disposeAll's reach.
-  if (!starting) {
-    starting = (async () => {
-      // media/webui does not exist until the UI milestone; until then every
-      // request falls through to the bootstrap page, which is exactly what we
-      // want. An uninitialised root degrades the same way: a path that cannot
-      // exist.
-      const root = extensionRoot
-        ? path.join(extensionRoot, 'media', 'webui')
-        : path.join(__filename, 'media', 'webui');
-      const server = createServer({
-        root,
-        routes: buildRoutes({
-          sessions: { get: token => byToken.get(token) },
-          pingMs: PING_MS,
-          schedule: (fn, ms) => setInterval(fn, ms),
-          cancel: handle => clearInterval(handle),
-        }),
-        hasToken: token => byToken.has(token),
-        fallbackHtml: bootstrapHtml,
-      });
-      const port = await listen(server);
-      running = { server, port };
-      logger.info(`server manager listening on 127.0.0.1:${port}`, 'serverManager');
-      return running;
-    })();
-    // Drop the latch however it settles: a failed bind must not wedge every
-    // later invocation onto the same rejected promise. The catch() is on a
-    // throwaway branch so the rejection still reaches the real caller.
-    starting
-      .catch(() => undefined)
-      .then(() => {
-        starting = null;
-      });
+  if (starting) {
+    return starting;
   }
-  return starting;
+
+  const pending = (async () => {
+    const startedAt = generation;
+    // media/webui does not exist until the UI milestone; until then every
+    // request falls through to the bootstrap page, which is exactly what we
+    // want. An uninitialised root degrades the same way: a path that cannot
+    // exist.
+    const root = extensionRoot
+      ? path.join(extensionRoot, 'media', 'webui')
+      : path.join(__filename, 'media', 'webui');
+    const server = createServer({
+      root,
+      routes: buildRoutes({
+        sessions: { get: token => byToken.get(token) },
+        pingMs: PING_MS,
+        schedule: (fn, ms) => setInterval(fn, ms),
+        cancel: handle => clearInterval(handle),
+      }),
+      hasToken: token => byToken.has(token),
+      fallbackHtml: bootstrapHtml,
+    });
+    const port = await listen(server);
+    if (startedAt !== generation) {
+      // disposeAll() ran while we were binding. Nothing will ever own this
+      // server, so close it here rather than leaking a held port, and fail the
+      // caller instead of handing back a URL to a teardown in progress.
+      server.close();
+      throw new Error('Server manager was disposed while starting.');
+    }
+    running = { server, port };
+    logger.info(`server manager listening on 127.0.0.1:${port}`, 'serverManager');
+    return running;
+  })();
+  starting = pending;
+
+  // Drop the latch however it settles: a failed bind must not wedge every
+  // later invocation onto the same rejected promise. The catch() is on a
+  // throwaway branch so the rejection still reaches the real caller. The
+  // identity check matters because a disposeAll() during startup followed by a
+  // fresh start would otherwise let this stale closure wipe out the live latch
+  // and reopen the double-bind this guard exists to stop.
+  pending
+    .catch(() => undefined)
+    .then(() => {
+      if (starting === pending) {
+        starting = null;
+      }
+    });
+  return pending;
 }
 
 // Resolves to the URL to open. A second invocation on the same profile returns
@@ -173,8 +194,11 @@ export function disposeAll(): void {
   byToken.clear();
   byProfile.clear();
   // Clear the latch too, so a dispose racing a start cannot leave a stale
-  // in-flight promise that later invocations would join.
+  // in-flight promise that later invocations would join. Bumping the
+  // generation orphans any start still binding: it will close its own server
+  // rather than adopt it into a manager that has just been torn down.
   starting = null;
+  generation += 1;
   if (running) {
     running.server.close();
     running = null;
