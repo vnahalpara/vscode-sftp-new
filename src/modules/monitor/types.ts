@@ -78,6 +78,30 @@ export interface MemMetrics {
   swapPct: number;
 }
 
+// Rate fields are `number | null`. null means "not computable from these two
+// samples" — first tick, counter reset, or a device that just appeared — and
+// renders as an em dash rather than a zero the operator would read as idle.
+export interface NetMetrics {
+  name: string;
+  rxBps: number | null;
+  txBps: number | null;
+  rxTotal: number;
+  txTotal: number;
+  address?: string;
+}
+
+export interface DiskMetrics {
+  name: string;
+  readBps: number | null;
+  writeBps: number | null;
+  readIops: number | null;
+  writeIops: number | null;
+  readLatencyMs: number | null;
+  writeLatencyMs: number | null;
+  readTotal: number;
+  writeTotal: number;
+}
+
 export interface RawMount {
   device: string;
   // Basename of `device`, which is how /proc/diskstats names it (vda1, nvme0n1p2).
