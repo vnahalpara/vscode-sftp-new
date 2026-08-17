@@ -281,6 +281,33 @@ describe('ManagedSession', () => {
     expect(h.factsCalls()).toBe(2);
   });
 
+  it('stays offline when the sampler fails during start without throwing', async () => {
+    const h = harness();
+    // The real Collector does NOT throw when the sampler channel fails to open:
+    // it reports the failure through onError and start() resolves normally. The
+    // session must not then claim 'online' over the top of that.
+    h.collector.start = async function() {
+      this.started++;
+      this.onError(new Error('openSampler failed: channel refused'));
+    };
+    const sink = new FakeSink();
+    h.session.subscribe(sink);
+    await h.session.whenSettled();
+
+    expect(h.session.state().status).toBe('offline');
+    expect(h.session.state().error).toContain('channel refused');
+    expect(sink.payload('state').status).toBe('offline');
+  });
+
+  it('still reaches online when start succeeds', async () => {
+    // The guard above must not stop a healthy connection from going online.
+    const h = harness();
+    h.session.subscribe(new FakeSink());
+    await h.session.whenSettled();
+
+    expect(h.session.state().status).toBe('online');
+  });
+
   it('stops the collector and ends every stream on dispose', async () => {
     const h = harness();
     const sink = new FakeSink();

@@ -240,7 +240,14 @@ export class ManagedSession {
       this._collector = null;
       return;
     }
-    this._setStatus('online', null);
+    // Only claim 'online' if nothing moved us off 'connecting' while start()
+    // was running. This matters because Collector.start() RESOLVES when the
+    // sampler channel fails to open — it reports the failure through onError
+    // and onClosed rather than throwing — so an unconditional 'online' here
+    // would paint a green badge over a connection that is already dead.
+    if (this._status === 'connecting') {
+      this._setStatus('online', null);
+    }
     // A subscriber may have unsubscribed while readFacts()/start() were still
     // in flight. _scheduleStop() no-ops while _collector is null, so that
     // unsubscribe would otherwise be lost and the collector would run forever
