@@ -8,11 +8,14 @@ import {
   buildSelect,
   buildCount,
   buildUpdate,
+  buildDelete,
   FILTER_OPS,
   Sort,
   Filter,
 } from '../../core/dbQuery';
+import { splitStatements, applyDefaultLimit, isMutating, hasWhere } from '../../core/dbSql';
 import { DbTarget } from '../dbSession';
+import { exportTable } from '../dbExport';
 import logger from '../../logger';
 
 const PAGE_SIZES = [10, 30, 50, 100, 200];
@@ -122,6 +125,82 @@ async function saveRow(session: Session, msg: any) {
   }
 }
 
+async function deleteRow(session: Session, msg: any) {
+  const where = msg.where || {};
+  if (Object.keys(where).length === 0) {
+    vscode.window.showErrorMessage('Cannot identify the row to delete (no primary key or row values).');
+    return;
+  }
+  // These targets are frequently the LIVE database — always confirm a destructive delete.
+  const ok = await vscode.window.showWarningMessage(
+    `Delete this row from "${session.table}" on ${session.target.dbConfig.name}? This cannot be undone.`,
+    { modal: true },
+    'Delete'
+  );
+  if (ok !== 'Delete') {
+    return;
+  }
+  const built = buildDelete(session.table, where, !msg.usingPk);
+  try {
+    await session.client.query(built.sql, built.params);
+    vscode.window.setStatusBarMessage('Row deleted', 2000);
+    load(session, msg.state as ViewState);
+  } catch (err) {
+    vscode.window.showErrorMessage(`Delete failed: ${(err as Error).message}`);
+  }
+}
+
+async function runSql(session: Session, msg: any) {
+  const statements = splitStatements(String(msg.sql || ''));
+  if (statements.length === 0) {
+    session.panel.webview.postMessage({ type: 'sqlError', message: 'Enter a SQL statement.' });
+    return;
+  }
+  // Confirm before ANYTHING that writes data — UPDATE / DELETE / INSERT / REPLACE / TRUNCATE /
+  // DROP / ALTER / CREATE — with a stronger warning when an UPDATE/DELETE has no WHERE.
+  const mutating = statements.filter(s => isMutating(s));
+  if (mutating.length) {
+    const verbs = Array.from(new Set(mutating.map(s => s.trim().split(/\s+/)[0].toUpperCase())));
+    const noWhere = mutating.filter(s => /^\s*(update|delete)\b/i.test(s) && !hasWhere(s));
+    let warn = `Run ${verbs.join(' / ')} on ${session.target.dbConfig.name}? This modifies data and cannot be undone.`;
+    if (noWhere.length) {
+      warn += `\n\n⚠ ${noWhere.length} statement(s) have no WHERE clause — they affect EVERY row.`;
+    }
+    const ok = await vscode.window.showWarningMessage(warn, { modal: true }, 'Run');
+    if (ok !== 'Run') {
+      session.panel.webview.postMessage({ type: 'sqlError', message: 'Cancelled.' });
+      return;
+    }
+  }
+
+  const limit = vscode.workspace.getConfiguration('sftp.db').get<number>('defaultLimit', 500);
+  let last;
+  let lastSql = '';
+  for (const raw of statements) {
+    lastSql = applyDefaultLimit(raw, limit);
+    try {
+      last = await session.client.query(lastSql);
+    } catch (err) {
+      session.panel.webview.postMessage({ type: 'sqlError', message: (err as Error).message });
+      return;
+    }
+  }
+  if (!last) {
+    return;
+  }
+  session.panel.webview.postMessage({
+    type: 'sqlResult',
+    columns: last.columns,
+    rows: last.rows,
+    affectedRows: last.affectedRows,
+    durationMs: last.durationMs,
+  });
+  // A mutation may have changed the table being browsed — refresh the grid underneath.
+  if (statements.some(s => isMutating(s))) {
+    load(session, msg.state as ViewState);
+  }
+}
+
 export async function openTableBrowser(target: DbTarget, table: string) {
   const key = keyFor(target, table);
   const existing = panels.get(key);
@@ -160,6 +239,12 @@ export async function openTableBrowser(target: DbTarget, table: string) {
       vscode.window.setStatusBarMessage('Copied cell value', 1500);
     } else if (msg.type === 'save') {
       await saveRow(session, msg);
+    } else if (msg.type === 'delete') {
+      await deleteRow(session, msg);
+    } else if (msg.type === 'runSql') {
+      await runSql(session, msg);
+    } else if (msg.type === 'export') {
+      await exportTable(session.target, session.table);
     }
   });
 
@@ -216,6 +301,21 @@ function html(table: string, db: string): string {
     #cellov .cf { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
     #cellov .status { color: var(--vscode-descriptionForeground); margin-top: 4px; min-height: 14px; }
     #cellov .status.error { color: var(--vscode-errorForeground); }
+    td.editc a.del { color: var(--vscode-errorForeground); margin-left: 6px; }
+    /* custom SQL overlay */
+    #sqlov { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 12; }
+    #sqlov .card { position: absolute; top: 4vh; left: 50%; transform: translateX(-50%); width: min(860px, 94vw); max-height: 90vh; display: flex; flex-direction: column; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); box-shadow: 0 4px 16px rgba(0,0,0,.4); }
+    #sqlov h3 { margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--vscode-panel-border); }
+    #sqlov .form { padding: 8px 12px; }
+    #sqlov textarea { width: 100%; box-sizing: border-box; min-height: 110px; resize: vertical; font-family: var(--vscode-editor-font-family, monospace); }
+    #sqlov .foot { padding: 8px 12px; display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--vscode-panel-border); }
+    #sqlov .status { color: var(--vscode-descriptionForeground); }
+    #sqlov .status.error { color: var(--vscode-errorForeground); }
+    #sqlout { padding: 0 12px 12px; overflow: auto; }
+    #sqlout table { border-collapse: collapse; width: 100%; }
+    #sqlout th, #sqlout td { border: 1px solid var(--vscode-panel-border); padding: 2px 6px; text-align: left; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #sqlout th { background: var(--vscode-editorWidget-background); }
+    #sqlout td.null { color: var(--vscode-descriptionForeground); font-style: italic; }
   </style></head><body>
   <div class="bar">
     <div class="grp"><strong>${escapeHtml(table)}</strong> <span class="muted">${escapeHtml(db)}</span></div>
@@ -226,6 +326,10 @@ function html(table: string, db: string): string {
       <input id="fval" class="val" placeholder="value" />
       <button id="apply">Apply</button>
       <button id="clear">Clear</button>
+    </div>
+    <div class="grp">
+      <button id="sqlbtn" title="Run a custom SQL query on this database">⚡ SQL</button>
+      <button id="exportbtn" title="Export this table (mysqldump) to a local file">⬇ Export</button>
     </div>
     <div class="grp" id="busy"><span class="spin"></span> Loading…</div>
     <div class="spacer"></div>
@@ -262,9 +366,21 @@ function html(table: string, db: string): string {
     <div class="status" id="cellstatus"></div>
   </div>
 
+  <div id="sqlov"><div class="card">
+    <h3>Run SQL on <span id="sqldb"></span></h3>
+    <div class="form"><textarea id="sqlta" placeholder="SELECT ...   (Cmd/Ctrl+Enter to run)"></textarea></div>
+    <div class="foot">
+      <button class="primary" id="sqlrun">Run</button>
+      <button id="sqlclose">Close</button>
+      <span class="status" id="sqlstatus"></span>
+    </div>
+    <div id="sqlout"></div>
+  </div></div>
+
   <script>
     const vscode = acquireVsCodeApi();
     const tableName = ${JSON.stringify(table)};
+    const dbName = ${JSON.stringify(db)};
     let state = { page: 1, pageSize: ${DEFAULT_PAGE_SIZE}, sort: null, filter: null };
     let allColumns = [], ops = [], pageSizes = [], total = 0, meta = [], lastColumns = [], lastRows = [];
     let editFields = null, editOrig = null;
@@ -304,7 +420,7 @@ function html(table: string, db: string): string {
         if (state.sort && state.sort.column === c) arrow = ' <span class="arrow">' + (state.sort.dir === 'DESC' ? '▼' : '▲') + '</span>';
         return '<th data-col="'+esc(c)+'">'+esc(c)+arrow+'</th>';
       }).join('');
-      const body = rows.map((r, ri) => '<tr><td class="editc"><a data-edit="'+ri+'">✎ edit</a></td>' + r.map((v,i) => {
+      const body = rows.map((r, ri) => '<tr><td class="editc"><a data-edit="'+ri+'">✎</a><a class="del" data-del="'+ri+'" title="Delete row">🗑</a></td>' + r.map((v,i) => {
         if (v === null) return '<td class="null" data-ri="'+ri+'" data-col="'+esc(columns[i])+'" data-null="1">NULL</td>';
         const s = esc(v);
         return '<td data-ri="'+ri+'" data-col="'+esc(columns[i])+'" data-val="'+s+'">'+s+'</td>';
@@ -317,6 +433,7 @@ function html(table: string, db: string): string {
         state.page = 1; send();
       });
       document.querySelectorAll('a[data-edit]').forEach(a => a.onclick = () => openEdit(parseInt(a.getAttribute('data-edit'),10)));
+      document.querySelectorAll('a[data-del]').forEach(a => a.onclick = (e) => { e.stopPropagation(); deleteRow(parseInt(a.getAttribute('data-del'),10)); });
       document.querySelectorAll('#content td[data-col]').forEach(td => td.onclick = (e) => {
         e.stopPropagation();
         openCellEdit(parseInt(td.getAttribute('data-ri'),10), td.getAttribute('data-col'), td);
@@ -331,6 +448,12 @@ function html(table: string, db: string): string {
       const where = {};
       (usingPk ? pkCols : lastColumns).forEach(c => { where[c] = origByName[c]; });
       return { where, usingPk };
+    }
+    // Delete a row — the extension host shows a modal confirm (these targets are often live).
+    function deleteRow(ri){
+      const origByName = {}; for (var k=0;k<lastColumns.length;k++) origByName[lastColumns[k]] = lastRows[ri][k];
+      const w = whereForRow(origByName);
+      vscode.postMessage({ type: 'delete', where: w.where, usingPk: w.usingPk, state });
     }
     function openCellEdit(ri, col, td){
       const ci = lastColumns.indexOf(col);
@@ -370,7 +493,7 @@ function html(table: string, db: string): string {
       const box = $('cellov');
       if (box.style.display === 'block' && !box.contains(e.target)) closeCell();
     });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeCell(); $('ov').style.display='none'; } });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeCell(); $('ov').style.display='none'; $('sqlov').style.display='none'; } });
 
     // ----- row editor -----
     function inputFor(col, value){
@@ -477,6 +600,24 @@ function html(table: string, db: string): string {
       state.page = 1; send();
     };
     $('clear').onclick = () => { state.filter = null; $('fval').value=''; state.page = 1; send(); };
+
+    // ----- custom SQL -----
+    $('sqlbtn').onclick = () => {
+      $('sqldb').textContent = dbName;
+      $('sqlstatus').textContent = ''; $('sqlstatus').className = 'status';
+      $('sqlout').innerHTML = ''; $('sqlrun').disabled = false;
+      $('sqlov').style.display = 'block'; $('sqlta').focus();
+    };
+    $('sqlclose').onclick = () => { $('sqlov').style.display = 'none'; };
+    $('sqlov').onclick = (e) => { if (e.target.id === 'sqlov') $('sqlov').style.display = 'none'; };
+    $('sqlrun').onclick = () => {
+      const sql = $('sqlta').value.trim();
+      if (!sql) return;
+      $('sqlstatus').textContent = 'Running…'; $('sqlstatus').className = 'status'; $('sqlrun').disabled = true;
+      vscode.postMessage({ type: 'runSql', sql, state });
+    };
+    $('sqlta').onkeydown = (e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') $('sqlrun').click(); };
+    $('exportbtn').onclick = () => vscode.postMessage({ type: 'export' });
     $('psize').onchange = () => { state.pageSize = parseInt($('psize').value, 10); state.page = 1; send(); };
     $('prev').onclick = () => { if (state.page > 1) { state.page--; send(); } };
     $('next').onclick = () => { state.page++; send(); };
@@ -493,6 +634,24 @@ function html(table: string, db: string): string {
       if (m.type === 'editError') {
         if (activeEditor === 'cell') { $('cellstatus').textContent = m.message; $('cellstatus').className = 'status error'; $('cellsave').disabled = false; }
         else { $('ovstatus').textContent = m.message; $('ovstatus').className = 'status error'; $('ovsave').disabled = false; }
+        return;
+      }
+      if (m.type === 'sqlError') {
+        $('sqlrun').disabled = false;
+        $('sqlstatus').textContent = m.message; $('sqlstatus').className = 'status error';
+        return;
+      }
+      if (m.type === 'sqlResult') {
+        $('sqlrun').disabled = false; $('sqlstatus').className = 'status';
+        if (m.columns && m.columns.length) {
+          $('sqlstatus').textContent = m.rows.length + ' row(s) · ' + m.durationMs + ' ms';
+          const head = m.columns.map(c => '<th>'+esc(c)+'</th>').join('');
+          const rws = m.rows.map(r => '<tr>' + r.map(v => v === null ? '<td class="null">NULL</td>' : '<td>'+esc(v)+'</td>').join('') + '</tr>').join('');
+          $('sqlout').innerHTML = '<table><thead><tr>'+head+'</tr></thead><tbody>'+rws+'</tbody></table>';
+        } else {
+          $('sqlstatus').textContent = (m.affectedRows || 0) + ' row(s) affected · ' + m.durationMs + ' ms';
+          $('sqlout').innerHTML = '';
+        }
         return;
       }
       if (m.type !== 'data') return;

@@ -1,7 +1,7 @@
 import { splitStatements, applyDefaultLimit, isMutating, hasWhere } from '../dbSql';
 import { quoteId, buildTableSearchSql } from '../dbSearch';
-import { buildMysqlCommand, parseMysqlBatch, shellSingle } from '../dbExec';
-import { buildWhere, buildOrderBy, buildSelect, buildCount, buildUpdate } from '../dbQuery';
+import { buildMysqlCommand, buildTableDumpCommand, parseMysqlBatch, shellSingle } from '../dbExec';
+import { buildWhere, buildOrderBy, buildSelect, buildCount, buildUpdate, buildDelete } from '../dbQuery';
 import { DbClient } from '../dbClient';
 
 describe('splitStatements', () => {
@@ -79,6 +79,11 @@ describe('exec transport (mysql CLI)', () => {
   it('handles empty output', () => {
     expect(parseMysqlBatch('')).toEqual({ columns: [], rows: [] });
   });
+  it('builds a single-table mysqldump command', () => {
+    expect(buildTableDumpCommand({ host: 'localhost', username: 'u', password: 'p', name: 'shop' }, 'sales_order')).toBe(
+      `MYSQL_PWD='p' mysqldump --user='u' --host='localhost' --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 'shop' 'sales_order'`
+    );
+  });
 });
 
 describe('data-browser query builder', () => {
@@ -145,6 +150,26 @@ describe('buildUpdate', () => {
     expect(buildUpdate('t', { a: '1' }, { id: 5, note: null })).toEqual({
       sql: 'UPDATE `t` SET `a` = ? WHERE `id` = ? AND `note` IS NULL',
       params: ['1', 5],
+    });
+  });
+});
+
+describe('buildDelete', () => {
+  it('deletes by primary key', () => {
+    expect(buildDelete('wp_posts', { ID: 42 })).toEqual({
+      sql: 'DELETE FROM `wp_posts` WHERE `ID` = ?',
+      params: [42],
+    });
+  });
+  it('adds LIMIT 1 for a full-row match (no primary key)', () => {
+    const r = buildDelete('t', { a: '0', b: 'x' }, true);
+    expect(r.sql).toBe('DELETE FROM `t` WHERE `a` = ? AND `b` = ? LIMIT 1');
+    expect(r.params).toEqual(['0', 'x']);
+  });
+  it('uses IS NULL for null where-values (no param)', () => {
+    expect(buildDelete('t', { id: 5, note: null })).toEqual({
+      sql: 'DELETE FROM `t` WHERE `id` = ? AND `note` IS NULL',
+      params: [5],
     });
   });
 });

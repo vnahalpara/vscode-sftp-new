@@ -98,6 +98,22 @@ export function buildUpdate(
   return { sql, params };
 }
 
+// Build a DELETE from an identifying `where` (PK or all columns). Mirrors buildUpdate's WHERE
+// handling: NULL where-values become `IS NULL`, everything else is parameterized. The caller must
+// pass a non-empty `where` (a row identity) so this never deletes the whole table.
+export function buildDelete(table: string, where: { [col: string]: any }, limitOne?: boolean): Built {
+  const whereCols = Object.keys(where);
+  const whereSql = whereCols
+    .map(c => (where[c] === null || where[c] === undefined ? `${quoteId(c)} IS NULL` : `${quoteId(c)} = ?`))
+    .join(' AND ');
+  const params = whereCols.filter(c => where[c] !== null && where[c] !== undefined).map(c => where[c]);
+  let sql = `DELETE FROM ${quoteId(table)} WHERE ${whereSql}`;
+  if (limitOne) {
+    sql += ' LIMIT 1';
+  }
+  return { sql, params };
+}
+
 export function buildCount(table: string, where: Built | null): Built {
   let sql = `SELECT COUNT(*) AS n FROM ${quoteId(table)}`;
   const params: any[] = [];
