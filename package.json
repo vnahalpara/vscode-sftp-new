@@ -6,7 +6,8 @@
   "publisher": "vaibhavupdated",
   "author": "Vaibhav (https://github.com/vnahalpara)",
   "engines": {
-    "vscode": "^1.64.2"
+    "vscode": "^1.64.2",
+    "npm": ">=8.3"
   },
   "bugs": {
     "url": "https://github.com/vnahalpara/vscode-sftp-new/issues"
