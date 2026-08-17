@@ -51,6 +51,33 @@ export interface RawDisk {
   writeMs: number;
 }
 
+// ---- computed structures (what the webview renders) ----
+
+export interface CpuMetrics {
+  total: number;
+  cores: number[];
+  breakdown: {
+    user: number;
+    system: number;
+    nice: number;
+    iowait: number;
+    steal: number;
+  };
+}
+
+export interface MemMetrics {
+  total: number;
+  used: number;
+  cached: number;
+  free: number;
+  usedPct: number;
+  cachedPct: number;
+  freePct: number;
+  swapTotal: number;
+  swapUsed: number;
+  swapPct: number;
+}
+
 export interface RawMount {
   device: string;
   // Basename of `device`, which is how /proc/diskstats names it (vda1, nvme0n1p2).
