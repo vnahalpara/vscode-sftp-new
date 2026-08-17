@@ -39,6 +39,27 @@ describe('ActivityLog', () => {
     log.entries().push(entry('injected'));
     expect(log.entries().length).toBe(1);
   });
+
+  it('keeps only the newest entry at capacity 1', () => {
+    const log = new ActivityLog(1);
+    log.push(entry('one'));
+    log.push(entry('two'));
+    log.push(entry('three'));
+    expect(log.entries().map(e => e.label)).toEqual(['three']);
+  });
+
+  it('floors a zero capacity to one rather than dropping everything', () => {
+    const log = new ActivityLog(0);
+    log.push(entry('one'));
+    expect(log.entries().map(e => e.label)).toEqual(['one']);
+  });
+
+  it('floors a negative capacity to one rather than growing without bound', () => {
+    const log = new ActivityLog(-5);
+    log.push(entry('one'));
+    log.push(entry('two'));
+    expect(log.entries().map(e => e.label)).toEqual(['two']);
+  });
 });
 
 describe('sudoHint', () => {
