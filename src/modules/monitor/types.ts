@@ -102,6 +102,26 @@ export interface DiskMetrics {
   writeTotal: number;
 }
 
+export interface ProcMetrics {
+  pid: number;
+  startTime: number;
+  comm: string;
+  // Percent of ONE core, unclamped: a multi-threaded process can exceed 100,
+  // which is exactly the runaway the table exists to reveal.
+  cpuPct: number | null;
+  rssBytes: number;
+  threads: number;
+  user?: string;
+  args?: string;
+}
+
+export interface LoadPoint {
+  at: number;
+  one: number;
+  five: number;
+  fifteen: number;
+}
+
 export interface RawMount {
   device: string;
   // Basename of `device`, which is how /proc/diskstats names it (vda1, nvme0n1p2).

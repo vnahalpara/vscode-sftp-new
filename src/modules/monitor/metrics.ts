@@ -4,10 +4,13 @@ import {
   RawMem,
   RawNetIf,
   RawDisk,
+  RawProc,
   CpuMetrics,
   MemMetrics,
   NetMetrics,
   DiskMetrics,
+  ProcMetrics,
+  LoadPoint,
 } from './types';
 
 function pct(part: number, whole: number): number {
@@ -149,4 +152,84 @@ export function memMetrics(raw: RawMem): MemMetrics {
     swapUsed,
     swapPct: pct(swapUsed, raw.swapTotal),
   };
+}
+
+// A host with thousands of processes would bloat every postMessage, and the
+// table only ever shows the busiest anyway.
+export const MAX_PROCS = 200;
+
+export interface ProcOpts {
+  pageSize: number;
+  // USER_HZ, effectively always 100 on Linux; injected so tests are explicit.
+  clockTicks: number;
+}
+
+export function procMetrics(
+  prev: RawProc[] | null,
+  cur: RawProc[],
+  elapsedMs: number,
+  opts: ProcOpts
+): ProcMetrics[] {
+  // Identity is pid + startTime, so a recycled pid cannot inherit the previous
+  // occupant's cpu time.
+  const before: { [key: string]: RawProc } = {};
+  (prev || []).forEach(p => {
+    before[p.pid + ':' + p.startTime] = p;
+  });
+
+  const ticks = opts.clockTicks > 0 ? opts.clockTicks : 100;
+  const elapsedTicks = (elapsedMs / 1000) * ticks;
+
+  const rows = cur.map(p => {
+    const p0 = before[p.pid + ':' + p.startTime];
+    let cpuPct: number | null = null;
+    if (p0 && elapsedTicks > 0) {
+      const used = p.utime + p.stime - (p0.utime + p0.stime);
+      // Deliberately not clamped at 100: this is percent of one core, and a
+      // process spanning several cores should read above 100.
+      cpuPct = used < 0 ? null : (used / elapsedTicks) * 100;
+    }
+    return {
+      pid: p.pid,
+      startTime: p.startTime,
+      comm: p.comm,
+      cpuPct,
+      rssBytes: p.rssPages * opts.pageSize,
+      threads: p.threads,
+    };
+  });
+
+  rows.sort((a, b) => (b.cpuPct || 0) - (a.cpuPct || 0) || b.rssBytes - a.rssBytes);
+  return rows.slice(0, MAX_PROCS);
+}
+
+// Fixed-capacity rolling window of load samples. Lives extension-side so chart
+// history survives the webview being disposed while the tab is backgrounded.
+export class History {
+  private _points: LoadPoint[] = [];
+  private _capacity: number;
+
+  constructor(capacity: number) {
+    this._capacity = Math.max(1, capacity);
+  }
+
+  push(point: LoadPoint): void {
+    this._points.push(point);
+    this._trim();
+  }
+
+  points(): LoadPoint[] {
+    return this._points;
+  }
+
+  resize(capacity: number): void {
+    this._capacity = Math.max(1, capacity);
+    this._trim();
+  }
+
+  private _trim(): void {
+    if (this._points.length > this._capacity) {
+      this._points = this._points.slice(this._points.length - this._capacity);
+    }
+  }
 }
