@@ -129,6 +129,16 @@ export class ManagedSession {
   }
 
   async refresh(): Promise<void> {
+    // A start already in flight has no collector yet — it is between the top of
+    // _start() and the _collector assignment, a window as wide as one readFacts
+    // round trip. Starting a rival here would build a second collector and
+    // start() it; only one can win the _collector field, and the loser is never
+    // stopped, leaking a sampler channel and a remote read loop forever. Wait
+    // for the one already running instead.
+    if (this._status === 'connecting') {
+      await this._pending;
+      return;
+    }
     if (this._collector) {
       await this._collector.slowNow();
       return;
@@ -172,7 +182,18 @@ export class ManagedSession {
     }
 
     const collector = this._deps.makeCollector(this._deps.transport, facts);
+    // Every callback below is gated on this collector still being the session's
+    // current one. A collector that has been superseded, or already reaped by
+    // _collectorDied()/_stopCollector(), must not mutate session state or emit
+    // frames: its ticks would race the live collector's and its `closed` would
+    // knock a healthy session offline. The check is safe against suppressing
+    // legitimate early events because no callback can fire before start(), and
+    // `this._collector = collector` happens before `await collector.start()`.
+    const isCurrent = () => this._collector === collector;
     collector.onSnapshot = snapshot => {
+      if (!isCurrent()) {
+        return;
+      }
       this._lastSnapshot = snapshot;
       this._lastSeen = this._deps.now();
       // A snapshot means the channel is alive. Only transition (and emit a
@@ -184,6 +205,9 @@ export class ManagedSession {
       this.sse.send('tick', { snapshot, history: collector.history().points() });
     };
     collector.onSlow = slow => {
+      if (!isCurrent()) {
+        return;
+      }
       this._lastSlow = slow;
       this.sse.send('slow', slow);
     };
@@ -191,9 +215,15 @@ export class ManagedSession {
     // only `onClosed` does. Leaving the collector running lets onSnapshot
     // recover status to `online` the moment samples resume.
     collector.onError = error => {
+      if (!isCurrent()) {
+        return;
+      }
       this._setStatus('offline', error.message);
     };
     collector.onClosed = () => {
+      if (!isCurrent()) {
+        return;
+      }
       this._collectorDied(this._error || 'The connection closed.');
     };
 

@@ -257,6 +257,14 @@ describe('createServer static file serving', () => {
       const res = await get('/unreadable.css');
       expect(res.status).toBe(500);
 
+      // The static path needs no token, so its error body must not leak the
+      // filesystem error's text: an EACCES/ENOENT message carries the absolute
+      // path of the extension install directory.
+      expect(res.body).toBe('Internal error');
+      expect(res.body).not.toContain(root);
+      expect(res.body).not.toContain('unreadable.css');
+      expect(res.body).not.toContain('EACCES');
+
       // The important part: an open failure must not have taken the server
       // down. A follow-up request still gets served normally.
       const again = await get('/');

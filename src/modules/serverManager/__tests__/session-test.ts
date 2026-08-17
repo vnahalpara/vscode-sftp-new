@@ -83,12 +83,20 @@ class FakeSink implements SseSink {
 interface Harness {
   session: ManagedSession;
   collector: FakeCollector;
+  // Every collector the session was handed, in order. With the default shared
+  // collector these are all the same object; `distinctCollectors` makes each
+  // one a fresh instance so a superseded collector can still be poked.
+  collectors: FakeCollector[];
   runTimers(): void;
   factsCalls(): number;
+  collectorCalls(): number;
 }
 
-function harness(overrides: { facts?: HostFacts; factsError?: Error } = {}): Harness {
+function harness(
+  overrides: { facts?: HostFacts; factsError?: Error; distinctCollectors?: boolean } = {}
+): Harness {
   const collector = new FakeCollector();
+  const collectors: FakeCollector[] = [];
   let timers: (() => void)[] = [];
   let factsCalls = 0;
 
@@ -101,7 +109,11 @@ function harness(overrides: { facts?: HostFacts; factsError?: Error } = {}): Har
       }
       return overrides.facts || FACTS;
     },
-    makeCollector: () => collector,
+    makeCollector: () => {
+      const made = overrides.distinctCollectors ? new FakeCollector() : collector;
+      collectors.push(made);
+      return made;
+    },
     schedule(fn: () => void) {
       timers.push(fn);
       return timers.length - 1;
@@ -116,12 +128,14 @@ function harness(overrides: { facts?: HostFacts; factsError?: Error } = {}): Har
   return {
     session,
     collector,
+    collectors,
     runTimers() {
       const due = timers;
       timers = [];
       due.forEach(fn => fn());
     },
     factsCalls: () => factsCalls,
+    collectorCalls: () => collectors.length,
   };
 }
 
@@ -315,6 +329,55 @@ describe('ManagedSession', () => {
 
     expect(h.factsCalls()).toBe(2);
     expect(h.collector.slowCalls).toBe(0);
+  });
+
+  it('does not start a rival collector when refresh lands mid-connect', async () => {
+    const h = harness();
+    h.session.subscribe(new FakeSink());
+    // subscribe() ran _start() synchronously up to `await readFacts`, so the
+    // session is connecting with a null collector: exactly the window in which
+    // an unguarded refresh() would build and start() a second collector that
+    // nothing would ever stop.
+    expect(h.session.state().status).toBe('connecting');
+
+    await h.session.refresh();
+    await h.session.whenSettled();
+
+    expect(h.factsCalls()).toBe(1);
+    expect(h.collectorCalls()).toBe(1);
+    expect(h.collector.started).toBe(1);
+    expect(h.session.state().status).toBe('online');
+  });
+
+  it('ignores callbacks arriving from a superseded collector', async () => {
+    const h = harness({ distinctCollectors: true });
+    h.session.subscribe(new FakeSink());
+    await h.session.whenSettled();
+
+    const dead = h.collectors[0];
+    dead.onClosed();
+    expect(h.session.isRunning()).toBe(false);
+
+    // A refresh brings a fresh collector up; the dead one is now a ghost that
+    // may still have samples or a close event in flight.
+    await h.session.refresh();
+    expect(h.collectorCalls()).toBe(2);
+    expect(h.session.state().status).toBe('online');
+
+    const sink = new FakeSink();
+    h.session.subscribe(sink);
+    h.collectors[1].onSnapshot({ at: 7 } as any);
+
+    dead.onSnapshot({ at: 99 } as any);
+    dead.onSlow({ ghost: true } as any);
+    dead.onError(new Error('ghost error'));
+    dead.onClosed();
+
+    expect(sink.payload('tick').snapshot.at).toBe(7);
+    expect(sink.events()).not.toContain('slow');
+    expect(h.session.state().status).toBe('online');
+    expect(h.session.state().error).toBeNull();
+    expect(h.session.isRunning()).toBe(true);
   });
 
   it('returns to online once samples resume after a transient error', async () => {

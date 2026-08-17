@@ -122,10 +122,10 @@ export function createServer(deps: ServerDeps): http.Server {
       try {
         const result = match.handler(ctx);
         if (result && typeof (result as Promise<void>).catch === 'function') {
-          (result as Promise<void>).catch(error => fail(ctx, error));
+          (result as Promise<void>).catch(error => fail(ctx, error, true));
         }
       } catch (error) {
-        fail(ctx, error as Error);
+        fail(ctx, error as Error, true);
       }
       return;
     }
@@ -134,12 +134,16 @@ export function createServer(deps: ServerDeps): http.Server {
   });
 }
 
-function fail(ctx: Ctx, error: Error): void {
+// `detail` is only ever true on the /api path, which is behind the token check.
+// The static path is reachable without a token, and its errors are filesystem
+// errors: an EACCES/ENOENT message carries the absolute extension install path,
+// which no unauthenticated caller has any business learning.
+function fail(ctx: Ctx, error: Error, detail: boolean): void {
   if (ctx.res.headersSent) {
     ctx.res.end();
     return;
   }
-  ctx.text(500, error.message || 'Internal error');
+  ctx.text(500, (detail && error.message) || 'Internal error');
 }
 
 function serveStatic(deps: ServerDeps, ctx: Ctx, pathname: string): void {
@@ -152,7 +156,7 @@ function serveStatic(deps: ServerDeps, ctx: Ctx, pathname: string): void {
     // lose read permission between the statSync above and the open below.
     stream.on('error', error => {
       stream.destroy();
-      fail(ctx, error as Error);
+      fail(ctx, error as Error, false);
     });
     // Hold the header back until the file is actually open, so a failure to
     // open is answered with a real 500 rather than a truncated 200.
