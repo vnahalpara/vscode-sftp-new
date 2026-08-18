@@ -86,84 +86,130 @@ describe('serviceStatusCommand', () => {
 
 describe('certInfoCommand', () => {
   it('escapes a path containing a single quote so it cannot break out', () => {
-    const cmd = certInfoCommand(["/etc/ssl/o'brien.pem"]);
-    expect(cmd).toContain(`'/etc/ssl/o'\\''brien.pem'`);
-    expect(cmd).not.toMatch(/;\s*rm/);
+    const { command } = certInfoCommand(["/etc/ssl/o'brien.pem"]);
+    expect(command).toContain(`'/etc/ssl/o'\\''brien.pem'`);
+    expect(command).not.toMatch(/;\s*rm/);
   });
   it('de-duplicates and drops empty paths', () => {
-    const cmd = certInfoCommand(['/a.pem', '/a.pem', '', null as any]);
-    expect(cmd.match(/openssl/g)!.length).toBe(1);
+    const { command, skipped } = certInfoCommand(['/a.pem', '/a.pem', '', null as any]);
+    expect(command.match(/openssl/g)!.length).toBe(1);
+    expect(skipped).toEqual([]);
   });
-  it('returns an empty string for no paths, so no command is run at all', () => {
-    expect(certInfoCommand([])).toBe('');
+  it('returns an empty command for no paths, so no command is run at all', () => {
+    expect(certInfoCommand([])).toEqual({ command: '', skipped: [] });
   });
   it('keeps the path out of any double-quoted (interpolating) shell context', () => {
     // The path is never spliced into the script body -- the script only
     // ever refers to the positional parameter "${1}", so a value containing
     // $(...) or `...` can never reach an interpolating context.
     const evil = '$(touch /tmp/pwned)`id`';
-    const cmd = certInfoCommand([evil]);
-    expect(cmd).toMatch(/"@@\$\{1\}"/);
-    expect(cmd).toMatch(/-in "\$\{1\}"/);
-    expect(cmd).not.toContain(`"@@${evil}`);
-    expect(cmd).not.toMatch(/echo "@@\$\(/);
+    const { command } = certInfoCommand([evil]);
+    expect(command).toMatch(/"@@\$\{1\}"/);
+    expect(command).toMatch(/-in "\$\{1\}"/);
+    expect(command).not.toContain(`"@@${evil}`);
+    expect(command).not.toMatch(/echo "@@\$\(/);
     // The hostile value appears exactly once: as the single-quoted
     // positional argument appended after the script.
-    expect(cmd.split(shellSingle(evil)).length - 1).toBe(1);
+    expect(command.split(shellSingle(evil)).length - 1).toBe(1);
   });
   it('quotes a path that tries to close the surrounding quoting, so the injected command never runs unquoted', () => {
     const evil = "/tmp/x'; rm -rf / #";
-    const cmd = certInfoCommand([evil]);
+    const { command } = certInfoCommand([evil]);
     // The hostile text must reach the command only inside a correctly
     // escaped single-quoted span -- never as bare, executable shell syntax.
-    expect(cmd.split(shellSingle(evil)).length - 1).toBe(1);
-    const withoutEscapedSpans = cmd.split(shellSingle(evil)).join('');
+    expect(command.split(shellSingle(evil)).length - 1).toBe(1);
+    const withoutEscapedSpans = command.split(shellSingle(evil)).join('');
     expect(withoutEscapedSpans).not.toMatch(/;\s*rm -rf \//);
   });
   it('bakes sudo -n into the returned command, per the file-wide privilege contract', () => {
-    expect(certInfoCommand(['/a.pem'])).toMatch(/^sudo -n sh -c /);
+    expect(certInfoCommand(['/a.pem']).command).toMatch(/^sudo -n sh -c /);
   });
   it('uses printf, not the shell builtin echo, for its @@ marker', () => {
-    const cmd = certInfoCommand(['/a.pem']);
-    expect(cmd).not.toMatch(/echo /);
-    expect(cmd).toContain('printf');
-    expect(cmd).toMatch(/"@@\$\{1\}"/);
+    const { command } = certInfoCommand(['/a.pem']);
+    expect(command).not.toMatch(/echo /);
+    expect(command).toContain('printf');
+    expect(command).toMatch(/"@@\$\{1\}"/);
   });
-  it('rejects a path containing a newline, so it cannot forge an @@ marker', () => {
-    expect(() => certInfoCommand(['/etc/ssl/good.pem', "/etc/ssl/evil\n@@units"])).toThrow();
+  it('skips (does not throw for) a path containing a newline, so one bad path cannot blank the whole batch', () => {
+    // A batch builder: one corrupt ssl_certificate directive among many
+    // vhosts must not abort output for every other, valid path.
+    const good1 = '/etc/ssl/good1.pem';
+    const good2 = '/etc/ssl/good2.pem';
+    const good3 = '/etc/ssl/good3.pem';
+    const evil = '/etc/ssl/evil\n@@units';
+    const { command, skipped } = certInfoCommand([good1, evil, good2, good3]);
+    expect(skipped).toEqual([evil]);
+    [good1, good2, good3].forEach(p => {
+      expect(command.split(shellSingle(p)).length - 1).toBe(1);
+    });
+    expect(command.split(shellSingle(evil)).length - 1).toBe(0);
+    expect(command.match(/openssl/g)!.length).toBe(3);
   });
-  it('rejects a path containing a carriage return or NUL byte', () => {
-    expect(() => certInfoCommand(['/etc/ssl/evil\r.pem'])).toThrow();
-    expect(() => certInfoCommand(['/etc/ssl/evil\0.pem'])).toThrow();
+  it('skips a path containing a carriage return or NUL byte', () => {
+    const cr = '/etc/ssl/evil\r.pem';
+    const nul = '/etc/ssl/evil\0.pem';
+    expect(certInfoCommand([cr]).skipped).toEqual([cr]);
+    expect(certInfoCommand([nul]).skipped).toEqual([nul]);
+  });
+  it('returns an empty command with every path in skipped when all paths are rejected', () => {
+    const evil1 = '/etc/ssl/evil1\n.pem';
+    const evil2 = '/etc/ssl/evil2\r.pem';
+    const result = certInfoCommand([evil1, evil2]);
+    expect(result.command).toBe('');
+    expect(result.skipped).toEqual([evil1, evil2]);
+  });
+  it('renumbers the surviving positional parameters contiguously after a skip, with no hole', () => {
+    // If path 2 of 4 is skipped, the survivors must be ${1}..${3} against
+    // the arguments actually passed -- not ${1}, ${3}, ${4} against a list
+    // with a hole. Getting this wrong reintroduces the $10-class bug.
+    const p1 = '/etc/ssl/c1.pem';
+    const evil = '/etc/ssl/evil\n.pem';
+    const p3 = '/etc/ssl/c3.pem';
+    const p4 = '/etc/ssl/c4.pem';
+    const { command, skipped } = certInfoCommand([p1, evil, p3, p4]);
+    expect(skipped).toEqual([evil]);
+
+    // Three surviving paths -> exactly ${1}, ${2}, ${3} referenced, in that
+    // order, matching the order the surviving args are appended.
+    expect(command).toMatch(/"@@\$\{1\}"/);
+    expect(command).toMatch(/"@@\$\{2\}"/);
+    expect(command).toMatch(/"@@\$\{3\}"/);
+    expect(command).not.toMatch(/\$\{4\}/);
+    expect(command.match(/\$\{\d+\}/g)!.length).toBe(3 * 2); // once in @@, once in -in, per surviving path
+
+    // The trailing argument list is exactly the three survivors, in order,
+    // with the skipped path entirely absent.
+    const argsTail = command.slice(command.indexOf("' sh ") + "' sh ".length);
+    expect(argsTail).toBe([p1, p3, p4].map(shellSingle).join(' '));
   });
   it('braces every positional parameter, including the tenth and eleventh, so $10 is never read as ${1}0', () => {
     // POSIX sh parses the unbraced form $10 as "${1}" followed by a literal
     // "0" -- with 10+ paths (routine on a multi-vhost host) an unbraced
     // template would silently point the tenth entry at the wrong value.
     const paths = Array.from({ length: 11 }, (_, i) => `/etc/ssl/c${i + 1}.pem`);
-    const cmd = certInfoCommand(paths);
+    const { command } = certInfoCommand(paths);
 
     // Every path must appear, quoted, exactly once as a trailing positional
     // argument -- proving none were dropped and none collided.
     paths.forEach(p => {
-      expect(cmd.split(shellSingle(p)).length - 1).toBe(1);
+      expect(command.split(shellSingle(p)).length - 1).toBe(1);
     });
 
     // The script body must reference ${10} and ${11} explicitly (braced),
     // and must NOT contain the unbraced, misparsed forms $10 / $11 (which
     // POSIX sh would read as ${1}0 / ${1}1).
-    expect(cmd).toMatch(/"@@\$\{10\}"/);
-    expect(cmd).toMatch(/-in "\$\{10\}"/);
-    expect(cmd).toMatch(/"@@\$\{11\}"/);
-    expect(cmd).toMatch(/-in "\$\{11\}"/);
-    expect(cmd).not.toMatch(/\$10\b/);
-    expect(cmd).not.toMatch(/\$11\b/);
+    expect(command).toMatch(/"@@\$\{10\}"/);
+    expect(command).toMatch(/-in "\$\{10\}"/);
+    expect(command).toMatch(/"@@\$\{11\}"/);
+    expect(command).toMatch(/-in "\$\{11\}"/);
+    expect(command).not.toMatch(/\$10\b/);
+    expect(command).not.toMatch(/\$11\b/);
 
     // Every parameter from ${1} through ${11} is present and distinct.
     for (let i = 1; i <= 11; i++) {
-      expect(cmd).toMatch(new RegExp(`"@@\\$\\{${i}\\}"`));
+      expect(command).toMatch(new RegExp(`"@@\\$\\{${i}\\}"`));
     }
-    expect(cmd.match(/\$\{\d+\}/g)!.length).toBe(11 * 2); // once in the @@ header, once in -in, per path
+    expect(command.match(/\$\{\d+\}/g)!.length).toBe(11 * 2); // once in the @@ header, once in -in, per path
   });
 });
 

@@ -19,6 +19,14 @@ import { shellSingle } from '../../../core/dbExec';
 // operand below is therefore both quoted AND passed after a `--`
 // end-of-options marker wherever the target tool honours one, so a
 // leading-`-` value can never be reinterpreted as an option.
+//
+// Bad-input contract: a builder that names ONE specific target (a unit, a
+// single file path) throws on invalid input -- the caller asked for that
+// exact thing and wants an error, not silence. A builder that names a
+// BATCH of targets (a list of certificate paths gathered from many vhosts)
+// skips and reports the offending entry instead of throwing, so one
+// pathological path can't blank the whole batch for every other, valid
+// entry in it.
 
 // -------------------------------------------------------------- services --
 
@@ -190,13 +198,14 @@ function hasControlChars(value: string): boolean {
 // legitimate path contains `/` -- so they rely on `shellSingle` (plus the
 // control-character rejection above) rather than a charset allowlist.
 //
-// Each path is passed as a positional parameter to a `sh -c` script rather
-// than spliced into the script text: the script body only ever refers to
-// `${1}`, `${2}`, ... and the actual values are appended, each `shellSingle`-
-// quoted exactly once, after the script. This sidesteps the classic nested-
-// quoting trap where wrapping an already-quoted value in a second outer
-// quoting layer would require re-escaping it -- here every value is quoted
-// exactly once, for the one shell that will parse this string.
+// Each surviving path is passed as a positional parameter to a `sh -c`
+// script rather than spliced into the script text: the script body only
+// ever refers to `${1}`, `${2}`, ... and the actual values are appended,
+// each `shellSingle`-quoted exactly once, after the script. This sidesteps
+// the classic nested-quoting trap where wrapping an already-quoted value in
+// a second outer quoting layer would require re-escaping it -- here every
+// value is quoted exactly once, for the one shell that will parse this
+// string.
 //
 // Positional parameters are always braced (`${1}`, not `$1`), even below
 // ten: POSIX `sh` parses the *unbraced* form `$10` as `${1}` followed by a
@@ -212,15 +221,32 @@ function hasControlChars(value: string): boolean {
 // never a bare positional operand, so there is no flag/operand ambiguity
 // for a leading `-` to exploit -- and `openssl x509` does not accept `--`
 // as an end-of-options marker in any case.
-export function certInfoCommand(paths: string[]): string {
+//
+// This is a BATCH builder (see the bad-input contract note above): a
+// caller-supplied path that contains a newline/CR/NUL is skipped and
+// reported back in `skipped`, not thrown -- one pathological path (e.g.
+// one corrupt `ssl_certificate` directive among forty vhosts) must not
+// blank the certificate output for every other, valid path in the batch.
+// The surviving paths are renumbered contiguously -- `${1}`, `${2}`, ...
+// against the arguments actually passed -- so a skip never leaves a hole
+// in the positional-parameter sequence (which would risk the same class of
+// misnumbering the unbraced-`$10` bug produced).
+export interface CertCommand {
+  command: string; // '' when nothing is left to inspect
+  skipped: string[]; // paths rejected as unsafe, so the caller can surface them
+}
+
+export function certInfoCommand(paths: string[]): CertCommand {
   const list: string[] = [];
+  const skipped: string[] = [];
   const seen = new Set<string>();
   (paths || []).forEach(p => {
     if (!p) {
       return;
     }
     if (hasControlChars(p)) {
-      throw new Error('Refusing to build a certificate command for a path containing a newline or NUL byte');
+      skipped.push(p);
+      return;
     }
     if (!seen.has(p)) {
       seen.add(p);
@@ -228,7 +254,7 @@ export function certInfoCommand(paths: string[]): string {
     }
   });
   if (list.length === 0) {
-    return '';
+    return { command: '', skipped };
   }
   const script = list
     .map((_p, i) => {
@@ -237,7 +263,7 @@ export function certInfoCommand(paths: string[]): string {
     })
     .join('; ');
   const args = list.map(shellSingle).join(' ');
-  return `sudo -n sh -c ${shellSingle(script)} sh ${args}`;
+  return { command: `sudo -n sh -c ${shellSingle(script)} sh ${args}`, skipped };
 }
 
 // ------------------------------------------------------------------- files --
@@ -259,12 +285,15 @@ function clampLines(lines: number): number {
 // happily parses as `-e '1w/etc/passwd'` -- opening (and truncating)
 // `/etc/passwd` at script-compile time, before any input is even read.
 //
-// A path containing a newline/CR/NUL is rejected the same way certInfoCommand
-// rejects one (see `hasControlChars` above): this builder names a single,
-// specific file to read, so unlike a batch listing there is no reasonable
-// "silently skip it" option -- either a real file gets read or the caller
-// gets a clear error, matching how `serviceActionCommand` etc. throw rather
-// than quietly building nothing for bad input.
+// A path containing a newline/CR/NUL is rejected using the same
+// `hasControlChars` check as `certInfoCommand`, but this builder THROWS
+// rather than skipping-and-reporting: per the bad-input contract at the top
+// of this file, `readFileCommand` names one specific file by explicit
+// request, not a batch harvested from many sources. There is no list to
+// shrink here -- either that one real file gets read, or the caller gets a
+// clear error. Silently returning an empty command for a single explicit
+// request would look like "the file has no content" rather than "the
+// request was rejected", which is a worse failure mode than an exception.
 export function readFileCommand(path: string, lines: number): string {
   if (hasControlChars(path)) {
     throw new Error('Refusing to build a read command for a path containing a newline or NUL byte');
