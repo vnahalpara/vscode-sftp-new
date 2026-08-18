@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useSession } from './useSession';
 import { Badge, Section } from './components/ui.jsx';
 import Overview from './components/Overview.jsx';
+import Services from './components/Services.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Activity from './pages/Activity.jsx';
 import Settings from './pages/Settings.jsx';
@@ -151,18 +152,33 @@ export default function App() {
   } else if (page === 'settings') {
     content = <Settings profile={profile} session={session} />;
   } else {
-    // 'overview' (and 'database', which is unreachable while disabled) land
-    // here: the tab bar plus whichever tab is active. Only Overview exists
-    // today.
+    // 'overview', 'services' and 'web' (plus 'database', which is
+    // unreachable while disabled) land here: the tab bar plus whichever tab
+    // is active. 'web' has no tab content yet (a later milestone task), so
+    // it falls back to Overview same as any other unrecognised tab key —
+    // the nav item itself is still enabled/disabled correctly from
+    // `capabilities`.
+    const tabPage = TABS.some(([key]) => key === page) ? page : 'overview';
+    const tabContent = tabPage === 'services' ? <Services /> : (
+      <Overview snapshot={snapshot} slow={slow} series={series} facts={facts} />
+    );
     content = (
       <>
         <div className="row" style={{ gap: 2, marginBottom: 18, paddingBottom: 10, borderBottom: '1px solid var(--border)' }}>
           {TABS.map(([key, label, capKey]) => {
             const enabled = key === 'overview' || Boolean(capabilities && capabilities[capKey]);
-            return <NavItem key={key} label={label} active={key === 'overview'} disabled={!enabled} />;
+            return (
+              <NavItem
+                key={key}
+                label={label}
+                active={key === tabPage}
+                disabled={!enabled}
+                onClick={() => setPage(key)}
+              />
+            );
           })}
         </div>
-        <Overview snapshot={snapshot} slow={slow} series={series} facts={facts} />
+        {tabContent}
       </>
     );
   }
