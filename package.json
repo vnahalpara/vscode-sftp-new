@@ -1019,6 +1019,7 @@
     "dev": "webpack --mode development --watch",
     "build:webui": "vite build --config webui/vite.config.ts",
     "watch:webui": "vite build --config webui/vite.config.ts --watch",
+    "dev:webui": "node webui/dev/mock-server.js",
     "test": "jest",
     "package": "vsce package",
     "pub:debug": "rm -rf _debug && mkdir _debug && vsce package --out _debug/sftp-debug.vsix && cd _debug && git init && git commit --allow-empty -m 'update debug package' && git checkout -b debug-pacakge && cp ../INSTALL_DEBUG.md README.md  && git add . && git commit -am 'update debug package' && git push git@github.com:Natizyskunk/vscode-sftp.git debug-pacakge --force"
