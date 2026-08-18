@@ -75,16 +75,23 @@ export function sudoHint(stderr: string, user: string, host: string): string | n
   // with the same hint naming the binaries they had just granted: there was
   // no path from the advice to a working tab.
   //
-  // And the honest advice for the Web server tab is not "grant /bin/sh":
-  // NOPASSWD on a shell is unrestricted root by any other name, so the root
-  // credential lane is the better trade and is named first.
+  // The split that matters is by COMMAND, not by tab. Both tabs' action
+  // buttons run systemctl, so a user who only wants the Web server tab's
+  // restart button needs /bin/systemctl and nothing more -- telling them
+  // "the Web server tab needs /bin/sh" would talk them into an unrestricted
+  // root grant to get a button that /bin/systemctl alone would have fixed.
+  // Only the reads (vhost config, Test config, certificates, View) go
+  // through a shell. And the honest advice for those is not "grant
+  // /bin/sh": NOPASSWD on a shell is unrestricted root by any other name.
   return (
     `${user}@${host} cannot run this command with sudo without a password. ` +
-    `For the Services tab, add a sudoers rule on ${host}: ` +
-    `${user} ALL=(ALL) NOPASSWD: /bin/systemctl. ` +
-    `The Web server tab runs sudo on /bin/sh and /bin/sed instead (nginx, apache2ctl, httpd and ` +
-    `openssl all run INSIDE a "sudo -n sh -c" script, so a rule naming those binaries never ` +
-    `matches), and NOPASSWD on /bin/sh grants unrestricted root -- so for that tab, setting ` +
-    `root_user and root_password on the connection profile is the safer option.`
+    `Service actions -- start/stop/restart/reload, on BOTH tabs -- need one sudoers rule on ` +
+    `${host}: ${user} ALL=(ALL) NOPASSWD: /bin/systemctl. ` +
+    `Only the Web server tab's config reads, Test config, certificate panel and View run sudo ` +
+    `on /bin/sh and /bin/sed instead (nginx, apache2ctl, httpd and openssl all run INSIDE a ` +
+    `"sudo -n sh -c" script, so a rule naming those binaries never matches). NOPASSWD on ` +
+    `/bin/sh grants unrestricted root, so for those reads specifically, setting root_user and ` +
+    `root_password on the connection profile is usually the better trade -- see the README for ` +
+    `what that costs.`
   );
 }

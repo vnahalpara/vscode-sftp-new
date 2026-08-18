@@ -199,6 +199,22 @@ Note also that most Linux distributions ship `PermitRootLogin prohibit-password`
 `root_password` alone is not enough on such a host; root password login has to be enabled on the
 server as well, or the actions will fail with `All configured authentication methods failed`.
 
+**What this option costs.** It is recommended over granting `NOPASSWD: /bin/sh`, but it is not
+free, and both of its costs are worth weighing before you choose it:
+
+- `root_password` is stored **in cleartext** in `sftp.json`, exactly like every other credential
+  this extension reads. That file lives in your workspace, so it is easy to commit to a shared
+  repository by accident. Add it to `.gitignore`, and do not use this option in a repository you
+  do not control.
+- Enabling `PermitRootLogin yes` to make the lane work is a **host-wide** change, not a
+  per-feature one. It exposes root to password guessing from anywhere the SSH port is reachable,
+  for every client, not just this extension.
+
+If neither trade appeals, the third option is to leave the root lane unconfigured and accept that
+the Web server tab's read panels (vhost config, Test config, certificates, View) will not work:
+the action buttons on both tabs need only `NOPASSWD: /bin/systemctl`, which is a genuinely narrow
+grant, and everything else in the dashboard needs no privilege at all.
+
 If a profile connects through a hop/bastion (`hop`), `root_user`/`root_password` describe the
 **innermost hop** — the real destination server — never the jump host; the jump host's own
 credentials are never touched.

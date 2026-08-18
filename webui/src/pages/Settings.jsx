@@ -60,7 +60,7 @@ export default function Settings({ profile, session }) {
             <Row label="VPN configured" value={profile.hasVpn ? 'Yes' : 'No'} />
             <Row label="Database configured" value={profile.hasDatabase ? 'Yes' : 'No'} />
             <div className="muted" style={{ fontSize: 11.5, marginTop: 10 }}>
-              Services and Web server commands are wrapped in{' '}
+              Service actions, config reads and certificate checks are wrapped in{' '}
               <span className="mono">sudo -n</span> and run as that account
               {profile.privilegedAs && profile.privilegedAs !== profile.username
                 ? ' over a second SSH connection using the profile’s root credentials.'
