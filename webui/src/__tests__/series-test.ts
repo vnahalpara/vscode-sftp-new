@@ -7,7 +7,13 @@ import {
   netPoint,
   loadSeries,
 } from '../series';
-import { SNAP_FULL, SNAP_FIRST_TICK, HISTORY } from '../__fixtures__/snapshot';
+import {
+  SNAP_FULL,
+  SNAP_FIRST_TICK,
+  SNAP_MIXED_NET,
+  SNAP_ZERO_NET,
+  HISTORY,
+} from '../__fixtures__/snapshot';
 
 describe('RANGES', () => {
   it('offers 5, 15 and 60 minute windows', () => {
@@ -35,6 +41,10 @@ describe('pushPoint', () => {
     // The server clock can step backwards across a reconnect.
     const buf = [{ at: 5 }];
     expect(pushPoint(buf, { at: 3 }, 10)).toEqual([{ at: 5 }]);
+  });
+  it('rejects a point with a timestamp equal to the last one', () => {
+    const buf = [{ at: 5 }];
+    expect(pushPoint(buf, { at: 5 }, 10)).toEqual([{ at: 5 }]);
   });
 });
 
@@ -86,6 +96,25 @@ describe('netPoint', () => {
   });
   it('yields nulls, not zeros, when every rate is null', () => {
     const p = netPoint(SNAP_FIRST_TICK);
+    expect(p!.rx).toBeNull();
+    expect(p!.tx).toBeNull();
+  });
+  it('sums the interfaces that have a rate and ignores the ones that do not', () => {
+    const p = netPoint(SNAP_MIXED_NET);
+    expect(p!.rx).toBe(5000);
+    expect(p!.tx).toBe(7000);
+  });
+  it('reports a genuine zero as zero, not as unknown', () => {
+    // A real 0 B/s is information. Collapsing it to null would throw it away.
+    const p = netPoint(SNAP_ZERO_NET);
+    expect(p!.rx).toBe(0);
+    expect(p!.tx).toBe(0);
+  });
+  it('reports unknown as null even when another interface reports zero', () => {
+    // The inverse of the above: `0 || fallback` is the classic bug here, so pin
+    // that a zero accumulator is never mistaken for "no data yet".
+    const onlyNull: any = { ...SNAP_ZERO_NET, net: [{ name: 'eth1', rxBps: null, txBps: null, rxTotal: 0, txTotal: 0 }] };
+    const p = netPoint(onlyNull);
     expect(p!.rx).toBeNull();
     expect(p!.tx).toBeNull();
   });

@@ -42,6 +42,27 @@ export const SNAP_FIRST_TICK: any = {
   procs: [],
 };
 
+// One interface reporting a real rate while another reports null. This is the
+// case that distinguishes "sum the ones we have" from "we know nothing" — and
+// the one where a naive implementation would report 0 and tell an operator a
+// busy host is idle.
+export const SNAP_MIXED_NET: any = {
+  ...SNAP_FULL,
+  net: [
+    { name: 'eth0', rxBps: 5000, txBps: 7000, rxTotal: 1, txTotal: 2 },
+    { name: 'eth1', rxBps: null, txBps: null, rxTotal: 0, txTotal: 0 },
+  ],
+};
+
+// A genuine zero is not the same as an unknown. This one must render 0, not a dash.
+export const SNAP_ZERO_NET: any = {
+  ...SNAP_FULL,
+  net: [
+    { name: 'eth0', rxBps: 0, txBps: 0, rxTotal: 1, txTotal: 2 },
+    { name: 'eth1', rxBps: null, txBps: null, rxTotal: 0, txTotal: 0 },
+  ],
+};
+
 export const HISTORY: any[] = [
   { at: 1_700_000_000_000, one: 0.1, five: 0.2, fifteen: 0.3 },
   { at: 1_700_000_002_000, one: 0.4, five: 0.3, fifteen: 0.3 },
