@@ -43,7 +43,32 @@ export function channelFromStream(stream: any): SamplerChannel {
     },
     close() {
       fireClose();
-      stream.end();
+      // end() alone only half-closes. ssh2 builds this exec channel with
+      // allowHalfOpen true (Client#exec defaults it that way), so its
+      // 'finish' handler sends CHANNEL_EOF and then skips close(). When the
+      // remote sampler notices EOF on stdin and exits, the remote end closes
+      // the channel for us -- but when it does NOT (a wedged loop, a `read`
+      // that never returns, a host under enough load that it never gets
+      // scheduled), the channel and its slot stay allocated on the POOLED
+      // connection SFTP and the terminal also ride, and sshd's MaxSessions
+      // budget drains one dead sampler at a time. close() gives the channel
+      // back regardless of what the far end does with the EOF.
+      //
+      // The typeof guard is because this adapter is deliberately structural
+      // (`stream: any`, so tests can hand it a plain EventEmitter) and not
+      // every writable thing has close().
+      try {
+        stream.end();
+      } catch (error) {
+        // Already gone is exactly what we wanted.
+      }
+      if (typeof stream.close === 'function') {
+        try {
+          stream.close();
+        } catch (error) {
+          // Already gone is exactly what we wanted.
+        }
+      }
     },
   };
 }

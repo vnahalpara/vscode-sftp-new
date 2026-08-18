@@ -5,12 +5,16 @@ import { OS_RELEASE, CPUINFO } from '../__fixtures__/proc';
 class FakeStream extends EventEmitter {
   written: string[] = [];
   ended = false;
+  closed = false;
   write(s: string) {
     this.written.push(s);
     return true;
   }
   end() {
     this.ended = true;
+  }
+  close() {
+    this.closed = true;
   }
 }
 
@@ -79,6 +83,22 @@ describe('channelFromStream', () => {
     const s = new FakeStream();
     channelFromStream(s as any).close();
     expect(s.ended).toBe(true);
+  });
+
+  // end() only half-closes an ssh2 channel (allowHalfOpen), so a sampler that
+  // does not notice EOF would keep its channel slot on the pooled connection
+  // SFTP shares. close() hands it back whatever the far end does.
+  it('closes the channel, not just its write side', () => {
+    const s = new FakeStream();
+    channelFromStream(s as any).close();
+    expect(s.closed).toBe(true);
+  });
+
+  it('tolerates a stream with no close() at all', () => {
+    const s = new EventEmitter() as any;
+    s.write = () => true;
+    s.end = () => undefined;
+    expect(() => channelFromStream(s).close()).not.toThrow();
   });
 
   it('swallows a write after close instead of throwing', () => {
