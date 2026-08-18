@@ -24,8 +24,32 @@ function headerValue(raw: string | string[] | undefined): string | undefined {
 // this server: loopback address or the `localhost` name, on exactly this
 // server's port. Anything else -- a different port, a different host, a
 // bare hostname with no port -- is rejected.
+//
+// Lowercased first because host names are case-insensitive and both callers
+// must agree: url.parse() already lowercases the host it extracts from an
+// Origin, but a raw Host header is passed through verbatim, so without this
+// `Host: LOCALHOST:5599` was rejected while the identical Origin was
+// accepted. That was fail-CLOSED (a false rejection, never a bypass), but it
+// is still wrong, and a needlessly rejected upgrade is a bug report nobody
+// can reproduce.
 function isOurHostPort(hostPort: string | undefined, port: number): boolean {
-  return hostPort === `127.0.0.1:${port}` || hostPort === `localhost:${port}`;
+  const normalized = (hostPort || '').toLowerCase();
+  return normalized === `127.0.0.1:${port}` || normalized === `localhost:${port}`;
+}
+
+// url.parse() THROWS on some inputs -- notably an unterminated IPv6 literal
+// (`http://[`), which raises ERR_INVALID_URL. Both things parsed here (the
+// request target and the Origin header) are fully attacker-controlled and,
+// critically, are parsed BEFORE the token is checked, so an unguarded parse
+// is an uncaught exception in the extension host reachable with no
+// credential at all. Every parse in this module goes through here, and a
+// failure to parse is simply not a request we serve.
+function parseSafe(input: string, parseQuery?: boolean): url.UrlWithParsedQuery | url.Url | null {
+  try {
+    return parseQuery ? url.parse(input, true) : url.parse(input);
+  } catch (error) {
+    return null;
+  }
 }
 
 // A minimal, local twin of httpServer.ts's tokenFrom (query `?t=` first, the
@@ -96,7 +120,10 @@ export function checkUpgrade(
   port: number,
   tokenIsValid: (t: string) => boolean
 ): UpgradeCheck {
-  const parsed = url.parse(req.url || '', true);
+  const parsed = parseSafe(req.url || '', true) as url.UrlWithParsedQuery | null;
+  if (!parsed) {
+    return { ok: false, reason: 'unparseable request target' };
+  }
   const pathname = parsed.pathname || '';
   if (KNOWN_PATHS.indexOf(pathname) === -1) {
     return { ok: false, reason: 'unknown path' };
@@ -107,11 +134,19 @@ export function checkUpgrade(
     return { ok: false, reason: 'host does not match this server (possible DNS rebinding)' };
   }
 
-  // Absent is fine (non-browser client); present-and-wrong is not.
+  // Absent is fine (non-browser client); present-and-wrong is not. A present
+  // Origin that does not even parse is present-and-wrong, not absent.
   const origin = headerValue(req.headers.origin);
   if (origin !== undefined) {
-    const originHostPort = url.parse(origin).host || undefined;
-    if (!isOurHostPort(originHostPort, port)) {
+    const parsedOrigin = parseSafe(origin);
+    // This server only ever speaks http on loopback, so an https (or ws:,
+    // or file:) origin is not a page this server served, whatever host and
+    // port it names.
+    if (
+      !parsedOrigin ||
+      parsedOrigin.protocol !== 'http:' ||
+      !isOurHostPort(parsedOrigin.host || undefined, port)
+    ) {
       return { ok: false, reason: 'origin does not match this server' };
     }
   }
@@ -177,7 +212,28 @@ export function attachWs(server: http.Server, opts: WsOpts): { close(): void } {
   // below so checkUpgrade runs before `ws` ever sees the request.
   const wss = new WebSocketServer({ noServer: true });
 
+  // Node calls this straight out of the parser, inside the raw socket's
+  // 'data' callback: there is no promise, no request object and no framework
+  // between us and the event loop, so anything that throws in here is an
+  // UNCAUGHT exception in the extension host (taking every other extension
+  // and the user's unsaved work with it) and additionally leaks the socket,
+  // which nothing is left to destroy. checkUpgrade is written not to throw,
+  // but "written not to throw" is not a property that survives editing, and
+  // an upgrade request is reachable with no token at all. Refusing is always
+  // a safe answer here, so refuse.
   function onUpgrade(req: http.IncomingMessage, socket: net.Socket, head: Buffer): void {
+    try {
+      handleUpgradeRequest(req, socket, head);
+    } catch (error) {
+      reject(socket, 403, 'Forbidden');
+    }
+  }
+
+  function handleUpgradeRequest(
+    req: http.IncomingMessage,
+    socket: net.Socket,
+    head: Buffer
+  ): void {
     const port = livePort(server);
     // Not listening yet (or listening on a pipe/UDS, which this server never
     // does): there is no port to validate Host/Origin against, so there is
@@ -201,7 +257,24 @@ export function attachWs(server: http.Server, opts: WsOpts): { close(): void } {
     }
 
     wss.handleUpgrade(req, socket, head, ws => {
-      const pathname = url.parse(req.url || '', true).pathname;
+      // `ws` installs NO default 'error' handler on the sockets it accepts,
+      // and both receiverOnError and senderOnError re-emit as 'error' -- so
+      // an 'error' with no listener is EventEmitter's ERR_UNHANDLED_ERROR
+      // throw, i.e. an extension host crash. A single frame with a reserved
+      // bit set, from any client that got past the gate, is enough to reach
+      // it. Attached BEFORE dispatch so there is no window in which the
+      // socket is live and unguarded, and so a handler that forgets to
+      // attach its own is still not a crash. (Handlers should attach their
+      // own anyway -- this one only keeps the process alive; it does not
+      // tear the handler's own state down.)
+      ws.on('error', () => {
+        try {
+          ws.terminate();
+        } catch (error) {
+          // Nothing left to do: the socket is already unusable.
+        }
+      });
+      const pathname = (parseSafe(req.url || '', true) || {}).pathname;
       if (pathname === '/ws/terminal' && opts.onTerminal) {
         opts.onTerminal(ws, req);
         return;
