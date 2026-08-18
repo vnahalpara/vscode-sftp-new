@@ -54,3 +54,245 @@ export const UNIT_FILES_TEXT = [
 // (permission denied, no services matched, etc).
 export const EMPTY_UNITS_TEXT = '';
 export const EMPTY_UNIT_FILES_TEXT = '';
+
+/* -------------------------------------------------------- web server / nginx */
+// Fixtures for the nginx/apache/openssl parsers in `ops/webserver.ts`. Each
+// one is captured (or hand-built to match) the raw text that would sit
+// under a `configFilesCommand`/`certInfoCommand`/`detectWebServerCommand`
+// section, or -- for `parseNginxVhosts`/`parseApacheVhosts` -- the plain
+// config file content that a `{ file, content }` entry would carry after
+// splitting. Every one of these is a defect that has actually happened once
+// in the reference implementation this ports from; see ops-webserver-test.ts
+// for what each one pins.
+
+export const NGINX_UBUNTU_DEFAULT_FILE = '/etc/nginx/sites-enabled/default';
+
+// Ubuntu's stock nginx package ships this file nearly verbatim: an active
+// plain-HTTP `server { ... }` block, followed by the HTTPS block commented
+// out line by line with a leading `#` (the maintainers leave it as a
+// template rather than deleting it). Without comment stripping, the second
+// block parses as a real vhost and the panel shows a site -- with a
+// self-signed "snakeoil" certificate -- that was never actually enabled.
+export const NGINX_UBUNTU_DEFAULT_TEXT = [
+  'server {',
+  '        listen 80 default_server;',
+  '        listen [::]:80 default_server;',
+  '',
+  '        root /var/www/html;',
+  '',
+  '        index index.html index.htm index.nginx-debian.html;',
+  '',
+  '        server_name _;',
+  '',
+  '        location / {',
+  '                try_files $uri $uri/ =404;',
+  '        }',
+  '}',
+  '',
+  '# server {',
+  '#       listen 443 ssl default_server;',
+  '#       listen [::]:443 ssl default_server;',
+  '#',
+  '#       root /var/www/html;',
+  '#',
+  '#       index index.html index.htm index.nginx-debian.html;',
+  '#',
+  '#       server_name _;',
+  '#',
+  '#       ssl_certificate snakeoil.pem;',
+  '#       ssl_certificate_key snakeoil.key;',
+  '#}',
+].join('\n');
+
+export const NGINX_NESTED_LOCATIONS_FILE = '/etc/nginx/sites-enabled/example.conf';
+
+// A `server` block with two sibling `location { ... }` blocks nested
+// inside it. A naive extractor (e.g. a non-greedy `server\s*\{([\s\S]*?)\}`
+// regex) stops at the *first* `}` it meets -- the close of `location /`
+// -- silently truncating the block before `location /api`, and before the
+// trailing `error_log` directive placed after both locations. The
+// `error_log` assertion in the test is what actually proves the block was
+// captured in full, not just that a `root` before the locations survived.
+export const NGINX_NESTED_LOCATIONS_TEXT = [
+  'server {',
+  '    listen 80;',
+  '    server_name example.com;',
+  '    root /var/www/example;',
+  '',
+  '    location / {',
+  '        try_files $uri $uri/ =404;',
+  '    }',
+  '',
+  '    location /api {',
+  '        proxy_pass http://127.0.0.1:3000;',
+  '    }',
+  '',
+  '    error_log /var/log/nginx/example-error.log;',
+  '}',
+].join('\n');
+
+// A directive whose value contains a literal `#`. `stripComments` has no
+// notion of quoting, so it cannot tell this `#` apart from a real comment
+// marker and strips from it to the end of the line -- including this
+// directive's own terminating `;`. Pinned here as a known, honestly
+// documented limitation: the missing `;` means `directive`/`directiveAll`
+// fail to match `root` at all (return null / omit it) rather than
+// returning a truncated or -- absent the newline-exclusion fix in
+// `directiveRe` -- a corrupted value that swallows the next directive too.
+export const NGINX_HASH_IN_VALUE_FILE = '/etc/nginx/sites-enabled/weird.conf';
+export const NGINX_HASH_IN_VALUE_TEXT = [
+  'server {',
+  '    listen 80;',
+  '    server_name example.com;',
+  '    root /var/www/weird#dir;',
+  '    access_log /var/log/nginx/access.log;',
+  '}',
+].join('\n');
+
+// Direct, minimal inputs for `stripComments` itself, isolating the two
+// cases above from block/directive parsing.
+export const STRIP_COMMENTS_TRAILING_TEXT = 'server_name example.com; # a genuine trailing comment';
+export const STRIP_COMMENTS_HASH_IN_VALUE_TEXT = 'root /var/www/weird#dir;';
+
+export const NGINX_SSL_LISTEN_FILE = '/etc/nginx/sites-enabled/secure.conf';
+// `listen 443 ssl http2;` -- the `ssl` parameter and the 443 port both
+// independently signal SSL.
+export const NGINX_SSL_LISTEN_TEXT = [
+  'server {',
+  '    listen 443 ssl http2;',
+  '    server_name secure.example.com;',
+  '    root /var/www/secure;',
+  '    ssl_certificate /etc/ssl/certs/secure.example.com.pem;',
+  '}',
+].join('\n');
+
+export const NGINX_SSL_CERT_ONLY_FILE = '/etc/nginx/sites-enabled/certonly.conf';
+// `ssl_certificate` present but the vhost only listens on plain port 80 --
+// e.g. a host mid-migration to TLS termination elsewhere. `ssl` must still
+// be true because a certificate is configured, independent of the listen
+// port.
+export const NGINX_SSL_CERT_ONLY_TEXT = [
+  'server {',
+  '    listen 80;',
+  '    server_name cert-only.example.com;',
+  '    root /var/www/certonly;',
+  '    ssl_certificate /etc/ssl/certs/certonly.pem;',
+  '}',
+].join('\n');
+
+export const NGINX_PLAIN_8443_FILE = '/etc/nginx/sites-enabled/altport.conf';
+// A plain (non-SSL) listener on port 8443. The reference implementation
+// tested `443` as a bare substring, and "8443".includes("443") is true, so
+// this would have been wrongly reported as SSL. Pins the fix in
+// `listenImpliesSsl`, which requires 443 to be a standalone port token.
+export const NGINX_PLAIN_8443_TEXT = [
+  'server {',
+  '    listen 8443;',
+  '    server_name alt-port.example.com;',
+  '    root /var/www/altport;',
+  '}',
+].join('\n');
+
+export const NGINX_NO_SERVER_NAME_FILE = '/etc/nginx/sites-enabled/noname.conf';
+// No `server_name` directive at all -- nginx itself treats this as the
+// catch-all `_` server, and the parser must report the same.
+export const NGINX_NO_SERVER_NAME_TEXT = [
+  'server {',
+  '    listen 80;',
+  '    root /var/www/noname;',
+  '}',
+].join('\n');
+
+/* ------------------------------------------------------- web server / apache */
+
+export const APACHE_VHOSTS_FILE = '/etc/apache2/sites-enabled/example.conf';
+// A plain HTTP vhost with a ServerAlias and a proxy, an HTTPS vhost with no
+// alias (pinning that a missing `ServerAlias` reports null rather than
+// throwing or defaulting to something misleading), and a commented-out
+// third vhost that must not appear at all.
+export const APACHE_VHOSTS_TEXT = [
+  '<VirtualHost *:80>',
+  '    ServerName example.com',
+  '    ServerAlias www.example.com',
+  '    DocumentRoot /var/www/example',
+  '    ProxyPass /api http://127.0.0.1:4000/',
+  '    CustomLog /var/log/apache2/example-access.log combined',
+  '    ErrorLog /var/log/apache2/example-error.log',
+  '</VirtualHost>',
+  '',
+  '<VirtualHost *:443>',
+  '    ServerName secure.example.com',
+  '    DocumentRoot /var/www/secure',
+  '    SSLEngine on',
+  '    SSLCertificateFile /etc/ssl/certs/secure.example.com.pem',
+  '</VirtualHost>',
+  '',
+  '# <VirtualHost *:8443>',
+  '#     ServerName ghost.example.com',
+  '#     DocumentRoot /var/www/ghost',
+  '# </VirtualHost>',
+].join('\n');
+
+/* ------------------------------------------------------------- detectWebServer */
+// Raw `@@`-sectioned text matching exactly what `detectWebServerCommand`
+// (src/modules/serverManager/ops/command.ts) frames: `@@nginx`,
+// `@@apache_bin`, `@@apache`, `@@active`, `@@ports`.
+
+export const DETECT_BOTH_TEXT = [
+  '@@nginx',
+  'nginx version: nginx/1.18.0 (Ubuntu)',
+  '@@apache_bin',
+  'apache2',
+  '@@apache',
+  'Server version: Apache/2.4.41 (Ubuntu)',
+  '@@active',
+  'nginx|active|enabled',
+  'apache2|active|enabled',
+  'httpd|unknown|unknown',
+  '@@ports',
+  'LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=123,fd=6))',
+  'LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=123,fd=7))',
+].join('\n');
+
+export const DETECT_NGINX_ONLY_TEXT = [
+  '@@nginx',
+  'nginx version: nginx/1.24.0 (Ubuntu)',
+  '@@apache_bin',
+  '@@apache',
+  '@@active',
+  'nginx|active|enabled',
+  'apache2|inactive|disabled',
+  'httpd|inactive|disabled',
+  '@@ports',
+  'LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=99,fd=6))',
+].join('\n');
+
+// Neither web server installed, and nothing listening on the watched ports.
+export const DETECT_NONE_TEXT = [
+  '@@nginx',
+  '@@apache_bin',
+  '@@apache',
+  '@@active',
+  'nginx|inactive|disabled',
+  'apache2|inactive|disabled',
+  'httpd|inactive|disabled',
+  '@@ports',
+].join('\n');
+
+/* --------------------------------------------------------------- certificateInfo */
+// Raw `@@<path>`-sectioned text matching exactly what `certInfoCommand`
+// (src/modules/serverManager/ops/command.ts) frames.
+
+export const CERT_INFO_OK_PATH = '/etc/ssl/certs/example.com.pem';
+export const CERT_INFO_MISSING_PATH = '/etc/ssl/certs/missing.pem';
+
+export const CERT_INFO_TEXT = [
+  `@@${CERT_INFO_OK_PATH}`,
+  'notAfter=Sep 20 12:00:00 2026 GMT',
+  'subject=CN = example.com',
+  'issuer=CN = R3',
+  `@@${CERT_INFO_MISSING_PATH}`,
+  'unable to load certificate',
+  "140245123456:error:02001002:system library:fopen:No such file or directory:bss_file.c:158:fopen('/etc/ssl/certs/missing.pem','r')",
+  '140245123456:error:2006D080:BIO routines:BIO_new_file:no such file:bss_file.c:165:',
+].join('\n');
