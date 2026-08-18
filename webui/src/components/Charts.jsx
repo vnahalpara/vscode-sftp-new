@@ -143,8 +143,23 @@ function SeriesChart({ data, series, height, unit, format, area }) {
             tick={plottable || fallback.tick ? { fill: INK.muted, fontSize: 11 } : false}
             tickLine={false}
             axisLine={false}
-            width={54}
-            tickFormatter={(v) => `${v}${unit}`}
+            // 54 was sized for short labels ("100%", "0.75") and, combined
+            // with the chart's negative left margin below, clipped the
+            // leading digit of longer formatted values (fmtRate's
+            // "214.8 KB/s" and friends) — confirmed by measuring the
+            // rendered tick <text> bboxes, which went negative-x at 54/64.
+            // 90 keeps every observed fmtRate/fmtBytes-style label's bbox
+            // safely inside the SVG at 0 for a positive x, with room to
+            // spare for the widest realistic case ("1023.9 PB/s"), while
+            // adding only a small, non-breaking gutter to the short percent/
+            // load labels.
+            width={90}
+            // Same fallback order as TooltipBox: a caller-supplied formatter
+            // (fmtRate, fmtLoad, ...) always wins. Without this, a chart
+            // whose caller passes `format` but no `unit` (network throughput
+            // is exactly this) rendered bare, unscaled numbers on the axis
+            // while the tooltip correctly showed a formatted rate.
+            tickFormatter={(v) => (format ? format(v) : `${v}${unit}`)}
           />
           <Tooltip
             content={<TooltipBox unit={unit} format={format} />}
