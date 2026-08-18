@@ -29,24 +29,40 @@ import localFs from './localFs';
 // collided now correctly get their own connections.
 const HASH_SEP = '\u0000';
 
+// A separator only separates if it cannot appear inside the things it
+// separates. JSON does permit an escaped NUL inside a string, so without this a
+// crafted value could forge the separator and impersonate a different
+// config: because object keys are sorted, a value in the alphabetically
+// first key could swallow every later key/value pair, making
+// {host: 'h\0password\0r\0username\0root'} hash identically to
+// {host: 'h', password: 'r', username: 'root'}. JSON.stringify escapes a
+// literal NUL as a six-character escape, so an encoded string can never
+// contain a raw HASH_SEP byte. Only strings need it -- no number, boolean,
+// bigint, symbol or function renders to a NUL -- and restricting it to
+// strings keeps this total, where JSON.stringify(bigint) would throw.
+// It also makes 22 and '22' distinguishable, which String() alone did not.
+function encodeScalar(value: any): string {
+  return typeof value === 'string' ? JSON.stringify(value) : String(value);
+}
+
 function canonicalize(value: any): string {
   if (value === null || value === undefined) {
     return String(value);
   }
   if (Array.isArray(value)) {
-    return '[' + value.map(canonicalize).join(HASH_SEP) + ']';
+    return '[' + value.map(item => canonicalize(item)).join(HASH_SEP) + ']';
   }
   if (typeof value === 'object') {
     return (
       '{' +
       Object.keys(value)
         .sort()
-        .map(key => key + HASH_SEP + canonicalize(value[key]))
+        .map(key => encodeScalar(key) + HASH_SEP + canonicalize(value[key]))
         .join(HASH_SEP) +
       '}'
     );
   }
-  return String(value);
+  return encodeScalar(value);
 }
 
 export function hashOption(option: any): string {

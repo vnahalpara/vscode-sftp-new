@@ -114,4 +114,39 @@ describe('hashOption', () => {
       expect(hashOption(config)).toBe(hashOption(copy));
     });
   });
+
+  // A separator only separates if it cannot appear inside the things it
+  // separates. JSON permits an escaped NUL inside a string, so a crafted
+  // sftp.json could otherwise forge the separator: because keys are sorted,
+  // a value in the alphabetically first key could swallow every later
+  // key/value pair and impersonate a different config's pool key. These are
+  // the exact colliding pairs a reviewer demonstrated against the previous
+  // implementation.
+  describe('a NUL inside a string value cannot forge the separator', () => {
+    const SEP = '\u0000';
+
+    test('a value cannot swallow the key/value pairs that follow it', () => {
+      const real = { host: 'evil.example.com', password: 'r', username: 'root' };
+      const forged = {
+        host: ['evil.example.com', 'password', 'r', 'username', 'root'].join(SEP),
+      };
+      expect(hashOption(real)).not.toBe(hashOption(forged));
+    });
+
+    test('a string cannot impersonate a nested object', () => {
+      const real = { hop: { host: 'target', username: 'root' } };
+      const forged = {
+        hop: '{' + ['host', 'target', 'username', 'root'].join(SEP) + '}',
+      };
+      expect(hashOption(real)).not.toBe(hashOption(forged));
+    });
+
+    test('a number and its string form stay distinguishable', () => {
+      expect(hashOption({ port: 22 })).not.toBe(hashOption({ port: '22' }));
+    });
+
+    test('a null and the string "null" stay distinguishable', () => {
+      expect(hashOption({ x: null })).not.toBe(hashOption({ x: 'null' }));
+    });
+  });
 });
