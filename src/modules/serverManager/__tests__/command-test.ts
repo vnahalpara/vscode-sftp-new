@@ -99,12 +99,12 @@ describe('certInfoCommand', () => {
   });
   it('keeps the path out of any double-quoted (interpolating) shell context', () => {
     // The path is never spliced into the script body -- the script only
-    // ever refers to the positional parameter "$1", so a value containing
+    // ever refers to the positional parameter "${1}", so a value containing
     // $(...) or `...` can never reach an interpolating context.
     const evil = '$(touch /tmp/pwned)`id`';
     const cmd = certInfoCommand([evil]);
-    expect(cmd).toMatch(/"@@\$1"/);
-    expect(cmd).toMatch(/-in "\$1"/);
+    expect(cmd).toMatch(/"@@\$\{1\}"/);
+    expect(cmd).toMatch(/-in "\$\{1\}"/);
     expect(cmd).not.toContain(`"@@${evil}`);
     expect(cmd).not.toMatch(/echo "@@\$\(/);
     // The hostile value appears exactly once: as the single-quoted
@@ -127,7 +127,43 @@ describe('certInfoCommand', () => {
     const cmd = certInfoCommand(['/a.pem']);
     expect(cmd).not.toMatch(/echo /);
     expect(cmd).toContain('printf');
-    expect(cmd).toMatch(/"@@\$1"/);
+    expect(cmd).toMatch(/"@@\$\{1\}"/);
+  });
+  it('rejects a path containing a newline, so it cannot forge an @@ marker', () => {
+    expect(() => certInfoCommand(['/etc/ssl/good.pem', "/etc/ssl/evil\n@@units"])).toThrow();
+  });
+  it('rejects a path containing a carriage return or NUL byte', () => {
+    expect(() => certInfoCommand(['/etc/ssl/evil\r.pem'])).toThrow();
+    expect(() => certInfoCommand(['/etc/ssl/evil\0.pem'])).toThrow();
+  });
+  it('braces every positional parameter, including the tenth and eleventh, so $10 is never read as ${1}0', () => {
+    // POSIX sh parses the unbraced form $10 as "${1}" followed by a literal
+    // "0" -- with 10+ paths (routine on a multi-vhost host) an unbraced
+    // template would silently point the tenth entry at the wrong value.
+    const paths = Array.from({ length: 11 }, (_, i) => `/etc/ssl/c${i + 1}.pem`);
+    const cmd = certInfoCommand(paths);
+
+    // Every path must appear, quoted, exactly once as a trailing positional
+    // argument -- proving none were dropped and none collided.
+    paths.forEach(p => {
+      expect(cmd.split(shellSingle(p)).length - 1).toBe(1);
+    });
+
+    // The script body must reference ${10} and ${11} explicitly (braced),
+    // and must NOT contain the unbraced, misparsed forms $10 / $11 (which
+    // POSIX sh would read as ${1}0 / ${1}1).
+    expect(cmd).toMatch(/"@@\$\{10\}"/);
+    expect(cmd).toMatch(/-in "\$\{10\}"/);
+    expect(cmd).toMatch(/"@@\$\{11\}"/);
+    expect(cmd).toMatch(/-in "\$\{11\}"/);
+    expect(cmd).not.toMatch(/\$10\b/);
+    expect(cmd).not.toMatch(/\$11\b/);
+
+    // Every parameter from ${1} through ${11} is present and distinct.
+    for (let i = 1; i <= 11; i++) {
+      expect(cmd).toMatch(new RegExp(`"@@\\$\\{${i}\\}"`));
+    }
+    expect(cmd.match(/\$\{\d+\}/g)!.length).toBe(11 * 2); // once in the @@ header, once in -in, per path
   });
 });
 
@@ -231,6 +267,14 @@ describe('readFileCommand', () => {
     const cmd = readFileCommand('--expression=1w/etc/passwd', 100);
     expect(cmd).toBe(`sudo -n sed -n '1,100p' -- '--expression=1w/etc/passwd'`);
     expect(cmd).toMatch(/ -- '--expression=1w\/etc\/passwd'$/);
+  });
+  it('throws for a path containing a newline, carriage return, or NUL byte', () => {
+    // A single, specific file is being named here (unlike certInfoCommand's
+    // batch listing), so there is no reasonable "silently skip it" option:
+    // either a real file gets read, or the caller gets a clear error.
+    expect(() => readFileCommand('/var/log/evil\n; rm -rf /', 10)).toThrow();
+    expect(() => readFileCommand('/var/log/evil\r.log', 10)).toThrow();
+    expect(() => readFileCommand('/var/log/evil\0.log', 10)).toThrow();
   });
 });
 

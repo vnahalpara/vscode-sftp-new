@@ -174,27 +174,55 @@ export function testConfigCommand(kind: WebServerKind): string {
 
 // ------------------------------------------------------------ certificates --
 
+// A path containing a raw newline, carriage return, or NUL can never be a
+// legitimate filesystem path reference we should act on, and -- for the
+// two builders below that frame their output with `@@` markers keyed by
+// path -- a raw newline would forge extra section boundaries downstream in
+// `splitAt`. Reject rather than silently drop: a control character in a
+// cert path pulled from a live nginx/apache config means that config is
+// corrupt or hostile, and quietly omitting a certificate from a listing
+// (or silently no-op'ing a file read) is worse than surfacing an error.
+function hasControlChars(value: string): boolean {
+  return /[\n\r\0]/.test(value);
+}
+
 // Certificate paths cannot be pattern-validated the way unit names can -- a
-// legitimate path contains `/` -- so they rely on `shellSingle` alone.
+// legitimate path contains `/` -- so they rely on `shellSingle` (plus the
+// control-character rejection above) rather than a charset allowlist.
 //
 // Each path is passed as a positional parameter to a `sh -c` script rather
 // than spliced into the script text: the script body only ever refers to
-// `$1`, `$2`, ... and the actual values are appended, each `shellSingle`-
+// `${1}`, `${2}`, ... and the actual values are appended, each `shellSingle`-
 // quoted exactly once, after the script. This sidesteps the classic nested-
 // quoting trap where wrapping an already-quoted value in a second outer
 // quoting layer would require re-escaping it -- here every value is quoted
 // exactly once, for the one shell that will parse this string.
 //
-// `openssl x509 -in "$1"` needs no `--` guard: the path is only ever the
+// Positional parameters are always braced (`${1}`, not `$1`), even below
+// ten: POSIX `sh` parses the *unbraced* form `$10` as `${1}` followed by a
+// literal `0`, not as parameter 10. With ten or more certificates -- not
+// unusual on a multi-vhost host -- unbraced references would silently
+// reference the wrong (or a nonexistent) parameter for the tenth path
+// onward. Bracing uniformly, rather than only past nine, is what stops this
+// from recurring the next time this template is edited.
+//
+// `openssl x509 -in "${1}"` needs no `--` guard: the path is only ever the
 // *value* of the `-in` option (OpenSSL's own option table unconditionally
 // consumes the next argv element for an option declared to take a value),
 // never a bare positional operand, so there is no flag/operand ambiguity
-// for a leading `-` to exploit.
+// for a leading `-` to exploit -- and `openssl x509` does not accept `--`
+// as an end-of-options marker in any case.
 export function certInfoCommand(paths: string[]): string {
   const list: string[] = [];
   const seen = new Set<string>();
   (paths || []).forEach(p => {
-    if (p && !seen.has(p)) {
+    if (!p) {
+      return;
+    }
+    if (hasControlChars(p)) {
+      throw new Error('Refusing to build a certificate command for a path containing a newline or NUL byte');
+    }
+    if (!seen.has(p)) {
       seen.add(p);
       list.push(p);
     }
@@ -204,7 +232,7 @@ export function certInfoCommand(paths: string[]): string {
   }
   const script = list
     .map((_p, i) => {
-      const posParam = `$${i + 1}`;
+      const posParam = `\${${i + 1}}`;
       return `printf '%s\\n' "@@${posParam}"; openssl x509 -noout -enddate -subject -issuer -in "${posParam}" 2>&1`;
     })
     .join('; ');
@@ -230,7 +258,17 @@ function clampLines(lines: number): number {
 // without `--` a leading-`-` value is a valid single argv element that sed
 // happily parses as `-e '1w/etc/passwd'` -- opening (and truncating)
 // `/etc/passwd` at script-compile time, before any input is even read.
+//
+// A path containing a newline/CR/NUL is rejected the same way certInfoCommand
+// rejects one (see `hasControlChars` above): this builder names a single,
+// specific file to read, so unlike a batch listing there is no reasonable
+// "silently skip it" option -- either a real file gets read or the caller
+// gets a clear error, matching how `serviceActionCommand` etc. throw rather
+// than quietly building nothing for bad input.
 export function readFileCommand(path: string, lines: number): string {
+  if (hasControlChars(path)) {
+    throw new Error('Refusing to build a read command for a path containing a newline or NUL byte');
+  }
   const n = clampLines(lines);
   return `sudo -n sed -n '1,${n}p' -- ${shellSingle(path)}`;
 }
