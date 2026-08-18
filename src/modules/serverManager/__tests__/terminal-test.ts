@@ -32,6 +32,7 @@ class FakeSocket extends FakeEmitter implements WsLike {
 class FakeStream extends FakeEmitter implements ShellStream {
   written: Array<string | Buffer> = [];
   ended = false;
+  closed = false;
   windows: Array<{ rows: number; cols: number }> = [];
 
   write(data: string | Buffer): void {
@@ -39,6 +40,9 @@ class FakeStream extends FakeEmitter implements ShellStream {
   }
   end(): void {
     this.ended = true;
+  }
+  close(): void {
+    this.closed = true;
   }
   setWindow(rows: number, cols: number): void {
     this.windows.push({ rows, cols });
@@ -128,6 +132,52 @@ test('closing the socket ends the remote stream', async () => {
   socket.emit('close');
 
   expect(stream.ended).toBe(true);
+});
+
+// end() on an ssh2 shell channel sends CHANNEL_EOF and stops there
+// (allowHalfOpen), leaving the remote PTY running and the channel slot
+// allocated on the POOLED connection SFTP also uses. close() is what actually
+// gives the channel back, so assert it specifically rather than settling for
+// "ended".
+test('closing the socket CLOSES the remote channel, not just its write side', async () => {
+  const stream = new FakeStream();
+  const socket = new FakeSocket();
+  bridgeTerminal(deps(Promise.resolve(stream)), socket);
+  await flush();
+
+  socket.emit('close');
+
+  expect(stream.closed).toBe(true);
+});
+
+test('a socket that closed while the shell was still opening closes the channel', async () => {
+  let resolveShell: (stream: ShellStream) => void = () => undefined;
+  const shellPromise = new Promise<ShellStream>(resolve => {
+    resolveShell = resolve;
+  });
+  const socket = new FakeSocket();
+  bridgeTerminal(deps(shellPromise), socket);
+
+  socket.emit('close');
+  const stream = new FakeStream();
+  resolveShell(stream);
+  await flush();
+
+  expect(stream.ended).toBe(true);
+  expect(stream.closed).toBe(true);
+});
+
+test('a stream that throws from end() is still closed', async () => {
+  const stream = new FakeStream();
+  stream.end = () => {
+    throw new Error('already gone');
+  };
+  const socket = new FakeSocket();
+  bridgeTerminal(deps(Promise.resolve(stream)), socket);
+  await flush();
+
+  expect(() => socket.emit('close')).not.toThrow();
+  expect(stream.closed).toBe(true);
 });
 
 test('the remote stream closing closes the socket', async () => {

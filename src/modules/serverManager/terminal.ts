@@ -20,6 +20,9 @@ export interface ShellStream {
   on(event: 'error', cb: (err: Error) => void): void;
   write(data: string | Buffer): void;
   end(): void;
+  // Sends CHANNEL_CLOSE. Declared alongside end() because end() ALONE does
+  // not release the channel -- see releaseStream below for why that matters.
+  close(): void;
   setWindow(rows: number, cols: number, height: number, width: number): void;
 }
 
@@ -87,6 +90,36 @@ function classifyControl(text: string): ControlFrame {
   return { kind: 'resize', size: { cols: msg.cols, rows: msg.rows } };
 }
 
+// Give the remote channel back. end() alone is NOT enough and the difference
+// is not cosmetic: ssh2 builds a shell Channel with allowHalfOpen true, and
+// its 'finish' handler (Channel.js's onFinish) sends CHANNEL_EOF and then
+// deliberately SKIPS close() for a half-open-capable channel. The remote PTY
+// keeps running, the local Channel and its _chanMgr slot stay allocated, and
+// the stream's own 'close' never fires -- so nothing else reaps it either.
+//
+// That leak lands on the POOLED SSH connection this dashboard shares with
+// SFTP and the monitor sampler. With sshd's default MaxSessions 10, roughly
+// ten open-and-close cycles of the Terminal tab exhaust the channel budget
+// and every later file transfer, `systemctl status` and metrics sample on
+// that profile fails with "administratively prohibited", while ten orphaned
+// shells sit running on the user's production host. end() + close() is
+// exactly what ssh2's own Channel.destroy() does.
+//
+// The two calls are caught separately on purpose: a throw from end() (an
+// already-dead channel) must not be allowed to skip the close().
+function releaseStream(stream: ShellStream): void {
+  try {
+    stream.end();
+  } catch (error) {
+    // Already gone is exactly what we wanted.
+  }
+  try {
+    stream.close();
+  } catch (error) {
+    // Already gone is exactly what we wanted.
+  }
+}
+
 export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
   let stream: ShellStream | null = null;
   // Input (and a resize) can arrive while openShell()'s round trip to the
@@ -106,11 +139,7 @@ export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
     }
     torndown = true;
     if (stream) {
-      try {
-        stream.end();
-      } catch (error) {
-        // Already gone is exactly what we wanted.
-      }
+      releaseStream(stream);
     }
     try {
       socket.close(1011, reason);
@@ -152,11 +181,7 @@ export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
       // no reader left on the other end, so do not leave a shell running
       // with nobody attached to it.
       if (torndown) {
-        try {
-          openedStream.end();
-        } catch (error) {
-          // Already gone is exactly what we wanted.
-        }
+        releaseStream(openedStream);
         return;
       }
 
