@@ -193,6 +193,77 @@ export const NGINX_PLAIN_8443_TEXT = [
   '}',
 ].join('\n');
 
+// -- Fix round 1: additional `listen` shapes traced by hand in review of the
+// `listenImpliesSsl` boundary fix, added as regression tests per shape so a
+// future edit to the regex can't silently regress one of them the way it
+// would have gone untested otherwise (per the project's history with the
+// `$10` positional-parameter bug and the systemd bullet-prefix bug -- both
+// were traced-correct once and untested, and both shipped broken).
+
+export const NGINX_LISTEN_443_BARE_FILE = '/etc/nginx/sites-enabled/bare443.conf';
+// `listen 443 ssl;` with no further parameters after `ssl` -- the minimal
+// form of an explicit SSL listener, as opposed to the `ssl http2` shape
+// already covered elsewhere.
+export const NGINX_LISTEN_443_BARE_TEXT = [
+  'server {',
+  '    listen 443 ssl;',
+  '    server_name bare443.example.com;',
+  '    root /var/www/bare443;',
+  '}',
+].join('\n');
+
+export const NGINX_LISTEN_44300_FILE = '/etc/nginx/sites-enabled/port44300.conf';
+// A port that starts with the digits "443" but is not port 443 -- 44300,
+// not 443. Distinct from the 8443 case (443 as a suffix): here 443 is a
+// prefix of a longer digit run, which the lookahead half of the boundary
+// check (`(?!\d)`) is what rejects.
+export const NGINX_LISTEN_44300_TEXT = [
+  'server {',
+  '    listen 44300;',
+  '    server_name port44300.example.com;',
+  '    root /var/www/port44300;',
+  '}',
+].join('\n');
+
+export const NGINX_LISTEN_IPV4_443_FILE = '/etc/nginx/sites-enabled/ipv4-443.conf';
+// Port 443 with an explicit IPv4 bind address and no `ssl` keyword --
+// nginx still terminates TLS here if paired with `ssl_certificate`
+// elsewhere, but this fixture isolates the port-443 half of the OR.
+export const NGINX_LISTEN_IPV4_443_TEXT = [
+  'server {',
+  '    listen 127.0.0.1:443;',
+  '    server_name ipv4-443.example.com;',
+  '    root /var/www/ipv4-443;',
+  '}',
+].join('\n');
+
+export const NGINX_LISTEN_IPV6_443_SSL_FILE = '/etc/nginx/sites-enabled/ipv6-443.conf';
+// Port 443 with an IPv6 bind address and the `ssl` keyword -- the `[::]`
+// literal brackets must not confuse the boundary check.
+export const NGINX_LISTEN_IPV6_443_SSL_TEXT = [
+  'server {',
+  '    listen [::]:443 ssl;',
+  '    server_name ipv6-443.example.com;',
+  '    root /var/www/ipv6-443;',
+  '}',
+].join('\n');
+
+export const NGINX_LISTEN_UNIX_SOCKET_FILE = '/etc/nginx/sites-enabled/unix-socket.conf';
+// Documented limitation, not a blessed behaviour: the boundary regex has no
+// notion of what kind of value it is scanning, so a standalone "443" digit
+// run inside an unrelated value -- here a unix-socket path that merely
+// happens to contain "443" -- still reads as a port and false-positives
+// `ssl: true`. A real fix would need to parse the listen value's grammar
+// (host[:port] vs unix:path) rather than pattern-matching the whole raw
+// string; out of scope for this fix.
+export const NGINX_LISTEN_UNIX_SOCKET_TEXT = [
+  'server {',
+  '    listen unix:/run/nginx-443.sock;',
+  '    server_name socket.example.com;',
+  '    root /var/www/socket;',
+  '}',
+].join('\n');
+
 export const NGINX_NO_SERVER_NAME_FILE = '/etc/nginx/sites-enabled/noname.conf';
 // No `server_name` directive at all -- nginx itself treats this as the
 // catch-all `_` server, and the parser must report the same.

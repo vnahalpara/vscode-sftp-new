@@ -10,6 +10,11 @@ import {
   NGINX_SSL_LISTEN_FILE, NGINX_SSL_LISTEN_TEXT,
   NGINX_SSL_CERT_ONLY_FILE, NGINX_SSL_CERT_ONLY_TEXT,
   NGINX_PLAIN_8443_FILE, NGINX_PLAIN_8443_TEXT,
+  NGINX_LISTEN_443_BARE_FILE, NGINX_LISTEN_443_BARE_TEXT,
+  NGINX_LISTEN_44300_FILE, NGINX_LISTEN_44300_TEXT,
+  NGINX_LISTEN_IPV4_443_FILE, NGINX_LISTEN_IPV4_443_TEXT,
+  NGINX_LISTEN_IPV6_443_SSL_FILE, NGINX_LISTEN_IPV6_443_SSL_TEXT,
+  NGINX_LISTEN_UNIX_SOCKET_FILE, NGINX_LISTEN_UNIX_SOCKET_TEXT,
   NGINX_NO_SERVER_NAME_FILE, NGINX_NO_SERVER_NAME_TEXT,
   APACHE_VHOSTS_FILE, APACHE_VHOSTS_TEXT,
   DETECT_BOTH_TEXT, DETECT_NGINX_ONLY_TEXT, DETECT_NONE_TEXT,
@@ -133,6 +138,61 @@ describe('parseNginxVhosts', () => {
       { file: NGINX_NO_SERVER_NAME_FILE, content: NGINX_NO_SERVER_NAME_TEXT },
     ]);
     expect(vhosts.map(v => v.file)).toEqual([NGINX_SSL_LISTEN_FILE, NGINX_NO_SERVER_NAME_FILE]);
+  });
+});
+
+// Fix round 1: `listenImpliesSsl` is not exported, so these go through
+// `parseNginxVhosts` -- the most honest reachable surface -- with one
+// minimal fixture per `listen` shape traced by hand in review. Each of
+// these was confirmed to fail against the pre-fix `/ssl|443/` substring
+// regex before this round's fixes were locked in (see task-3-report.md,
+// "Fix round 1" section).
+describe('parseNginxVhosts: ssl boundary regex, every listen shape traced in review', () => {
+  it('listen 443 ssl; (no further params) -> ssl true', () => {
+    const [vhost] = parseNginxVhosts([{ file: NGINX_LISTEN_443_BARE_FILE, content: NGINX_LISTEN_443_BARE_TEXT }]);
+    expect(vhost.listen).toEqual(['443 ssl']);
+    expect(vhost.ssl).toBe(true);
+  });
+
+  it('listen 44300; (443 as a digit-run prefix, not the port) -> ssl false', () => {
+    const [vhost] = parseNginxVhosts([{ file: NGINX_LISTEN_44300_FILE, content: NGINX_LISTEN_44300_TEXT }]);
+    expect(vhost.listen).toEqual(['44300']);
+    expect(vhost.ssl).toBe(false);
+  });
+
+  it('listen 127.0.0.1:443; (explicit IPv4 bind address, no ssl keyword) -> ssl true', () => {
+    const [vhost] = parseNginxVhosts([{ file: NGINX_LISTEN_IPV4_443_FILE, content: NGINX_LISTEN_IPV4_443_TEXT }]);
+    expect(vhost.listen).toEqual(['127.0.0.1:443']);
+    expect(vhost.ssl).toBe(true);
+  });
+
+  it('listen [::]:443 ssl; (IPv6 bind address) -> ssl true', () => {
+    const [vhost] = parseNginxVhosts([{ file: NGINX_LISTEN_IPV6_443_SSL_FILE, content: NGINX_LISTEN_IPV6_443_SSL_TEXT }]);
+    expect(vhost.listen).toEqual(['[::]:443 ssl']);
+    expect(vhost.ssl).toBe(true);
+  });
+
+  it('listen 80; with an ssl_certificate directive present -> ssl true via the certificate path, not the port', () => {
+    const [vhost] = parseNginxVhosts([{ file: NGINX_SSL_CERT_ONLY_FILE, content: NGINX_SSL_CERT_ONLY_TEXT }]);
+    expect(vhost.listen).toEqual(['80']);
+    expect(vhost.certificate).not.toBeNull();
+    expect(vhost.ssl).toBe(true);
+  });
+
+  it('listen 80; with no certificate directive -> ssl false', () => {
+    const [vhost] = parseNginxVhosts([{ file: NGINX_NO_SERVER_NAME_FILE, content: NGINX_NO_SERVER_NAME_TEXT }]);
+    expect(vhost.listen).toEqual(['80']);
+    expect(vhost.certificate).toBeNull();
+    expect(vhost.ssl).toBe(false);
+  });
+
+  it('documents a known limitation: a standalone "443" digit run inside an unrelated value ' +
+     '(a unix-socket path that happens to contain "443") still false-positives ssl true -- the boundary ' +
+     'regex has no notion of the listen value\'s grammar (host[:port] vs unix:path), it only knows digit ' +
+     'boundaries', () => {
+    const [vhost] = parseNginxVhosts([{ file: NGINX_LISTEN_UNIX_SOCKET_FILE, content: NGINX_LISTEN_UNIX_SOCKET_TEXT }]);
+    expect(vhost.listen).toEqual(['unix:/run/nginx-443.sock']);
+    expect(vhost.ssl).toBe(true);
   });
 });
 
