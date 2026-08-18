@@ -157,9 +157,64 @@ function assertWebServerKind(kind: WebServerKind): void {
   }
 }
 
-const NGINX_GLOBS = '/etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf /usr/local/etc/nginx/conf.d/*.conf';
-const APACHE_GLOBS =
-  '/etc/apache2/sites-enabled/*.conf /etc/httpd/conf.d/*.conf /etc/httpd/sites-enabled/*.conf /etc/apache2/vhosts.d/*.conf';
+// One glob per entry, and the shell word list is derived from it, so the
+// list a command expands and the list a path is checked against below can
+// never drift apart.
+const NGINX_GLOB_LIST = [
+  '/etc/nginx/sites-enabled/*',
+  '/etc/nginx/conf.d/*.conf',
+  '/usr/local/etc/nginx/conf.d/*.conf',
+];
+const APACHE_GLOB_LIST = [
+  '/etc/apache2/sites-enabled/*.conf',
+  '/etc/httpd/conf.d/*.conf',
+  '/etc/httpd/sites-enabled/*.conf',
+  '/etc/apache2/vhosts.d/*.conf',
+];
+
+const NGINX_GLOBS = NGINX_GLOB_LIST.join(' ');
+const APACHE_GLOBS = APACHE_GLOB_LIST.join(' ');
+
+// Whether a path could have been produced by expanding one of the globs
+// above -- i.e. whether it is a path this feature is allowed to have
+// surfaced as a config file at all.
+//
+// This exists because `configFilesCommand` frames its output as
+// `printf '@@$f'; cat "$f"`, so the file BYTES travel in the same stream as
+// the `@@` markers that delimit them. A line beginning `@@/etc/shadow`
+// inside any config file under these directories is indistinguishable, to
+// `splitAt`, from a real marker -- so remote file CONTENT can name any path
+// it likes. Section keys are therefore untrusted input, and routes.ts
+// intersects them against this predicate before any of them can reach the
+// `/api/file` allowlist (which runs a privileged read).
+//
+// `*` in a shell glob never matches a `/`, so a match requires the literal
+// directory prefix, a non-empty name containing no separator, and the
+// glob's own suffix where it has one. `.` and `..` are excluded explicitly:
+// `/etc/nginx/sites-enabled/..` satisfies the shape but names a directory
+// outside the allowed one.
+function matchesGlob(glob: string, path: string): boolean {
+  const star = glob.indexOf('*');
+  const prefix = glob.slice(0, star);
+  const suffix = glob.slice(star + 1);
+  if (typeof path !== 'string' || path.indexOf(prefix) !== 0) {
+    return false;
+  }
+  const name = path.slice(prefix.length);
+  if (name.indexOf('/') !== -1 || name === '.' || name === '..') {
+    return false;
+  }
+  if (name.length <= suffix.length) {
+    return false;
+  }
+  return name.slice(name.length - suffix.length) === suffix;
+}
+
+export function isConfigFilePath(kind: WebServerKind, path: string): boolean {
+  assertWebServerKind(kind);
+  const globs = kind === 'nginx' ? NGINX_GLOB_LIST : APACHE_GLOB_LIST;
+  return globs.some(glob => matchesGlob(glob, path));
+}
 
 // Config file paths come from a fixed, hard-coded glob under /etc, never
 // from caller input, so they need no escaping here -- only `kind` is

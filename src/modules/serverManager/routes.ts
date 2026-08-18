@@ -13,6 +13,7 @@ import {
   testConfigCommand,
   certInfoCommand,
   readFileCommand,
+  isConfigFilePath,
   splitAt,
 } from './ops/command';
 import { parseUnits, parseUnitFiles, mergeServices, sortServices } from './ops/services';
@@ -133,6 +134,13 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
   // session (populated in the /api/webserver/:kind/vhosts handler below) is
   // what keeps an authenticated browser tab from being able to ask for any
   // root-readable file on the host.
+  //
+  // The listing's own section keys are not enough on their own to make that
+  // invariant hold: they are parsed out of a stream that also carries the
+  // config files' raw bytes, so file CONTENT can forge one. Every path is
+  // therefore intersected against the hard-coded globs configFilesCommand
+  // expanded (isConfigFilePath) before it lands here — the set below can
+  // only ever contain paths under those directories.
   const allowedFiles = new Map<string, Set<string>>();
 
   function allowFiles(token: string, paths: string[]): void {
@@ -320,8 +328,19 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
 
         const configResult = await runPrivileged(ops, `read ${kind} vhost configs`, configFilesCommand(kind));
         const sections = splitAt(configResult.stdout);
-        const files = Object.keys(sections).map(file => ({ file, content: sections[file] }));
-        allowFiles(session.token, Object.keys(sections));
+        // Section keys are NOT trustworthy path names. configFilesCommand
+        // frames its output as `printf '@@$f'; cat "$f"`, so every config
+        // file's own bytes travel in the same stream as the `@@` markers
+        // that delimit them: a line beginning `@@/etc/shadow` inside any
+        // file under the globbed directories is, to splitAt, exactly a real
+        // marker. Intersecting against the same hard-coded globs the
+        // command expanded is what keeps remote file CONTENT from seeding
+        // the allowlist below (and, with it, a privileged read of any path
+        // the content names). Filtering here rather than only at allowFiles
+        // also keeps a forged marker from appearing as a phantom vhost row.
+        const configFiles = Object.keys(sections).filter(file => isConfigFilePath(kind, file));
+        const files = configFiles.map(file => ({ file, content: sections[file] }));
+        allowFiles(session.token, configFiles);
 
         const vhosts = kind === 'nginx' ? parseNginxVhosts(files) : parseApacheVhosts(files);
 

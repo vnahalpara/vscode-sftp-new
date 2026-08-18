@@ -129,6 +129,23 @@ const NGINX_CONF = ['server {', '    listen 80;', '    server_name example.com;'
 const NGINX_FILE = '/etc/nginx/sites-enabled/example.conf';
 const VHOSTS_OUTPUT = [`@@${NGINX_FILE}`, NGINX_CONF].join('\n');
 
+// A real, ordinary config file whose CONTENT contains a line beginning
+// `@@` — trivially arrangeable by anyone who can write a vhost file (an
+// nginx comment, a log format string, a stray heredoc). configFilesCommand
+// `cat`s the file into the very stream its `@@` markers travel in, so
+// splitAt cannot tell this line apart from a marker the command itself
+// emitted, and `/etc/shadow` becomes a section key.
+const FORGED_PATH = '/etc/shadow';
+const NGINX_FORGED_CONF = [
+  'server {',
+  '    listen 80;',
+  '    server_name forged.example.com;',
+  `# @@ marker forgery follows`,
+  `@@${FORGED_PATH}`,
+  'root:$6$whatever:19000:0:99999:7:::',
+].join('\n');
+const VHOSTS_FORGED_OUTPUT = [`@@${NGINX_FILE}`, NGINX_FORGED_CONF].join('\n');
+
 const NGINX_SSL_FILE = '/etc/nginx/sites-enabled/ssl.conf';
 const NGINX_SSL_CONF = [
   'server {',
@@ -665,6 +682,39 @@ describe('buildRoutes', () => {
       const otherCtx = fakeCtx('other-tok', { path: NGINX_FILE });
       await find(routes, 'GET', '/api/file')(otherCtx.ctx);
       expect(otherCtx.res.status).toBe(403);
+    });
+
+    // The allowlist is seeded from splitAt's section keys, and those keys are
+    // parsed out of a stream that also carries the config files' own bytes.
+    // Without intersecting them against configFilesCommand's hard-coded
+    // globs, a `@@/etc/shadow` line inside any file under those directories
+    // put /etc/shadow in the allowlist, and this request returned it.
+    it('does not allow a path forged by a config file\'s own CONTENT', async () => {
+      const exec: ExecFn = async cmd => {
+        if (cmd.indexOf('sed -n') !== -1) {
+          return { stdout: 'root:$6$whatever:19000:0:99999:7:::', stderr: '', code: 0 };
+        }
+        return { stdout: VHOSTS_FORGED_OUTPUT, stderr: '', code: 0 };
+      };
+      const { session } = fakeSession({ privilegedTransport: { exec } });
+      store.set('tok', session);
+
+      const listCtx = fakeCtx('tok');
+      await find(routes, 'GET', '/api/webserver/:kind/vhosts')(withParams(listCtx.ctx, { kind: 'nginx' }));
+      expect(listCtx.res.status).toBe(200);
+      // The forged section must not even surface as a vhost row.
+      const listed = JSON.parse(listCtx.res.body).vhosts.map((v: any) => v.file);
+      expect(listed).not.toContain(FORGED_PATH);
+
+      const forgedCtx = fakeCtx('tok', { path: FORGED_PATH });
+      await find(routes, 'GET', '/api/file')(forgedCtx.ctx);
+      expect(forgedCtx.res.status).toBe(403);
+      expect(forgedCtx.res.body).not.toContain('root:$6$');
+
+      // The genuine file from the same listing is still readable.
+      const okCtx = fakeCtx('tok', { path: NGINX_FILE });
+      await find(routes, 'GET', '/api/file')(okCtx.ctx);
+      expect(okCtx.res.status).toBe(200);
     });
   });
 });

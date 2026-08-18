@@ -2,7 +2,7 @@ import {
   SERVICE_ACTIONS, isAllowedAction, isSafeUnitName, splitAt,
   servicesCommand, serviceActionCommand, serviceStatusCommand,
   detectWebServerCommand, configFilesCommand, testConfigCommand,
-  certInfoCommand, readFileCommand,
+  certInfoCommand, readFileCommand, isConfigFilePath,
 } from '../ops/command';
 import { shellSingle } from '../../../core/dbExec';
 
@@ -263,6 +263,58 @@ describe('configFilesCommand', () => {
     expect(() => configFilesCommand('haproxy' as any)).toThrow();
     expect(() => configFilesCommand('' as any)).toThrow();
     expect(() => configFilesCommand(undefined as any)).toThrow();
+  });
+});
+
+// configFilesCommand `cat`s each file into the same stream its `@@` markers
+// travel in, so a line beginning `@@/etc/shadow` inside any config file is
+// indistinguishable from a real marker to splitAt. Section keys are
+// therefore attacker-influencable, and routes.ts intersects them against
+// this predicate before any of them can reach the /api/file allowlist.
+describe('isConfigFilePath', () => {
+  it('accepts a path the nginx globs really do expand to', () => {
+    expect(isConfigFilePath('nginx', '/etc/nginx/sites-enabled/example.conf')).toBe(true);
+    expect(isConfigFilePath('nginx', '/etc/nginx/sites-enabled/default')).toBe(true);
+    expect(isConfigFilePath('nginx', '/etc/nginx/conf.d/gzip.conf')).toBe(true);
+    expect(isConfigFilePath('nginx', '/usr/local/etc/nginx/conf.d/site.conf')).toBe(true);
+  });
+
+  it('accepts a path the apache globs really do expand to', () => {
+    expect(isConfigFilePath('apache', '/etc/apache2/sites-enabled/000-default.conf')).toBe(true);
+    expect(isConfigFilePath('apache', '/etc/httpd/conf.d/ssl.conf')).toBe(true);
+    expect(isConfigFilePath('apache', '/etc/httpd/sites-enabled/site.conf')).toBe(true);
+    expect(isConfigFilePath('apache', '/etc/apache2/vhosts.d/site.conf')).toBe(true);
+  });
+
+  it('rejects any path outside the globbed directories', () => {
+    ['/etc/shadow', '/etc/passwd', '/root/.ssh/id_rsa', '/etc/nginx/nginx.conf', ''].forEach(p =>
+      expect(isConfigFilePath('nginx', p)).toBe(false)
+    );
+  });
+
+  it("rejects a path that only looks like a prefix match", () => {
+    // `*` never crosses a `/` in a shell glob, so neither may this.
+    expect(isConfigFilePath('nginx', '/etc/nginx/sites-enabled/../../shadow')).toBe(false);
+    expect(isConfigFilePath('nginx', '/etc/nginx/sites-enabled/sub/dir.conf')).toBe(false);
+    expect(isConfigFilePath('nginx', '/etc/nginx/sites-enabled/..')).toBe(false);
+    expect(isConfigFilePath('nginx', '/etc/nginx/sites-enabled/')).toBe(false);
+    expect(isConfigFilePath('nginx', '/etc/nginx/sites-enabledX/evil.conf')).toBe(false);
+  });
+
+  it('honours the glob suffix where it has one', () => {
+    // The conf.d globs are `*.conf`; sites-enabled/* is not suffixed.
+    expect(isConfigFilePath('nginx', '/etc/nginx/conf.d/notes.txt')).toBe(false);
+    expect(isConfigFilePath('nginx', '/etc/nginx/conf.d/.conf')).toBe(false);
+    expect(isConfigFilePath('apache', '/etc/apache2/sites-enabled/default')).toBe(false);
+  });
+
+  it("does not let one kind's directories authorise the other's", () => {
+    expect(isConfigFilePath('apache', '/etc/nginx/sites-enabled/example.conf')).toBe(false);
+    expect(isConfigFilePath('nginx', '/etc/apache2/sites-enabled/site.conf')).toBe(false);
+  });
+
+  it('rejects an unknown kind rather than silently allowing nothing', () => {
+    expect(() => isConfigFilePath('haproxy' as any, '/etc/nginx/conf.d/a.conf')).toThrow();
   });
 });
 
