@@ -69,6 +69,49 @@ export function hashOption(option: any): string {
   return canonicalize(option);
 }
 
+// Connecting MUTATES the option object it is handed. `_doConnect`
+// (core/remote-client/sshClient.ts) writes `port = 22` onto every non-final
+// hop and `privateKey = <contents of privateKeyPath>` onto the innermost
+// one, in place. Those writes reach the CALLER's own config object graph:
+// getHostInfo (core/fileService.ts) only shallow-copies the top level, so
+// `config.hop` is literally the same object the file service holds, and the
+// `Object.assign({}, option)` this function replaced left it shared.
+//
+// That was survivable only while hashOption was value-only -- every nested
+// object stringified to "[object Object]", so no mutation inside a hop could
+// ever change the pool key. Now that the key is structure-aware, a shared
+// hop makes the first successful connect rewrite the very config the key is
+// computed from: the next operation hashes to a DIFFERENT key, misses this
+// pool entry and opens a second SSH+SFTP connection, while the first is
+// orphaned beyond the reach of removeRemoteFs/reconnectRemoteFs (both of
+// which key off the post-mutation hash) and stays open for the window's
+// life. A password-prompting profile prompts a second time on top.
+//
+// Deep-copying here -- once, at the boundary where the pool hands an option
+// to the client -- keeps every connect-time write on the pool's private copy
+// and the key stable by construction, rather than trying to keep the hash
+// blind to a mutation that should never have escaped in the first place.
+// Only plain objects and arrays are recursed: anything else (a Buffer, a
+// socket, the `debug` function installed below, a class instance) is carried
+// over by reference, because copying those would change their behaviour, and
+// none of them is a container a connect-time write lands inside of.
+export function copyConnectOption<T>(option: T): T {
+  if (Array.isArray(option)) {
+    return (option.map(item => copyConnectOption(item)) as any) as T;
+  }
+  if (option && typeof option === 'object') {
+    const proto = Object.getPrototypeOf(option);
+    if (proto === Object.prototype || proto === null) {
+      const copy = {};
+      Object.keys(option).forEach(key => {
+        copy[key] = copyConnectOption((option as any)[key]);
+      });
+      return (copy as any) as T;
+    }
+  }
+  return option;
+}
+
 class KeepAliveRemoteFs {
   private isValid: boolean = false;
 
@@ -91,7 +134,10 @@ class KeepAliveRemoteFs {
       return this.pendingPromise;
     }
 
-    const connectOption = Object.assign({}, option);
+    // Deep, not Object.assign: see copyConnectOption above -- connecting
+    // writes into nested hop objects, and those writes must not reach the
+    // caller's config, whose shape is what the pool key is hashed from.
+    const connectOption = copyConnectOption(option);
     // tslint:disable variable-name
     let FsConstructor: typeof SFTPFileSystem | typeof FTPFileSystem;
     if (option.protocol === 'sftp') {

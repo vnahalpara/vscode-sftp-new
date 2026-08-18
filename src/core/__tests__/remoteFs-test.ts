@@ -1,4 +1,4 @@
-import { hashOption } from '../remoteFs';
+import { hashOption, copyConnectOption } from '../remoteFs';
 
 // hashOption is the pool key for the SFTP/FTP connection cache (fsTable in
 // remoteFs.ts): createRemoteIfNoneExist, removeRemoteFs and reconnectRemoteFs
@@ -147,6 +147,120 @@ describe('hashOption', () => {
 
     test('a null and the string "null" stay distinguishable', () => {
       expect(hashOption({ x: null })).not.toBe(hashOption({ x: 'null' }));
+    });
+  });
+});
+
+// Connecting mutates the option object it is given: sshClient.ts's
+// `_doConnect` writes `port = 22` onto every non-final hop (`curOpt.port =
+// 22`) and `privateKey = <file contents>` onto the innermost one
+// (`lastOption.privateKey = buffer.toString()`), in place. Nothing between
+// the file service and the client used to copy deeply enough to stop those
+// writes reaching the caller's own config -- getHostInfo shallow-copies the
+// top level only, so `config.hop` is the same object throughout.
+//
+// While hashOption was value-only that was invisible: every hop stringified
+// to "[object Object]", so no write inside one could move the pool key. With
+// a structure-aware key it is a live bug -- the key would change after the
+// first successful connect, the next operation would miss the cache and open
+// a SECOND connection, and the first would be orphaned where removeRemoteFs,
+// reconnectRemoteFs and `SFTP: Reconnect` can never reach it.
+describe('connect-time mutation cannot move the pool key', () => {
+  // Exactly the writes `_doConnect` performs, against whatever object graph
+  // it is handed. Kept as a faithful transcription rather than a call into
+  // sshClient so this test needs no ssh2, no socket and no filesystem.
+  function simulateConnectMutation(option: any): void {
+    const { hop, vpn, ...top } = option; // tslint:disable-line no-unused-variable
+    if (!hop || (Array.isArray(hop) && hop.length === 0)) {
+      return;
+    }
+    const chain = Array.isArray(hop) ? [top].concat(hop) : [top, hop];
+    const lastOption = chain.pop();
+    chain.forEach(curOpt => {
+      if (curOpt.port === undefined) {
+        curOpt.port = 22;
+      }
+      if (curOpt.privateKeyPath) {
+        curOpt.privateKey = '-----BEGIN OPENSSH PRIVATE KEY-----\n…';
+      }
+    });
+    if (lastOption.privateKeyPath) {
+      lastOption.privateKey = '-----BEGIN OPENSSH PRIVATE KEY-----\n…';
+    }
+  }
+
+  it('an object hop keyed off privateKeyPath hashes identically before and after a connect', () => {
+    const config = {
+      protocol: 'sftp',
+      host: 'bastion.example.com',
+      port: 22,
+      username: 'jump',
+      hop: { host: 'target.example.com', username: 'app', privateKeyPath: '/home/me/.ssh/id_rsa' },
+    };
+    const before = hashOption(config);
+
+    // What the pool actually hands the client: its own private copy.
+    const pooled: any = copyConnectOption(config);
+    simulateConnectMutation(pooled);
+
+    expect(pooled.hop.privateKey).toBeDefined(); // the mutation really happened
+    expect((config.hop as any).privateKey).toBeUndefined();
+    expect(hashOption(config)).toBe(before);
+  });
+
+  it('an array hop whose middle entry omits `port` hashes identically before and after a connect', () => {
+    const config = {
+      protocol: 'sftp',
+      host: 'first.example.com',
+      port: 22,
+      username: 'jump',
+      hop: [
+        { host: 'middle.example.com', username: 'mid' }, // no port: _doConnect writes 22
+        { host: 'target.example.com', username: 'app', privateKeyPath: '/home/me/.ssh/id_rsa' },
+      ],
+    };
+    const before = hashOption(config);
+
+    const pooled: any = copyConnectOption(config);
+    simulateConnectMutation(pooled);
+
+    expect(pooled.hop[0].port).toBe(22);
+    expect(pooled.hop[1].privateKey).toBeDefined();
+    expect((config.hop[0] as any).port).toBeUndefined();
+    expect((config.hop[1] as any).privateKey).toBeUndefined();
+    expect(hashOption(config)).toBe(before);
+  });
+
+  it('without the copy the key really does move (the bug this pins)', () => {
+    const config: any = {
+      protocol: 'sftp',
+      host: 'bastion.example.com',
+      username: 'jump',
+      hop: { host: 'target.example.com', username: 'app', privateKeyPath: '/home/me/.ssh/id_rsa' },
+    };
+    const before = hashOption(config);
+    simulateConnectMutation(config); // the old shallow-copy behaviour
+    expect(hashOption(config)).not.toBe(before);
+  });
+
+  describe('copyConnectOption', () => {
+    it('shares no nested object or array with the original', () => {
+      const config = { host: 'h', hop: [{ host: 'a' }, { host: 'b' }], vpn: { configFile: '/x.conf' } };
+      const copy = copyConnectOption(config);
+      expect(copy).toEqual(config);
+      expect(copy.hop).not.toBe(config.hop);
+      expect(copy.hop[0]).not.toBe(config.hop[0]);
+      expect(copy.vpn).not.toBe(config.vpn);
+    });
+
+    // Copying a Buffer, a socket or a callback would change its behaviour,
+    // and none of them is a container a connect-time write lands inside of.
+    it('carries non-plain values over by reference', () => {
+      const debug = () => undefined;
+      const buffer = Buffer.from('key');
+      const copy = copyConnectOption({ debug, buffer, sock: buffer });
+      expect(copy.debug).toBe(debug);
+      expect(copy.buffer).toBe(buffer);
     });
   });
 });
