@@ -425,6 +425,43 @@ release.
 - The 11 surviving monitor test files must stay green untouched — that is the check that the data
   layer really was reused rather than rewritten.
 
+## Cloudflare cache purge
+
+Gated on the profile carrying BOTH `CLOUDFLARE_ZONE_ID` and
+`CLOUDFLARE_API_TOKEN`, the same both-or-neither rule the root lane uses. One
+without the other is a half-finished edit, not a configuration.
+
+**The call runs from the extension host, over HTTPS, never over SSH.** This is
+the load-bearing decision in this feature. Shelling out to `curl -H
+"Authorization: Bearer <token>"` on the managed host would place the API token
+in that host's process table, where any other user on the box can read it from
+`ps`, and potentially into shell history and audit logs. It would also require
+the server to have outbound internet and curl, neither of which is a safe
+assumption. Cloudflare is the operator's concern, not the server's, so the
+request is made by Node's built-in `https` module inside the extension. No new
+runtime dependency.
+
+**The token is never exposed.** It must not appear in `RedactedProfile` (which
+is serialized straight to the browser), in any activity-log entry, or in any
+error message surfaced to the UI. `ops/exec.ts` already carries a warning about
+this exact hazard -- it logs commands verbatim and notes that a future builder
+passing a secret must redact before reaching it. The Cloudflare op sidesteps
+that by never being a shell command at all, but it still logs to the activity
+log and so must log only the zone id (an identifier, not a credential) and the
+outcome. Cloudflare's own error responses occasionally echo request context, so
+the error path is asserted against token leakage too, not just the success path.
+
+**Zone identity is shown before purging.** `GET /zones/{id}` returns the zone's
+name, so the confirmation can say which domain is about to be purged rather than
+asking the user to trust an opaque 32-character id.
+
+**Purge everything is the only mode in this phase.** The confirmation states
+plainly that it evicts the entire zone cache and that every subsequent request
+falls through to the origin until it refills, which on a busy site is a load
+spike. Purging by URL is the natural follow-up -- an SFTP extension knows
+exactly which files were just uploaded -- and is deliberately deferred rather
+than designed in now.
+
 ## Phases
 
 Each ships independently.
@@ -438,7 +475,8 @@ Each ships independently.
 | 5 | Web server | `ops/webserver.ts`, vhost table, cert expiry, configtest, reload |
 | 6 | Logs + Terminal | WS channels, `SSHClient.shell()`, xterm tab |
 | 7 | VPN fixed port | Deterministic port, tunnel adoption, `portFor()`, settings |
-| 8 | Polish | README, CHANGELOG, version bump, VSIX build, `.vscodeignore` |
+| 8 | Cloudflare purge | `ops/cloudflare.ts`, capability gate, zone lookup, confirmed purge |
+| 9 | Polish | README, CHANGELOG, version bump, VSIX build, `.vscodeignore` |
 
 Roughly 7–8 working days. Phases 1–3 alone already surpass the deleted webview.
 
@@ -446,6 +484,7 @@ Roughly 7–8 working days. Phases 1–3 alone already surpass the deleted webvi
 
 - Persisted metric history — deliberately dropped with `better-sqlite3`
 - Alerts and webhooks
+- Cloudflare purge-by-URL (phase 8 ships purge-everything only)
 - Managing more than one host from a single window
 - The Database tab's functionality — placeholder only, next release
 - Windows or macOS remote hosts; `/proc`-based collection is Linux-only, as today
