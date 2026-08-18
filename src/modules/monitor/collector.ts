@@ -18,6 +18,12 @@ export interface SamplerChannel {
 export interface MonitorTransport {
   openSampler(cmd: string): Promise<SamplerChannel>;
   exec(cmd: string): Promise<{ stdout: string; stderr: string; code: number }>;
+  // Opens an interactive PTY for the Manage Server "Terminal" tab (see
+  // serverManager/terminal.ts). Optional: it is only meaningful for a real
+  // SSH transport (sshTransport, in transport.ts) -- Collector itself never
+  // calls it, so a transport built purely for sampling has no reason to
+  // implement it.
+  shell?(opts: { cols: number; rows: number }): Promise<any>;
 }
 
 export interface CollectorOpts extends ProcOpts {

@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as url from 'url';
 import { Route, RouteParams, matchRoute } from './router';
-import { attachWs } from './wsServer';
+import { attachWs, WsOpts } from './wsServer';
 
 export interface Ctx {
   req: http.IncomingMessage;
@@ -22,6 +22,12 @@ export interface ServerDeps {
   routes: Route<Handler>[];
   hasToken(token: string): boolean;
   fallbackHtml(): string;
+  // Wired by index.ts (see ensureServer()) once the Terminal tab has a
+  // session to bridge to. Left undefined here still means what it always
+  // has: an authenticated upgrade to /ws/terminal is accepted and then
+  // immediately closed -- see attachWs's WsOpts.onTerminal. /ws/logs has no
+  // equivalent field yet on purpose; that arrives with the log follower.
+  onTerminal?: WsOpts['onTerminal'];
 }
 
 const TYPES: { [ext: string]: string } = {
@@ -82,14 +88,16 @@ function isApi(pathname: string): boolean {
 // server and the same per-session token as /api/*: attachWs() installs its
 // own 'upgrade' listener and re-checks Origin/Host on top of the token (see
 // wsServer.ts's checkUpgrade for why that extra check exists) before ever
-// handing a caller a live socket. Nothing is wired to onTerminal/onLogs yet
-// -- those arrive with the features that use them -- so today an
-// authenticated upgrade is accepted and then immediately closed; the point
-// of doing this here, now, is that the auth boundary is live and exercised
-// (including by the production build, which is what proves the `ws`
-// dependency's optional native addons are excluded correctly -- see
-// webpack.config.js) rather than added later alongside a feature under
-// pressure to ship it.
+// handing a caller a live socket. /ws/terminal now has a real handler
+// (deps.onTerminal, wired by index.ts once it can resolve a token to a
+// session); /ws/logs still has nothing plugged into it -- that arrives with
+// the log follower -- so an authenticated upgrade to THAT path is still
+// accepted and then immediately closed. The auth boundary being live and
+// exercised even for the still-unwired path (including by the production
+// build, which is what proves the `ws` dependency's optional native addons
+// are excluded correctly -- see webpack.config.js) was the point of standing
+// this up before either feature existed, rather than alongside one of them
+// under pressure to ship it.
 export function createServer(deps: ServerDeps): http.Server {
   const server = http.createServer((req, res) => {
     const parsed = url.parse(req.url || '/', true);
@@ -149,7 +157,7 @@ export function createServer(deps: ServerDeps): http.Server {
   // Same predicate as the /api/* gate above (deps.hasToken): one token, one
   // set of valid sessions, whether the request arrives as a plain HTTP call
   // or a WebSocket upgrade.
-  attachWs(server, { hasToken: deps.hasToken });
+  attachWs(server, { hasToken: deps.hasToken, onTerminal: deps.onTerminal });
 
   return server;
 }

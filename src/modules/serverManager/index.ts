@@ -1,8 +1,10 @@
 import * as http from 'http';
 import * as crypto from 'crypto';
 import * as path from 'path';
+import * as url from 'url';
 import { spawn } from 'child_process';
 import * as vscode from 'vscode';
+import { WebSocket } from 'ws';
 import logger from '../../logger';
 import { getHostInfo } from '../../core/fileService';
 import { removeRemoteFs, hashOption } from '../../core/remoteFs';
@@ -12,10 +14,11 @@ import { HostFacts } from '../monitor/types';
 import { profileId, redactProfile } from './registry';
 import { targetOption, hasRootCreds } from './privilege';
 import { ManagedSession } from './session';
-import { createServer, listen } from './httpServer';
+import { createServer, listen, tokenFrom } from './httpServer';
 import { bootstrapHtml } from './bootstrap';
 import { buildRoutes } from './routes';
 import { browserCommand, BrowserKind } from './browser';
+import { bridgeTerminal } from './terminal';
 
 const GRACE_MS = 30000;
 const PING_MS = 25000;
@@ -222,6 +225,34 @@ export function createSessionRegistry() {
 
 const registry = createSessionRegistry();
 
+// The upgrade already passed checkUpgrade's token check (wsServer.ts) before
+// this ever runs, but that check only proved the token is VALID -- it does
+// not hand this callback the token or the session, so both are pulled off
+// the request the same way the plain HTTP path does (tokenFrom, same as
+// httpServer.ts's own request handler uses for /api/*).
+//
+// session.transport is used here, deliberately never
+// session.privilegedTransport: the Terminal tab runs as the profile's
+// ordinary SSH user. A browser tab able to open a root shell with no further
+// prompt -- just because the dashboard happened to hold root credentials for
+// systemctl/nginx/openssl -- would be a serious, silent privilege escalation
+// dressed up as a terminal.
+function onTerminal(ws: WebSocket, req: http.IncomingMessage): void {
+  const token = tokenFrom(url.parse(req.url || '', true).query, req.headers);
+  const session = registry.lookupSession(token);
+  const openShell = session && session.transport.shell;
+  if (!openShell) {
+    // Unreachable in normal operation -- sshTransport always implements
+    // shell(), and a valid token always resolves to a session (checkUpgrade
+    // already required one to accept the upgrade at all) -- but a session
+    // can in principle be disposed in the gap between the upgrade completing
+    // and this callback running, and closing costs nothing.
+    ws.close();
+    return;
+  }
+  bridgeTerminal({ openShell }, ws);
+}
+
 function settings() {
   const cfg = vscode.workspace.getConfiguration('sftp.serverManager');
   return {
@@ -262,6 +293,7 @@ async function ensureServer(): Promise<Running> {
       }),
       hasToken: token => registry.lookupSession(token) !== undefined,
       fallbackHtml: bootstrapHtml,
+      onTerminal,
     });
     const port = await listen(server);
     if (startedAt !== generation) {

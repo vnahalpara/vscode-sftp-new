@@ -394,6 +394,23 @@ export default class SSHClient extends RemoteClient {
     });
   }
 
+  // Open an interactive PTY on the already-authenticated ssh2 connection, for the
+  // Manage Server "Terminal" tab. This is deliberately NOT how "Open SSH in
+  // Terminal" works: that command spawns a real `ssh` child process via
+  // ssh_prefix, which for a password profile is typically `sshpass -p <password>
+  // ssh ...` -- the password sits on that process's command line, visible to
+  // anything that can read /proc or `ps` on this machine for as long as it runs.
+  // shell() instead rides the connection this._client already has open and
+  // authenticated: there is no new process, no command line, and therefore no
+  // password exposed anywhere. That is what makes this the safer path.
+  shell(opts: { cols: number; rows: number }): Promise<any> {
+    return new Promise((resolve, reject) => {
+      this._client.shell({ term: 'xterm-256color', ...opts }, (err, stream) =>
+        err ? reject(err) : resolve(stream)
+      );
+    });
+  }
+
   // Open a forwarded TCP stream from the remote host to dstHost:dstPort over this
   // SSH connection (same primitive as _makeHopping). Used to tunnel DB traffic.
   openForwardStream(dstHost: string, dstPort: number): Promise<any> {

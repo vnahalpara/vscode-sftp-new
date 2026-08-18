@@ -58,6 +58,14 @@ export function sshTransport(fileService: any, config: any): MonitorTransport {
       const ssh = await getSshClient(fileService, config);
       return ssh.exec(cmd);
     },
+    // Rides the same pooled SSH connection as openSampler/exec above -- see
+    // SSHClient.shell() in sshClient.ts for why that (rather than spawning a
+    // real `ssh` process, as "Open SSH in Terminal" does) is what makes this
+    // safe to expose to the browser-side Terminal tab.
+    async shell(opts: { cols: number; rows: number }) {
+      const ssh = await getSshClient(fileService, config);
+      return ssh.shell(opts);
+    },
   };
 }
 
