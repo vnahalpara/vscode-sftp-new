@@ -1,10 +1,21 @@
 // Dev-only. Serves the built UI from media/webui with a synthetic API and SSE
 // stream, so the interface can be exercised and screenshotted without VS Code
 // or a real server. It deliberately mirrors the real payload shapes from
-// src/modules/monitor/types.ts, including the nulls.
+// src/modules/monitor/types.ts, including the nulls, plus the Services and
+// Web server tabs' shapes from src/modules/serverManager/{routes,ops/services,
+// ops/webserver}.ts.
+//
+// The fixtures here are deliberately awkward, not tidy: a failed unit, a
+// not-found unit, a templated `@` unit, multi-space descriptions, a
+// certificate 5 days from expiry, a certificate that fails to parse, a
+// certificate we never even attempted to inspect, and a `?fail=sudo` /
+// `?fail=1` escape hatch on the mutating endpoints so the sudo-hint path is
+// something a human can actually look at in a browser, not just pin in a
+// unit test.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { URL } = require('url');
 
 const ROOT = path.join(__dirname, '..', '..', 'media', 'webui');
 const PORT = Number(process.env.PORT || 5199);
@@ -48,6 +59,11 @@ const FACTS = {
   serverEpochMs: Date.now(),
   linux: true,
 };
+
+// Mirrors routes.ts's CAPABILITIES now that Tasks 1-5 have wired the seven
+// routes up for real — a mock that still greyed these out would make Tasks 7
+// and 8 unbuildable against it.
+const CAPABILITIES = { services: true, webserver: true, logs: false, terminal: false, database: false };
 
 function wave(i, amp, base) {
   return base + Math.sin((tick + i * 7) / 6) * amp + Math.random() * 3;
@@ -135,31 +151,519 @@ function state(status) {
   };
 }
 
+/* ------------------------------------------------------------- services -- */
+// Shaped exactly like ServiceRow (src/modules/serverManager/ops/services.ts)
+// — this mock returns already-merged/sorted rows, not raw systemctl text,
+// because /api/services is the one place the real route does the
+// list-units/list-unit-files merge itself before the client ever sees it.
+//
+// Sorted the same way sortServices does: active first, then failed, then
+// everything else, alphabetical within each group — so the failed unit an
+// operator opened this tab to find lands at the top, same as production.
+const SERVICES_RAW = [
+  { unit: 'apache2.service', name: 'apache2', load: 'loaded', active: 'active', sub: 'running', enabled: 'enabled', description: 'The Apache HTTP Server' },
+  { unit: 'cron.service', name: 'cron', load: 'loaded', active: 'active', sub: 'running', enabled: 'enabled', description: 'Regular   background program processing daemon' },
+  { unit: 'fail2ban.service', name: 'fail2ban', load: 'loaded', active: 'active', sub: 'running', enabled: 'enabled', description: 'Fail2Ban Service' },
+  { unit: 'memcached.service', name: 'memcached', load: 'loaded', active: 'active', sub: 'running', enabled: 'disabled', description: 'memcached daemon' },
+  { unit: 'mysql.service', name: 'mysql', load: 'loaded', active: 'active', sub: 'running', enabled: 'enabled', description: 'MySQL Community Server' },
+  { unit: 'nginx.service', name: 'nginx', load: 'loaded', active: 'active', sub: 'running', enabled: 'enabled', description: 'A high performance web server and reverse proxy server' },
+  {
+    unit: 'php8.2-fpm@www.service',
+    name: 'php8.2-fpm@www',
+    load: 'loaded',
+    active: 'active',
+    sub: 'running',
+    enabled: 'enabled',
+    description: 'The PHP 8.2 FastCGI Process Manager (www pool)',
+  },
+  { unit: 'postfix.service', name: 'postfix', load: 'loaded', active: 'active', sub: 'running', enabled: 'enabled', description: 'Postfix Mail Transport Agent' },
+  { unit: 'rsyslog.service', name: 'rsyslog', load: 'loaded', active: 'active', sub: 'running', enabled: 'enabled', description: 'System Logging Service' },
+  // The one an operator opened this tab to find. Sorts to the top.
+  { unit: 'sshd.service', name: 'sshd', load: 'loaded', active: 'failed', sub: 'failed', enabled: 'enabled', description: 'OpenSSH server daemon' },
+  { unit: 'redis-server.service', name: 'redis-server', load: 'loaded', active: 'inactive', sub: 'dead', enabled: 'disabled', description: 'Advanced key-value store' },
+  // A unit file that has vanished (an old transient/generated unit) but
+  // systemd still reports a stub line for it — no description, no unit file
+  // entry to merge an `enabled` state from.
+  { unit: 'bogus.service', name: 'bogus', load: 'not-found', active: 'inactive', sub: 'dead', enabled: 'unknown', description: '-' },
+];
+
+function activeRank(row) {
+  if (row.active === 'active') {
+    return 0;
+  }
+  if (row.active === 'failed') {
+    return 1;
+  }
+  return 2;
+}
+
+const SERVICES = SERVICES_RAW.slice().sort((a, b) => {
+  const rankDiff = activeRank(a) - activeRank(b);
+  if (rankDiff !== 0) {
+    return rankDiff;
+  }
+  return a.unit < b.unit ? -1 : a.unit > b.unit ? 1 : 0;
+});
+
+function findService(unit) {
+  return SERVICES.find(row => row.unit === unit) || {
+    unit,
+    name: unit.replace(/\.service$/, ''),
+    load: 'loaded',
+    active: 'active',
+    sub: 'running',
+    enabled: 'enabled',
+    description: 'Unknown unit',
+  };
+}
+
+function sudoHintText() {
+  const user = PROFILE.username;
+  const host = PROFILE.host;
+  return (
+    `${user}@${host} cannot run this command with sudo without a password. ` +
+    `Add a sudoers rule on ${host}, for example: ` +
+    `${user} ALL=(ALL) NOPASSWD: /bin/systemctl, /usr/sbin/nginx, /usr/sbin/apache2ctl`
+  );
+}
+
+// Systemctl mutations are usually silent on success — that IS the realistic
+// output for most of these. nginx gets a daemon-reload warning instead, so
+// Task 7 also has to render a non-empty success output at least once.
+function serviceActionOutput(unit, action) {
+  if (unit === 'nginx.service' && (action === 'restart' || action === 'reload-or-restart')) {
+    return 'Warning: The unit file, source configuration file, or drop-ins of nginx.service changed on disk. Run \'systemctl daemon-reload\' to reload units.';
+  }
+  return '';
+}
+
+function genericActionFailure(unit, action) {
+  return (
+    `Job for ${unit} failed because the control process exited with error code.\n` +
+    `See "systemctl status ${unit}" and "journalctl -xeu ${unit}" for details.`
+  );
+}
+
+function serviceStatusText(unit) {
+  const row = findService(unit);
+  const bullet = row.active === 'failed' ? '●' : row.active === 'active' ? '●' : '○';
+  const loadedLine = `     Loaded: ${row.load} (/lib/systemd/system/${unit}; ${row.enabled}; vendor preset: enabled)`;
+
+  if (row.active === 'failed') {
+    return [
+      `${bullet} ${unit} - ${row.description}`,
+      loadedLine,
+      '     Active: failed (Result: exit-code) since Sun 2026-08-17 04:12:09 UTC; 1min 8s ago',
+      '       Docs: man:sshd(8)',
+      '             man:sshd_config(5)',
+      '    Process: 1188 ExecStartPre=/usr/sbin/sshd -t (code=exited, status=1/FAILURE)',
+      '   Main PID: 1188 (code=exited, status=1/FAILURE)',
+      '',
+      'Aug 17 04:12:09 1624335.cloudwaysapps.com sshd[1188]: /etc/ssh/sshd_config line 42: Bad configuration option: PermitRootLogins',
+      'Aug 17 04:12:09 1624335.cloudwaysapps.com systemd[1]: sshd.service: Control process exited, code=exited, status=1/FAILURE',
+      'Aug 17 04:12:09 1624335.cloudwaysapps.com systemd[1]: sshd.service: Failed with result \'exit-code\'.',
+      'Aug 17 04:12:09 1624335.cloudwaysapps.com systemd[1]: Failed to start OpenSSH server daemon.',
+    ].join('\n');
+  }
+
+  if (row.active === 'inactive' && row.load !== 'not-found') {
+    return [
+      `○ ${unit} - ${row.description}`,
+      loadedLine,
+      '     Active: inactive (dead) since Sat 2026-08-16 22:03:41 UTC; 6h ago',
+      '',
+      'Aug 16 22:03:41 1624335.cloudwaysapps.com systemd[1]: Stopped Advanced key-value store.',
+    ].join('\n');
+  }
+
+  if (row.load === 'not-found') {
+    return `Unit ${unit} could not be found.`;
+  }
+
+  return [
+    `${bullet} ${unit} - ${row.description}`,
+    loadedLine,
+    '     Active: active (running) since Wed 2026-08-12 03:14:22 UTC; 5 days ago',
+    '   Main PID: 845 (' + row.name.split('@')[0] + ')',
+    '      Tasks: 3 (limit: 4665)',
+    '     Memory: 5.7M',
+    '        CPU: 812ms',
+    `     CGroup: /system.slice/${unit}`,
+    `             └─845 ${row.name.split('@')[0]}`,
+    '',
+    `Aug 17 09:00:01 1624335.cloudwaysapps.com systemd[1]: Started ${row.description}.`,
+  ].join('\n');
+}
+
+/* ----------------------------------------------------------- web server -- */
+// Shaped like parseDetect()'s return in ops/webserver.ts: both nginx and
+// apache detected, each with its own unit/version/active/enabled, plus the
+// raw `listening` lines a vhost tab would show under "ports in use".
+const WEBSERVER_DETECT = {
+  servers: [
+    { kind: 'nginx', unit: 'nginx', version: 'nginx version: nginx/1.18.0 (Ubuntu)', active: 'active', enabled: 'enabled' },
+    { kind: 'apache', unit: 'apache2', version: 'Server version: Apache/2.4.41 (Ubuntu)', active: 'active', enabled: 'disabled' },
+  ],
+  listening: [
+    'LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=845,fd=6))',
+    'LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=845,fd=7))',
+    'LISTEN 0 511 127.0.0.1:8080 0.0.0.0:* users:(("apache2",pid=1032,fd=4))',
+  ],
+};
+
+// `daysFromNow` is computed against wall-clock time at request time (plus a
+// half-day buffer so a slow request never rounds down a day), not a fixed
+// calendar date — so the 44-day and 5-day fixtures stay exactly 44 and 5
+// days out no matter when this dev server happens to be started.
+function certEntry(certPath, daysFromNow, subject, issuer) {
+  const expires = new Date(Date.now() + daysFromNow * 86400000 + 12 * 3600000);
+  return {
+    path: certPath,
+    expires: expires.toISOString(),
+    daysLeft: daysFromNow,
+    subject,
+    issuer,
+    error: null,
+  };
+}
+
+const NGINX_VHOSTS = [
+  {
+    file: '/etc/nginx/sites-enabled/example.conf',
+    serverName: 'example.com',
+    aliases: null,
+    listen: ['80'],
+    ssl: false,
+    root: '/var/www/example',
+    certificate: null,
+    accessLog: '/var/log/nginx/example-access.log',
+    errorLog: '/var/log/nginx/example-error.log',
+    proxyPass: null,
+  },
+  {
+    file: '/etc/nginx/sites-enabled/secure.conf',
+    serverName: 'secure.example.com',
+    aliases: null,
+    listen: ['443 ssl http2'],
+    ssl: true,
+    root: '/var/www/secure',
+    certificate: '/etc/ssl/certs/secure.example.com.pem',
+    accessLog: '/var/log/nginx/secure-access.log',
+    errorLog: '/var/log/nginx/secure-error.log',
+    proxyPass: null,
+  },
+  // The one the warning tone exists for.
+  {
+    file: '/etc/nginx/sites-enabled/urgent.conf',
+    serverName: 'urgent.example.com',
+    aliases: null,
+    listen: ['443 ssl'],
+    ssl: true,
+    root: '/var/www/urgent',
+    certificate: '/etc/ssl/certs/urgent.example.com.pem',
+    accessLog: '/var/log/nginx/urgent-access.log',
+    errorLog: '/var/log/nginx/urgent-error.log',
+    proxyPass: null,
+  },
+  {
+    file: '/etc/nginx/sites-enabled/api.conf',
+    serverName: 'api.example.com',
+    aliases: null,
+    listen: ['80'],
+    ssl: false,
+    root: null,
+    certificate: null,
+    accessLog: '/var/log/nginx/api-access.log',
+    errorLog: '/var/log/nginx/api-error.log',
+    proxyPass: 'http://127.0.0.1:4000',
+  },
+  // A certificate that is present but fails to parse — a different failure
+  // shape from "never inspected at all" (see legacy.conf below).
+  {
+    file: '/etc/nginx/sites-enabled/broken-cert.conf',
+    serverName: 'broken.example.com',
+    aliases: null,
+    listen: ['443 ssl'],
+    ssl: true,
+    root: '/var/www/broken',
+    certificate: '/etc/ssl/certs/broken.example.com.pem',
+    accessLog: '/var/log/nginx/broken-access.log',
+    errorLog: '/var/log/nginx/broken-error.log',
+    proxyPass: null,
+  },
+  // A certificate we never even attempted to inspect (e.g. sudo failed
+  // partway, or the path itself was rejected) — lands in `skipped`, not
+  // `certificates`.
+  {
+    file: '/etc/nginx/sites-enabled/legacy.conf',
+    serverName: 'legacy.example.com',
+    aliases: null,
+    listen: ['443 ssl'],
+    ssl: true,
+    root: '/var/www/legacy',
+    certificate: '/etc/ssl/private/legacy-nopermission.pem',
+    accessLog: '/var/log/nginx/legacy-access.log',
+    errorLog: '/var/log/nginx/legacy-error.log',
+    proxyPass: null,
+  },
+];
+
+const NGINX_CERTIFICATES = [
+  certEntry('/etc/ssl/certs/secure.example.com.pem', 44, 'CN = secure.example.com', 'CN = R3'),
+  certEntry('/etc/ssl/certs/urgent.example.com.pem', 5, 'CN = urgent.example.com', 'CN = R3'),
+  {
+    path: '/etc/ssl/certs/broken.example.com.pem',
+    expires: null,
+    daysLeft: null,
+    subject: null,
+    issuer: null,
+    error:
+      'unable to load certificate\n' +
+      "140245123456:error:0909006C:PEM routines:get_name:no start line:pem_lib.c:745:Expecting: TRUSTED CERTIFICATE",
+  },
+];
+const NGINX_SKIPPED = ['/etc/ssl/private/legacy-nopermission.pem'];
+
+const APACHE_VHOSTS = [
+  {
+    file: '/etc/apache2/sites-enabled/example.conf',
+    serverName: 'example.com',
+    aliases: 'www.example.com',
+    listen: ['*:80'],
+    ssl: false,
+    root: '/var/www/example',
+    certificate: null,
+    accessLog: '/var/log/apache2/example-access.log combined',
+    errorLog: '/var/log/apache2/example-error.log',
+    proxyPass: '/api http://127.0.0.1:4000/',
+  },
+  {
+    file: '/etc/apache2/sites-enabled/secure.conf',
+    serverName: 'secure.example.com',
+    aliases: null,
+    listen: ['*:443'],
+    ssl: true,
+    root: '/var/www/secure',
+    certificate: '/etc/ssl/certs/apache-secure.example.com.pem',
+    accessLog: '/var/log/apache2/secure-access.log combined',
+    errorLog: '/var/log/apache2/secure-error.log',
+    proxyPass: null,
+  },
+  {
+    file: '/etc/apache2/sites-enabled/urgent.conf',
+    serverName: 'urgent-apache.example.com',
+    aliases: null,
+    listen: ['*:443'],
+    ssl: true,
+    root: '/var/www/urgent-apache',
+    certificate: '/etc/ssl/certs/apache-urgent.example.com.pem',
+    accessLog: '/var/log/apache2/urgent-access.log combined',
+    errorLog: '/var/log/apache2/urgent-error.log',
+    proxyPass: null,
+  },
+  {
+    file: '/etc/apache2/sites-enabled/api.conf',
+    serverName: 'api-apache.example.com',
+    aliases: null,
+    listen: ['*:80'],
+    ssl: false,
+    root: null,
+    certificate: null,
+    accessLog: '/var/log/apache2/api-access.log combined',
+    errorLog: '/var/log/apache2/api-error.log',
+    proxyPass: '/ http://127.0.0.1:5000/',
+  },
+  {
+    file: '/etc/apache2/sites-enabled/legacy.conf',
+    serverName: 'legacy-apache.example.com',
+    aliases: null,
+    listen: ['*:443'],
+    ssl: true,
+    root: '/var/www/legacy-apache',
+    certificate: '/etc/ssl/private/apache-legacy-nopermission.pem',
+    accessLog: '/var/log/apache2/legacy-access.log combined',
+    errorLog: '/var/log/apache2/legacy-error.log',
+    proxyPass: null,
+  },
+];
+
+const APACHE_CERTIFICATES = [
+  certEntry('/etc/ssl/certs/apache-secure.example.com.pem', 44, 'CN = secure.example.com', 'CN = R3'),
+  certEntry('/etc/ssl/certs/apache-urgent.example.com.pem', 5, 'CN = urgent-apache.example.com', 'CN = R3'),
+];
+const APACHE_SKIPPED = ['/etc/ssl/private/apache-legacy-nopermission.pem'];
+
+// GET /api/file content, keyed by every path a vhost listing above hands
+// back — the vhost "View" button only ever asks for a path it was just
+// shown.
+const FILE_CONTENTS = {
+  '/etc/nginx/sites-enabled/example.conf': [
+    'server {',
+    '    listen 80;',
+    '    server_name example.com;',
+    '    root /var/www/example;',
+    '',
+    '    access_log /var/log/nginx/example-access.log;',
+    '    error_log /var/log/nginx/example-error.log;',
+    '',
+    '    location / {',
+    '        try_files $uri $uri/ =404;',
+    '    }',
+    '}',
+  ].join('\n'),
+  '/etc/nginx/sites-enabled/secure.conf': [
+    'server {',
+    '    listen 443 ssl http2;',
+    '    server_name secure.example.com;',
+    '    root /var/www/secure;',
+    '',
+    '    ssl_certificate /etc/ssl/certs/secure.example.com.pem;',
+    '    ssl_certificate_key /etc/ssl/private/secure.example.com.key;',
+    '',
+    '    access_log /var/log/nginx/secure-access.log;',
+    '    error_log /var/log/nginx/secure-error.log;',
+    '}',
+  ].join('\n'),
+  '/etc/nginx/sites-enabled/urgent.conf': [
+    'server {',
+    '    listen 443 ssl;',
+    '    server_name urgent.example.com;',
+    '    root /var/www/urgent;',
+    '',
+    '    ssl_certificate /etc/ssl/certs/urgent.example.com.pem;',
+    '    ssl_certificate_key /etc/ssl/private/urgent.example.com.key;',
+    '',
+    '    access_log /var/log/nginx/urgent-access.log;',
+    '    error_log /var/log/nginx/urgent-error.log;',
+    '}',
+  ].join('\n'),
+  '/etc/nginx/sites-enabled/api.conf': [
+    'server {',
+    '    listen 80;',
+    '    server_name api.example.com;',
+    '',
+    '    access_log /var/log/nginx/api-access.log;',
+    '    error_log /var/log/nginx/api-error.log;',
+    '',
+    '    location / {',
+    '        proxy_pass http://127.0.0.1:4000;',
+    '        proxy_set_header Host $host;',
+    '    }',
+    '}',
+  ].join('\n'),
+  '/etc/nginx/sites-enabled/broken-cert.conf': [
+    'server {',
+    '    listen 443 ssl;',
+    '    server_name broken.example.com;',
+    '    root /var/www/broken;',
+    '',
+    '    ssl_certificate /etc/ssl/certs/broken.example.com.pem;',
+    '    ssl_certificate_key /etc/ssl/private/broken.example.com.key;',
+    '}',
+  ].join('\n'),
+  '/etc/nginx/sites-enabled/legacy.conf': [
+    'server {',
+    '    listen 443 ssl;',
+    '    server_name legacy.example.com;',
+    '    root /var/www/legacy;',
+    '',
+    '    ssl_certificate /etc/ssl/private/legacy-nopermission.pem;',
+    '    ssl_certificate_key /etc/ssl/private/legacy-nopermission.key;',
+    '}',
+  ].join('\n'),
+  '/etc/apache2/sites-enabled/example.conf': [
+    '<VirtualHost *:80>',
+    '    ServerName example.com',
+    '    ServerAlias www.example.com',
+    '    DocumentRoot /var/www/example',
+    '    ProxyPass /api http://127.0.0.1:4000/',
+    '    CustomLog /var/log/apache2/example-access.log combined',
+    '    ErrorLog /var/log/apache2/example-error.log',
+    '</VirtualHost>',
+  ].join('\n'),
+  '/etc/apache2/sites-enabled/secure.conf': [
+    '<VirtualHost *:443>',
+    '    ServerName secure.example.com',
+    '    DocumentRoot /var/www/secure',
+    '    SSLEngine on',
+    '    SSLCertificateFile /etc/ssl/certs/apache-secure.example.com.pem',
+    '    CustomLog /var/log/apache2/secure-access.log combined',
+    '    ErrorLog /var/log/apache2/secure-error.log',
+    '</VirtualHost>',
+  ].join('\n'),
+  '/etc/apache2/sites-enabled/urgent.conf': [
+    '<VirtualHost *:443>',
+    '    ServerName urgent-apache.example.com',
+    '    DocumentRoot /var/www/urgent-apache',
+    '    SSLEngine on',
+    '    SSLCertificateFile /etc/ssl/certs/apache-urgent.example.com.pem',
+    '    CustomLog /var/log/apache2/urgent-access.log combined',
+    '    ErrorLog /var/log/apache2/urgent-error.log',
+    '</VirtualHost>',
+  ].join('\n'),
+  '/etc/apache2/sites-enabled/api.conf': [
+    '<VirtualHost *:80>',
+    '    ServerName api-apache.example.com',
+    '    ProxyPass / http://127.0.0.1:5000/',
+    '    ProxyPassReverse / http://127.0.0.1:5000/',
+    '    CustomLog /var/log/apache2/api-access.log combined',
+    '    ErrorLog /var/log/apache2/api-error.log',
+    '</VirtualHost>',
+  ].join('\n'),
+  '/etc/apache2/sites-enabled/legacy.conf': [
+    '<VirtualHost *:443>',
+    '    ServerName legacy-apache.example.com',
+    '    DocumentRoot /var/www/legacy-apache',
+    '    SSLEngine on',
+    '    SSLCertificateFile /etc/ssl/private/apache-legacy-nopermission.pem',
+    '    CustomLog /var/log/apache2/legacy-access.log combined',
+    '    ErrorLog /var/log/apache2/legacy-error.log',
+    '</VirtualHost>',
+  ].join('\n'),
+};
+
+function testConfigOutput(kind) {
+  return kind === 'nginx'
+    ? 'nginx: the configuration file /etc/nginx/nginx.conf syntax is ok\nnginx: configuration file /etc/nginx/nginx.conf test is successful'
+    : 'Syntax OK';
+}
+
+function testConfigFailureOutput(kind) {
+  return kind === 'nginx'
+    ? 'nginx: [emerg] unexpected "}" in /etc/nginx/sites-enabled/broken.conf:14\nnginx: configuration file /etc/nginx/nginx.conf test failed'
+    : 'AH00526: Syntax error on line 12 of /etc/apache2/sites-enabled/broken.conf:\nInvalid command \'ProxyPas\', perhaps misspelled or defined by a module not included in the server configuration\nAction \'configtest\' failed.';
+}
+
 http
   .createServer((req, res) => {
-    const url = req.url.split('?')[0];
+    const parsed = new URL(req.url, 'http://127.0.0.1');
+    const pathname = parsed.pathname;
+    const query = parsed.searchParams;
+    const segments = pathname.split('/').filter(Boolean).map(decodeURIComponent);
+    const fail = query.get('fail');
 
-    if (url === '/api/session') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ...state(), capabilities: { services: false, webserver: false, logs: false, terminal: false, database: false } }));
+    const sendJson = (code, body) => {
+      res.writeHead(code, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
+
+    if (pathname === '/api/session') {
+      sendJson(200, { ...state(), capabilities: CAPABILITIES });
       return;
     }
-    if (url === '/api/host') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(state()));
+    if (pathname === '/api/host') {
+      sendJson(200, state());
       return;
     }
-    if (url === '/api/activity') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ entries: [{ at: Date.now(), label: 'restart nginx', command: 'systemctl restart nginx', code: 0, ms: 412, error: null }] }));
+    if (pathname === '/api/activity') {
+      sendJson(200, { entries: [{ at: Date.now(), label: 'restart nginx', command: 'systemctl restart nginx', code: 0, ms: 412, error: null }] });
       return;
     }
-    if (url === '/api/host/refresh') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
+    if (pathname === '/api/host/refresh') {
+      sendJson(200, { ok: true });
       return;
     }
-    if (url === '/api/stream') {
+    if (pathname === '/api/stream') {
       res.writeHead(200, {
         'content-type': 'text/event-stream',
         'cache-control': 'no-cache, no-transform',
@@ -191,7 +695,91 @@ http
       return;
     }
 
-    const file = path.join(ROOT, url === '/' ? 'index.html' : url);
+    // GET /api/services
+    if (req.method === 'GET' && pathname === '/api/services') {
+      sendJson(200, { services: SERVICES });
+      return;
+    }
+
+    // GET /api/services/:unit/status
+    if (req.method === 'GET' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'services' && segments[3] === 'status') {
+      const unit = segments[2];
+      sendJson(200, { output: serviceStatusText(unit) });
+      return;
+    }
+
+    // POST /api/services/:unit/:action
+    if (req.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'services') {
+      const unit = segments[2];
+      const action = segments[3];
+      if (fail === 'sudo') {
+        sendJson(200, { ok: false, output: sudoHintText() });
+        return;
+      }
+      if (fail) {
+        sendJson(200, { ok: false, output: genericActionFailure(unit, action) });
+        return;
+      }
+      sendJson(200, { ok: true, output: serviceActionOutput(unit, action) });
+      return;
+    }
+
+    // GET /api/webserver
+    if (req.method === 'GET' && pathname === '/api/webserver') {
+      sendJson(200, WEBSERVER_DETECT);
+      return;
+    }
+
+    // GET /api/webserver/:kind/vhosts
+    if (req.method === 'GET' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'webserver' && segments[3] === 'vhosts') {
+      const kind = segments[2];
+      if (kind === 'apache') {
+        sendJson(200, { vhosts: APACHE_VHOSTS, certificates: APACHE_CERTIFICATES, skipped: APACHE_SKIPPED });
+        return;
+      }
+      if (kind === 'nginx') {
+        sendJson(200, { vhosts: NGINX_VHOSTS, certificates: NGINX_CERTIFICATES, skipped: NGINX_SKIPPED });
+        return;
+      }
+      res.writeHead(400, { 'content-type': 'text/plain' });
+      res.end(`Unknown web server kind: ${kind}`);
+      return;
+    }
+
+    // POST /api/webserver/:kind/test
+    if (req.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'webserver' && segments[3] === 'test') {
+      const kind = segments[2];
+      if (kind !== 'nginx' && kind !== 'apache') {
+        res.writeHead(400, { 'content-type': 'text/plain' });
+        res.end(`Unknown web server kind: ${kind}`);
+        return;
+      }
+      if (fail === 'sudo') {
+        sendJson(200, { ok: false, output: sudoHintText() });
+        return;
+      }
+      if (fail) {
+        sendJson(200, { ok: false, output: testConfigFailureOutput(kind) });
+        return;
+      }
+      sendJson(200, { ok: true, output: testConfigOutput(kind) });
+      return;
+    }
+
+    // GET /api/file?path=...
+    if (req.method === 'GET' && pathname === '/api/file') {
+      const requestedPath = query.get('path') || '';
+      const content = Object.prototype.hasOwnProperty.call(FILE_CONTENTS, requestedPath) ? FILE_CONTENTS[requestedPath] : null;
+      if (content === null) {
+        res.writeHead(403, { 'content-type': 'text/plain' });
+        res.end('That file was not returned by a vhost listing for this session.');
+        return;
+      }
+      sendJson(200, { content });
+      return;
+    }
+
+    const file = path.join(ROOT, pathname === '/' ? 'index.html' : pathname);
     if (fs.existsSync(file) && fs.statSync(file).isFile()) {
       res.writeHead(200, { 'content-type': TYPES[path.extname(file)] || 'application/octet-stream' });
       fs.createReadStream(file).pipe(res);
