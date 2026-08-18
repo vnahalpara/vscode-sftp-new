@@ -70,7 +70,15 @@ export function memPoint(snapshot: any): SeriesPoint | null {
 // same rule instead of re-deriving it — before this the chart filtered but
 // the footer table did not, so the same docker0/veth* noise the chart
 // already hid was still listed below it.
-const VIRTUAL_PREFIXES = ['ifb', 'veth', 'docker', 'br-', 'virbr', 'tun', 'tap'];
+//
+// Deliberately NOT excluded: tun*/tap*/wg* — container/bridge plumbing
+// (docker*, veth*, br-*, virbr*) is always internal noise with nothing real
+// behind it, but a VPN-terminating host's tun0/tap0/wg0 can be its *primary*
+// path, carrying genuine traffic rather than swamping the scale. Excluding
+// those would silently drop a real uplink from both the chart and the
+// footer with no on-screen indication — worse than the clutter this list
+// exists to remove.
+const VIRTUAL_PREFIXES = ['ifb', 'veth', 'docker', 'br-', 'virbr'];
 export function isPhysical(name: string): boolean {
   return name !== 'lo' && !VIRTUAL_PREFIXES.some(prefix => name.indexOf(prefix) === 0);
 }

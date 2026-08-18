@@ -6,6 +6,7 @@ import {
   memPoint,
   netPoint,
   loadSeries,
+  isPhysical,
 } from '../series';
 import {
   SNAP_FULL,
@@ -117,6 +118,24 @@ describe('netPoint', () => {
     const p = netPoint(onlyNull);
     expect(p!.rx).toBeNull();
     expect(p!.tx).toBeNull();
+  });
+});
+
+describe('isPhysical', () => {
+  // Pins both directions explicitly so the next person widening this list
+  // breaks a test instead of silently hiding someone's uplink — see the
+  // tun/tap/wg incident: those look like the same kind of "virtual" noise as
+  // docker/veth/bridge plumbing, but they can carry a VPN gateway's real,
+  // primary traffic and must never be excluded.
+  it('excludes loopback and container/bridge plumbing', () => {
+    ['lo', 'ifb0', 'docker0', 'veth1234', 'br-abc123', 'virbr0'].forEach(name => {
+      expect(isPhysical(name)).toBe(false);
+    });
+  });
+  it('includes real NICs, bonds, VLANs and VPN/tunnel interfaces', () => {
+    ['eth0', 'eth1', 'ens5', 'enp0s3', 'bond0', 'eth0.100', 'wg0', 'tun0', 'tap0'].forEach(name => {
+      expect(isPhysical(name)).toBe(true);
+    });
   });
 });
 
