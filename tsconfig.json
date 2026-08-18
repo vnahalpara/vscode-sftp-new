@@ -10,6 +10,12 @@
         "rootDir": ".",
         "noUnusedLocals": true,
         "strictNullChecks": true,
+        "types": [
+            "node",
+            "vscode",
+            "webpack-env",
+            "jest"
+        ],
         "plugins": [
           {
             "name": "typescript-tslint-plugin",

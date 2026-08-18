@@ -15,6 +15,17 @@ import {
 // --series-1..4 in styles.css.
 export const SERIES = ['#3987e5', '#d95926', '#199e70', '#c98500'];
 
+// One shared, low-opacity stroke for charts that draw one line per core.
+// Named-colour identity (SERIES[i % SERIES.length]) breaks down past 4
+// cores — an 8/16/64-core host would either repeat colours across unrelated
+// cores (collided legend, overlapping look-alike lines) or need a legend
+// with dozens of entries nobody can use. Per-core detail is not "which core
+// is #7", it is "is any core hot" — a fan of translucent lines makes a
+// single outlier visually pop out of the pack (higher, and not blended into
+// the overlapping band the idle cores form) without asking for that many
+// distinct hues or a legend that cannot fit.
+export const MUTED_LINE = 'rgba(137, 135, 129, 0.55)';
+
 // Matches the dark theme tokens in styles.css: --text-muted, --grid, --axis,
 // --surface-1, --text-secondary.
 const INK = { muted: '#898781', grid: '#2c2c2a', axis: '#383835', surface: '#1a1a19', secondary: '#c3c2b7' };
@@ -102,7 +113,7 @@ function fallbackYAxis(unit) {
  * tick arrives, so the axis and grid still render rather than bailing out to
  * a placeholder box.
  */
-function SeriesChart({ data, series, height, unit, format, area }) {
+function SeriesChart({ data, series, height, unit, format, area, legend = true }) {
   const raw = data || [];
   const plottable = hasPlottableValue(raw, series);
   const now = Date.now();
@@ -198,17 +209,19 @@ function SeriesChart({ data, series, height, unit, format, area }) {
           )}
         </Chart>
       </ResponsiveContainer>
-      <Legend series={series} />
+      {legend && <Legend series={series} />}
     </>
   );
 }
 
 /** Filled area chart. `series` is `[{ key, label, color? }]`; `data` is `SeriesPoint[]` from series.ts. */
-export function AreaSeries({ data, series, unit = '', format, height = 190 }) {
-  return <SeriesChart data={data} series={series} height={height} unit={unit} format={format} area />;
+export function AreaSeries({ data, series, unit = '', format, height = 190, legend = true }) {
+  return <SeriesChart data={data} series={series} height={height} unit={unit} format={format} area legend={legend} />;
 }
 
 /** Plain line chart. Same props as `AreaSeries`. */
-export function LineSeries({ data, series, unit = '', format, height = 190 }) {
-  return <SeriesChart data={data} series={series} height={height} unit={unit} format={format} area={false} />;
+export function LineSeries({ data, series, unit = '', format, height = 190, legend = true }) {
+  return (
+    <SeriesChart data={data} series={series} height={height} unit={unit} format={format} area={false} legend={legend} />
+  );
 }

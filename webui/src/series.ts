@@ -63,10 +63,16 @@ export function memPoint(snapshot: any): SeriesPoint | null {
   };
 }
 
-// Loopback traffic is not throughput anyone is trying to see, and including it
-// swamps the scale on a busy host.
-function isPhysical(name: string): boolean {
-  return name !== 'lo' && name.indexOf('ifb') !== 0;
+// Loopback and container/bridge plumbing are not throughput anyone is trying
+// to see, and including them swamps the scale on a busy host — a
+// Docker-equipped host reports docker0 plus one veth* per container.
+// Exported so Overview.jsx's Network interfaces footer can apply the exact
+// same rule instead of re-deriving it — before this the chart filtered but
+// the footer table did not, so the same docker0/veth* noise the chart
+// already hid was still listed below it.
+const VIRTUAL_PREFIXES = ['ifb', 'veth', 'docker', 'br-', 'virbr', 'tun', 'tap'];
+export function isPhysical(name: string): boolean {
+  return name !== 'lo' && !VIRTUAL_PREFIXES.some(prefix => name.indexOf(prefix) === 0);
 }
 
 export function netPoint(snapshot: any): SeriesPoint | null {

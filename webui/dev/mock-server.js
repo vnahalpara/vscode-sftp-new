@@ -8,7 +8,12 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..', '..', 'media', 'webui');
 const PORT = Number(process.env.PORT || 5199);
-const CORES = 4;
+// 16, not 4: 4 sits exactly on SERIES' colour-cycle boundary (SERIES has 4
+// slots), so a 4-core mock could never show the per-core chart's old
+// cycle-at-4 bug — the smallest case hid it from the visual review pass that
+// approved that milestone. 16 forces any regression back to per-slot cycling
+// to be visible again.
+const CORES = 16;
 let tick = 0;
 
 const TYPES = {
@@ -118,11 +123,11 @@ const SLOW = {
   addrs: [{ name: 'eth0', address: '168.144.38.186' }],
 };
 
-function state() {
+function state(status) {
   return {
     id: PROFILE.id,
     profile: PROFILE,
-    status: 'online',
+    status: status || 'online',
     error: null,
     facts: FACTS,
     interval: 2000,
@@ -161,7 +166,15 @@ http
         connection: 'keep-alive',
       });
       const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-      send('state', state());
+      // Mirror the real server's transition sequence (idle -> connecting ->
+      // online), not just a single 'online' frame — that single-frame shape
+      // is exactly what let useSession.js's old wholesale-replace state
+      // handler hide the capabilities-dropping bug: with only one frame ever
+      // sent, there was nothing after the initial /api/session fetch to
+      // clobber it. Sending 'connecting' first and 'online' a beat later
+      // actually exercises the merge.
+      send('state', state('connecting'));
+      const onlineTimer = setTimeout(() => send('state', state('online')), 400);
       const history = [];
       const timer = setInterval(() => {
         const snap = snapshot();
@@ -171,6 +184,7 @@ http
       const slowTimer = setInterval(() => send('slow', SLOW), 5000);
       send('slow', SLOW);
       req.on('close', () => {
+        clearTimeout(onlineTimer);
         clearInterval(timer);
         clearInterval(slowTimer);
       });

@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { fmtBytes, fmtRate, fmtUptime, fmtPct, pct, toneForPct } from '../format';
-import { RANGES, trimToWindow } from '../series';
+import { RANGES, trimToWindow, isPhysical } from '../series';
 import { Card, Stat, Empty } from './ui.jsx';
-import { AreaSeries, LineSeries, SERIES } from './Charts.jsx';
+import { AreaSeries, LineSeries, SERIES, MUTED_LINE } from './Charts.jsx';
 
 const DASH = '—';
 
@@ -29,6 +29,27 @@ function toneColor(tone) {
   if (tone === 'warn') return 'var(--warning)';
   if (tone === 'ok') return 'var(--good)';
   return 'var(--series-1)';
+}
+
+// The server caps procs at 200 (see routes.ts) and sends all of them; the
+// table only has room to be useful for the ones actually worth looking at.
+const TOP_PROCESS_LIMIT = 15;
+
+// DiskMetrics (types.ts) carries no device capacity/size field, so "no
+// capacity" is approximated by readTotal/writeTotal both being exactly 0 —
+// i.e. this device has done precisely zero bytes of I/O since boot, not just
+// "none right now". That is the signature of a snap loopback/dm-* device
+// that mounted but was never actually used, which is what floods this table
+// on an Ubuntu host. Trade-off: a freshly attached real disk that is also
+// idle since boot (zero cumulative bytes) looks identical and gets hidden
+// too — there is no way to tell the two apart from this payload alone. A
+// disk with ANY nonzero cumulative total (even if its current rate is 0,
+// i.e. merely idle right now) always stays, so a real disk that has ever
+// been used keeps showing.
+function hasDiskActivity(d) {
+  const rate = (d.readBps || 0) + (d.writeBps || 0);
+  const total = (d.readTotal || 0) + (d.writeTotal || 0);
+  return rate > 0 || total > 0;
 }
 
 // A process with cpuPct === null (not sampled, not "0% busy") always sorts
@@ -90,7 +111,7 @@ export function headlineStats(snapshot, slow, facts) {
       key: 'load',
       label: 'Load (1m)',
       value: fmtLoad(load1),
-      sub: snapshot ? `${cores != null ? cores : DASH} cores · ${procCount != null ? procCount : 0} processes` : DASH,
+      sub: snapshot ? `${cores != null ? cores : DASH} cores · ${procCount != null ? procCount : DASH} processes` : DASH,
     },
     {
       key: 'uptime',
@@ -136,16 +157,29 @@ export default function Overview({ snapshot, slow, series, facts }) {
   // whatever the latest snapshot reports, so the per-core chart still knows
   // how many series to draw even before facts have loaded.
   const coreCount = (facts && facts.cores) || (snapshot && snapshot.cpu && snapshot.cpu.cores.length) || 0;
+  // All cores share one muted colour (see Charts.jsx's MUTED_LINE) instead of
+  // cycling the 4-slot SERIES palette. Cycling collides colours the moment a
+  // host has more than 4 cores — two unrelated cores paint identically, and
+  // the legend repeats the same swatch for both. It also does not scale to a
+  // legend: a 16- or 64-core host cannot usefully list one row per core, so
+  // the per-core card renders no legend at all (`legend={false}` below); the
+  // point of this chart is spotting the one core that stands apart, not
+  // identifying which numbered core it is.
   const coreSeriesDef = Array.from({ length: coreCount }, (_, i) => ({
     key: `core${i}`,
     label: `Core ${i}`,
-    color: SERIES[i % SERIES.length],
+    color: MUTED_LINE,
   }));
 
   const mounts = (slow && slow.mounts) || [];
-  const procs = snapshot && snapshot.procs ? [...snapshot.procs].sort(byCpuDesc) : [];
-  const disks = (snapshot && snapshot.disks) || [];
-  const nets = (snapshot && snapshot.net) || [];
+  const procs = snapshot && snapshot.procs
+    ? [...snapshot.procs].sort(byCpuDesc).slice(0, TOP_PROCESS_LIMIT)
+    : [];
+  const disks = ((snapshot && snapshot.disks) || []).filter(hasDiskActivity);
+  // Same physical-interface rule the chart above already applies (isPhysical,
+  // in series.ts) — reused rather than duplicated so docker0/veth*/etc. are
+  // hidden here too, not just from the throughput chart.
+  const nets = ((snapshot && snapshot.net) || []).filter(n => isPhysical(n.name));
 
   return (
     <>
@@ -171,7 +205,7 @@ export default function Overview({ snapshot, slow, series, facts }) {
         </Card>
         <Card title="Per-core" sub="Percent of one core, each">
           {coreSeriesDef.length ? (
-            <LineSeries data={cpuSeries} unit="%" series={coreSeriesDef} />
+            <LineSeries data={cpuSeries} unit="%" series={coreSeriesDef} legend={false} />
           ) : (
             <Empty title="No core data yet">Waiting for the first sample.</Empty>
           )}
@@ -255,7 +289,7 @@ export default function Overview({ snapshot, slow, series, facts }) {
           )}
         </Card>
 
-        <Card title="Top processes" sub="By CPU, at the last sample">
+        <Card title="Top processes" sub={`Top ${TOP_PROCESS_LIMIT} by CPU, at the last sample`}>
           {procs.length ? (
             <table className="tbl">
               <thead>

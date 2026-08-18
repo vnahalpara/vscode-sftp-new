@@ -114,8 +114,21 @@ function Header({ profile, facts, status, error, refreshing, onRefresh }) {
 
 export default function App() {
   const session = useSession();
-  const { status, error, profile, facts, snapshot, slow, series, activity, refresh, refreshing, streamDown, capabilities } =
-    session;
+  const {
+    status,
+    error,
+    profile,
+    facts,
+    snapshot,
+    slow,
+    series,
+    activity,
+    refresh,
+    refreshing,
+    streamDown,
+    streamClosed,
+    capabilities,
+  } = session;
   // Overview-with-tabs is the default landing page — with a single connected
   // host there is nothing more useful to show first, and it is what Task 8's
   // screenshot checklist expects to see without any navigation.
@@ -164,7 +177,9 @@ export default function App() {
             className="card mono"
             style={{ borderColor: 'rgba(208,59,59,0.45)', color: 'var(--serious)', marginBottom: 16, fontSize: 12.5 }}
           >
-            VS Code disconnected — retrying
+            {streamClosed
+              ? 'VS Code disconnected — reload the page to reconnect'
+              : 'VS Code disconnected — retrying'}
           </div>
         )}
         {content}
