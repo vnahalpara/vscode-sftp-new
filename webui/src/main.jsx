@@ -1,8 +1,6 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-
-function App() {
-  return <h1>Server Manager</h1>;
-}
+import './styles.css';
+import App from './App.jsx';
 
 createRoot(document.getElementById('root')).render(<App />);
