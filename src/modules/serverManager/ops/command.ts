@@ -463,6 +463,12 @@ function validateLineCount(lines: number): number {
 // throws rather than skipping, per the bad-input contract. `--` stops GNU
 // tail from treating a leading-`-` "path" as a flag, same reasoning as
 // `readFileCommand`'s `sed -- `.
+//
+// Confirmed safe, not assumed: unlike `-u`/`--unit` below, `-n` takes its
+// value from the very next argv element and that element is `${n}` (a
+// number we just validated), not `--` -- option processing only reaches
+// `--` afterwards, once `-n`'s argument slot is already filled, so `--`
+// still does its job of terminating options before the path operand.
 export function tailCommand(path: string, lines: number): string {
   if (hasControlChars(path)) {
     throw new Error('Refusing to build a tail command for a path containing a newline or NUL byte');
@@ -496,24 +502,46 @@ export function followCommand(path: string): string {
 // specific unit named by explicit request, so this throws rather than
 // skipping.
 //
-// Flags before `--`, unit after -- the same convention `serviceStatusCommand`
-// uses above -- even though `-u`/`--unit` is an option that normally
-// consumes the very next argv element as its value regardless of content.
+// `--unit=<unit>`, NOT `-u -- <unit>`. This was tried the other way first
+// and is wrong -- confirmed against a real journalctl (Ubuntu 22.04):
+// `journalctl -n 3 --no-pager -u -- 'ssh.service'` fails outright with
+// `Failed to add match 'ssh.service': Invalid argument`. The reason is
+// getopt's own argument-consumption order: `-u` takes a REQUIRED argument,
+// so once getopt sees `-u` it unconditionally consumes the very next argv
+// element as that argument's value -- including `--` itself, if that's
+// what comes next -- before `--`'s usual "stop parsing options" meaning
+// ever gets a chance to apply. That leaves `-u` bound to the literal,
+// nonsensical unit "--", and the real unit name left over as an unbound
+// positional argument that journalctl doesn't know what to do with.
+// (`--` correctly terminates options for `tailCommand`/`followCommand`
+// above only because `-n`'s argument slot is filled by the number BEFORE
+// `--` is reached -- not the same shape as this.)
+//
+// The `--unit=` long-option form sidesteps the whole issue: the value is
+// part of the SAME argv element as the option itself (`--unit=ssh.service`
+// is one token), so there is no separate "next argv element" for `--` to
+// have ever needed to guard in the first place, and no risk of the value
+// being reinterpreted as a different option either. `isSafeUnitName` is
+// kept regardless -- it's the positive guarantee, `--unit=` quoting is
+// belt-and-braces, matching this file's standing convention. Someone
+// tidying this back to `-u <unit>`/`-u -- <unit>` would silently reopen
+// this exact failure -- don't.
 export function journalCommand(unit: string, lines: number): string {
   if (!isSafeUnitName(unit)) {
     throw new Error(`Unsafe unit name: ${unit}`);
   }
   const n = validateLineCount(lines);
-  return `sudo -n journalctl -n ${n} --no-pager -u -- ${shellSingle(unit)}`;
+  return `sudo -n journalctl -n ${n} --no-pager --unit=${shellSingle(unit)}`;
 }
 
 // journalctl's own pure-follow shape: `-n 0` for the same "no replay on
 // connect" reason as `followCommand`'s `tail -n 0 -F`, `-f` to follow, and
 // -- like `followCommand` -- a single direct foreground process with no
 // `sh -c` wrapper, so a consumer's SIGTERM reaches `journalctl` cleanly.
+// `--unit=`, not `-u`/`--` -- see the comment on `journalCommand` above.
 export function journalFollowCommand(unit: string): string {
   if (!isSafeUnitName(unit)) {
     throw new Error(`Unsafe unit name: ${unit}`);
   }
-  return `sudo -n journalctl -n 0 -f --no-pager -u -- ${shellSingle(unit)}`;
+  return `sudo -n journalctl -n 0 -f --no-pager --unit=${shellSingle(unit)}`;
 }

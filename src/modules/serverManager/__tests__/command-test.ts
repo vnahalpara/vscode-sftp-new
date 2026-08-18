@@ -528,9 +528,13 @@ describe('journalCommand', () => {
   it('validates the unit with isSafeUnitName', () => {
     expect(() => journalCommand('-Hroot@evil', 200)).toThrow();
   });
-  it('builds a quoted journalctl call with a -- terminator', () => {
+  it('builds a quoted journalctl call using --unit=, not -u -- (confirmed against a real host: ' +
+     '-u -- fails with "Invalid argument" since -- is consumed as -u\'s own argument value)', () => {
     expect(journalCommand('nginx.service', 200))
-      .toBe(`sudo -n journalctl -n 200 --no-pager -u -- 'nginx.service'`);
+      .toBe(`sudo -n journalctl -n 200 --no-pager --unit='nginx.service'`);
+  });
+  it('never emits the broken -u -- shape', () => {
+    expect(journalCommand('nginx.service', 200)).not.toMatch(/-u\s+--/);
   });
   it('rejects every shell metacharacter in the unit, same as serviceActionCommand', () => {
     ['nginx; rm -rf /', 'nginx && reboot', 'nginx`id`', 'nginx$(id)', "nginx'", 'nginx"', 'nginx\nrestart']
@@ -551,9 +555,12 @@ describe('journalFollowCommand', () => {
   it('validates the unit with isSafeUnitName', () => {
     expect(() => journalFollowCommand('-Hroot@evil')).toThrow();
   });
-  it('builds a pure follow with no historical replay (-n 0 -f)', () => {
+  it('builds a pure follow with no historical replay (-n 0 -f), using --unit= not -u --', () => {
     expect(journalFollowCommand('nginx.service'))
-      .toBe(`sudo -n journalctl -n 0 -f --no-pager -u -- 'nginx.service'`);
+      .toBe(`sudo -n journalctl -n 0 -f --no-pager --unit='nginx.service'`);
+  });
+  it('never emits the broken -u -- shape', () => {
+    expect(journalFollowCommand('nginx.service')).not.toMatch(/-u\s+--/);
   });
   it('rejects every shell metacharacter in the unit', () => {
     ['nginx; rm -rf /', 'nginx && reboot', 'nginx`id`', 'nginx$(id)']
