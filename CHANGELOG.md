@@ -1,3 +1,7 @@
+## 1.23.0 - 2026-08-18
+* New Feature : the **Manage Server** page is now a real dashboard instead of the earlier raw-JSON diagnostics view. A sidebar (Dashboard, Activity, Database, Servers & settings) and a live status badge frame an **Overview** tab with stat cards for CPU, Memory, Disk, Load (1m) and Uptime; charts for CPU usage, per-core usage, memory usage, load average and network throughput; and tables for filesystems, top processes, disk I/O and network interfaces, all streamed over the existing SSH-backed Server-Sent Events channel. A range selector switches the charts between the last 5, 15 and 60 minutes of in-memory history.
+* Note : Services, Web server, Logs, Terminal and Database appear as visibly disabled tabs, pending later releases. Metric history is still held in memory only and does not survive a VS Code restart.
+
 ## 1.22.1 - 2026-08-18
 * Fix : Manage Server showed a green **online** badge for a connection whose sampler channel failed to open. `Collector.start()` reports that failure through a callback instead of throwing, so the session claimed "online" over the top of the "offline" it had just set. The status is now only promoted when nothing has already marked the connection dead.
 * Fix : **Reconnect**, **Export Database** and **Export Table** were contributed in `package.json` but their handler files had never been committed, so all three appeared in the command palette and failed with "command not found". The handlers now ship.

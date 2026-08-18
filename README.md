@@ -89,8 +89,12 @@ network — and opens Chrome on a token-authenticated page for that one connecti
 shows is collected over the connection's existing SSH channel: no agent is installed on the
 server, and no new service runs there.
 
-The page currently shows live host facts and a 2-second metric stream. Services, web server,
-logs and terminal management follow in the next releases.
+The dashboard streams live metrics over the connection's SSH channel and renders an **Overview**
+tab: five stat cards (CPU, Memory, Disk, Load (1m), Uptime), charts for CPU usage, per-core usage,
+memory usage, load average and network throughput, plus tables for filesystems, top processes by
+CPU, disk I/O (IOPS and latency) and network interfaces. A range selector switches the charts
+between the last 5, 15 and 60 minutes of in-memory history. Services, Web server, Logs, Terminal
+and Database appear as visibly disabled tabs, pending later releases.
 
 Metric history lives in memory only and is not persisted across VS Code restarts.
 
