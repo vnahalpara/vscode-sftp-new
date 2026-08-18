@@ -5,6 +5,12 @@ import {
   certInfoCommand, readFileCommand, isConfigFilePath,
 } from '../ops/command';
 import { shellSingle } from '../../../core/dbExec';
+import {
+  NGINX_NO_TRAILING_NEWLINE_FILE,
+  NGINX_NO_TRAILING_NEWLINE_TEXT,
+  NGINX_SECOND_FILE,
+  NGINX_SECOND_TEXT,
+} from '../__fixtures__/ops';
 
 describe('isAllowedAction', () => {
   it('allows exactly the five documented actions', () => {
@@ -264,6 +270,53 @@ describe('configFilesCommand', () => {
     expect(() => configFilesCommand('' as any)).toThrow();
     expect(() => configFilesCommand(undefined as any)).toThrow();
   });
+
+  // `cat` copies the file byte for byte, so a config file with no final
+  // newline leaves the stream mid-line and the NEXT file's `@@` marker lands
+  // appended to that last line -- where splitAt (which requires `@@` at index
+  // 0) no longer sees a marker at all. The second file's vhosts then get
+  // attributed to the first file, and the second file's own path never
+  // reaches the /api/file allowlist, so its View button 403s.
+  describe('framing a file that does not end in a newline', () => {
+    it("emits a newline of its own after each file's contents", () => {
+      const cmd = configFilesCommand('nginx');
+      // The script is single-quote escaped for the outer `sh -c`, so match
+      // the shape rather than the literal quoting.
+      expect(cmd).toMatch(/cat "\$f"; printf /);
+    });
+
+    // Exactly what the shell script writes to stdout, given file contents.
+    function simulateOutput(files: Array<{ path: string; content: string }>): string {
+      return files.map(f => `@@${f.path}\n${f.content}` + '\n').join('');
+    }
+
+    it('splits both files when the first lacks a trailing newline', () => {
+      const stdout = simulateOutput([
+        { path: NGINX_NO_TRAILING_NEWLINE_FILE, content: NGINX_NO_TRAILING_NEWLINE_TEXT },
+        { path: NGINX_SECOND_FILE, content: NGINX_SECOND_TEXT },
+      ]);
+      const sections = splitAt(stdout);
+
+      expect(Object.keys(sections).sort()).toEqual(
+        [NGINX_NO_TRAILING_NEWLINE_FILE, NGINX_SECOND_FILE].sort()
+      );
+      expect(sections[NGINX_NO_TRAILING_NEWLINE_FILE]).toContain('first.example.com');
+      expect(sections[NGINX_SECOND_FILE]).toContain('second.example.com');
+      // The first section must not have swallowed the second file.
+      expect(sections[NGINX_NO_TRAILING_NEWLINE_FILE]).not.toContain('second.example.com');
+    });
+
+    it('is the newline that makes the difference (without it the marker is swallowed)', () => {
+      // The old framing: no `printf '\n'` after `cat`.
+      const stdout =
+        `@@${NGINX_NO_TRAILING_NEWLINE_FILE}\n${NGINX_NO_TRAILING_NEWLINE_TEXT}` +
+        `@@${NGINX_SECOND_FILE}\n${NGINX_SECOND_TEXT}`;
+      const sections = splitAt(stdout);
+
+      expect(Object.keys(sections)).toEqual([NGINX_NO_TRAILING_NEWLINE_FILE]);
+      expect(sections[NGINX_NO_TRAILING_NEWLINE_FILE]).toContain('second.example.com');
+    });
+  });
 });
 
 // configFilesCommand `cat`s each file into the same stream its `@@` markers
@@ -404,5 +457,14 @@ describe('detectWebServerCommand', () => {
     const cmd = detectWebServerCommand();
     expect(cmd).not.toMatch(/echo "@@/);
     expect(cmd).toContain(`printf '%s\\n' '@@nginx'`);
+  });
+  // RHEL-family hosts keep /usr/sbin and /sbin off a non-root user's PATH,
+  // and an SSH exec channel is not a login shell -- so `command -v nginx`
+  // fails there for an nginx that is plainly installed, and the UI reports
+  // "No web server detected", which reads as an answer rather than a failure.
+  it('makes /usr/sbin and /sbin reachable without shadowing the user PATH', () => {
+    const cmd = detectWebServerCommand();
+    expect(cmd.indexOf('PATH=$PATH:/usr/sbin:/sbin')).toBe(0);
+    expect(cmd).not.toMatch(/PATH=\/usr\/sbin/);
   });
 });

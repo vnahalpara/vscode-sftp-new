@@ -135,6 +135,16 @@ export function serviceStatusCommand(unit: string): string {
 
 export function detectWebServerCommand(): string {
   return [
+    // RHEL/Rocky/Alma keep /usr/sbin and /sbin off a non-root user's PATH,
+    // and an SSH exec channel is not a login shell, so `command -v nginx` /
+    // `command -v httpd` there answers "not installed" for a web server that
+    // is plainly installed -- and the UI reports "No web server detected",
+    // which reads as a normal answer rather than a lookup failure. Appended
+    // rather than prepended, and never replacing $PATH: this only has to make
+    // the sbin directories REACHABLE, and putting them first would shadow a
+    // user's own nginx/httpd (a /usr/local/bin build, an asdf/nix shim) with
+    // the distro one, reporting a version the host does not actually run.
+    'PATH=$PATH:/usr/sbin:/sbin',
     `printf '%s\\n' '@@nginx'`,
     '(command -v nginx >/dev/null 2>&1 && nginx -v 2>&1) || true',
     `printf '%s\\n' '@@apache_bin'`,
@@ -222,7 +232,17 @@ export function isConfigFilePath(kind: WebServerKind, path: string): boolean {
 export function configFilesCommand(kind: WebServerKind): string {
   assertWebServerKind(kind);
   const globs = kind === 'nginx' ? NGINX_GLOBS : APACHE_GLOBS;
-  const script = `for f in ${globs}; do [ -f "$f" ] && { printf '%s\\n' "@@$f"; cat "$f"; }; done 2>/dev/null || true`;
+  // The `printf '\n'` after `cat` is load-bearing, not cosmetic. `cat`
+  // reproduces the file byte for byte, so a config file that does not end in
+  // a newline -- an ordinary result of hand-editing a vhost -- leaves the
+  // stream mid-line, and the NEXT file's `@@` marker lands appended to that
+  // last line. splitAt requires `line.indexOf('@@') === 0`, so that marker is
+  // not recognised: the following file's vhosts are attributed to the
+  // previous file, and its own path never reaches the allowlist, making the
+  // View button show the wrong file or 403. One unconditional newline costs a
+  // blank line at the end of each section (harmless to every parser here) and
+  // removes the failure entirely.
+  const script = `for f in ${globs}; do [ -f "$f" ] && { printf '%s\\n' "@@$f"; cat "$f"; printf '\\n'; }; done 2>/dev/null || true`;
   return `sudo -n sh -c ${shellSingle(script)}`;
 }
 

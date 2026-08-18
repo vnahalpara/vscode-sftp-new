@@ -367,3 +367,29 @@ export const CERT_INFO_TEXT = [
   "140245123456:error:02001002:system library:fopen:No such file or directory:bss_file.c:158:fopen('/etc/ssl/certs/missing.pem','r')",
   '140245123456:error:2006D080:BIO routines:BIO_new_file:no such file:bss_file.c:165:',
 ].join('\n');
+
+/* ------------------------------------------------- configFilesCommand framing */
+// A hand-edited vhost file that does NOT end in a newline -- ordinary on a
+// real host (an editor without "insert final newline", a `printf` redirect,
+// a file truncated by hand). `cat` reproduces it byte for byte, so without
+// the `printf '\n'` configFilesCommand now emits after each file, the NEXT
+// file's `@@` marker gets appended to this file's last line and stops being
+// a marker at all: splitAt requires `@@` at index 0.
+export const NGINX_NO_TRAILING_NEWLINE_FILE = '/etc/nginx/sites-enabled/first.conf';
+export const NGINX_NO_TRAILING_NEWLINE_TEXT = [
+  'server {',
+  '    listen 80;',
+  '    server_name first.example.com;',
+  '    root /var/www/first;',
+  '}',
+].join('\n'); // deliberately no trailing '\n'
+
+export const NGINX_SECOND_FILE = '/etc/nginx/sites-enabled/second.conf';
+export const NGINX_SECOND_TEXT = [
+  'server {',
+  '    listen 80;',
+  '    server_name second.example.com;',
+  '    root /var/www/second;',
+  '}',
+  '',
+].join('\n'); // ends with a newline, as most files do
