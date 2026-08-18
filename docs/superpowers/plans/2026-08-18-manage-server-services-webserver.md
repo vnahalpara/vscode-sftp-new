@@ -402,3 +402,170 @@ Commit as `chore: document Services and Web server; bump to 1.24.0`.
 **Type consistency.** `ServiceRow` (Task 2) is what Task 5 serialises and Task 7 renders. `Vhost` and `CertInfo` (Task 3) likewise for Task 8. `OpsDeps` (Task 4) is constructed in Task 5 from the session's transport, `session.activity`, and the profile's `username`/`host`.
 
 **The risk I want named.** Tasks 7 and 8 are verifiable only against the mock. The actions themselves — restarting a real unit, reloading a real nginx — need a host with passwordless sudo, which does not exist in this environment. Task 9 must say so rather than implying end-to-end coverage. The parsers, which is where the bugs actually live, are fully covered from fixtures.
+
+---
+
+### Task 10: Privileged execution lane
+
+Added mid-milestone after live verification against a real production host
+(apex.stathmosgroup.com, Ubuntu 22.04.5) proved the feature is inert as built:
+the profile's SSH user was not a general sudoer, so every privileged builder —
+mutating and read-only alike — failed with `sudo: a password is required`.
+
+**User decision (2026-08-18):** if `root_user` and `root_password` are present on
+the profile, run privileged commands over a lane authenticated as those
+credentials; otherwise fall back to the profile's own `username`/`password`.
+Root-first, not session-first.
+
+**Files:**
+- Modify: `src/modules/serverManager/index.ts` (build the privileged transport)
+- Modify: `src/modules/serverManager/session.ts` (expose it)
+- Modify: `src/modules/serverManager/routes.ts:57` (`opsFor` uses it)
+- Modify: `src/modules/serverManager/registry.ts` (surface a boolean, never the secret)
+- Test: `src/modules/serverManager/__tests__/privileged-lane-test.ts`
+
+**Interfaces:**
+- Consumes: `sshTransport(fileService, config)` from `../monitor/transport`,
+  `ManagedSession`'s existing `get transport()`.
+- Produces: `ManagedSession.get privilegedTransport(): MonitorTransport`, and
+  `RedactedProfile.privilegedAs: string | null`.
+
+**Why a second config is safe:** the connection pool keys on
+`hashOption(getHostInfo(config))`, a hash over all non-ignored config fields
+including `username` and `password` (`src/core/fileService.ts:147`,
+`src/core/remoteFs.ts:120`). A config with different credentials therefore
+hashes to a different identity and gets its OWN pooled connection. It cannot
+collide with, replace, or re-authenticate the user's SFTP connection — which
+matters enormously, because silently upgrading the file-transfer connection to
+root would make every subsequent upload write files owned by root.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+import { privilegedConfig } from '../index';
+
+test('prefers root credentials when both are present', () => {
+  const out = privilegedConfig({
+    host: 'h', username: 'magento', password: 'p',
+    root_user: 'root', root_password: 'r',
+  });
+  expect(out.username).toBe('root');
+  expect(out.password).toBe('r');
+});
+
+test('falls back to the session user when root credentials are absent', () => {
+  const out = privilegedConfig({ host: 'h', username: 'magento', password: 'p' });
+  expect(out.username).toBe('magento');
+  expect(out.password).toBe('p');
+});
+
+test('requires BOTH root fields before switching', () => {
+  const a = privilegedConfig({ username: 'u', password: 'p', root_user: 'root' });
+  const b = privilegedConfig({ username: 'u', password: 'p', root_password: 'r' });
+  expect(a.username).toBe('u');
+  expect(b.username).toBe('u');
+});
+
+test('drops key-based auth when switching to root password auth', () => {
+  const out = privilegedConfig({
+    username: 'u', password: 'p', privateKeyPath: '/k', agent: '/a',
+    root_user: 'root', root_password: 'r',
+  });
+  expect(out.privateKeyPath).toBeUndefined();
+  expect(out.agent).toBeUndefined();
+});
+
+test('returns a copy, never mutating the caller config', () => {
+  const config: any = { username: 'u', password: 'p', root_user: 'root', root_password: 'r' };
+  privilegedConfig(config);
+  expect(config.username).toBe('u');
+});
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `npx jest src/modules/serverManager/__tests__/privileged-lane-test.ts`
+Expected: FAIL — `privilegedConfig` is not exported.
+
+- [ ] **Step 3: Implement `privilegedConfig` in index.ts**
+
+```ts
+// Both fields are required before switching lanes: a profile carrying only
+// root_user (a common half-finished edit) must not silently produce a
+// connection that tries root with the ordinary user's password, locking the
+// account out on hosts that count failed auths.
+export function privilegedConfig(config: any): any {
+  const next = Object.assign({}, config);
+  if (config.root_user && config.root_password) {
+    next.username = config.root_user;
+    next.password = config.root_password;
+    // Key/agent auth would take precedence over the password we just set and
+    // would authenticate as the WRONG user -- the key belongs to the session
+    // user, not to root.
+    delete next.privateKeyPath;
+    delete next.privateKey;
+    delete next.agent;
+  }
+  return next;
+}
+```
+
+- [ ] **Step 4: Wire it through**
+
+In `index.ts`, alongside the existing `const transport = sshTransport(fileService, config);`:
+
+```ts
+const privileged = sshTransport(fileService, privilegedConfig(config));
+```
+
+Pass it into `SessionDeps` as `privilegedTransport`; add the field to the
+`SessionDeps` interface in `session.ts` and expose:
+
+```ts
+// Privileged ops (systemctl, nginx -t, openssl) run over this lane, which is
+// authenticated as root_user when the profile supplies those credentials and
+// as the ordinary session user otherwise. Metrics keep using `transport` --
+// reading /proc needs no privilege, and holding a root channel open for the
+// whole session just to sample CPU would be gratuitous.
+get privilegedTransport(): MonitorTransport {
+  return this._deps.privilegedTransport;
+}
+```
+
+Then in `routes.ts:57`, `opsFor` switches to the privileged lane:
+
+```ts
+exec: cmd => session.privilegedTransport.exec(cmd),
+```
+
+- [ ] **Step 5: Surface which lane is in use, without leaking the secret**
+
+In `registry.ts`, add to the redacted profile: `privilegedAs: config.root_user && config.root_password ? config.root_user : config.username`.
+The password must NEVER appear in `RedactedProfile` — that object is serialized
+straight to the browser. Add a test asserting `JSON.stringify(redacted)` contains
+neither `root_password`'s value nor the string `root_password`.
+
+- [ ] **Step 6: Update the sudo hint**
+
+`sudoHint` in `activity.ts` currently names `deps.user`. It must name the lane
+actually used, or it will tell the user to grant sudo to the wrong account.
+`OpsDeps.user` should be fed `privilegedAs`, not the session username.
+
+- [ ] **Step 7: Run the full suite**
+
+Run: `npx jest src/modules/serverManager`
+Expected: PASS, including the 245 pre-existing tests.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/modules/serverManager
+git commit -m "feat: run privileged ops over a root lane when configured"
+```
+
+**Documentation requirement (carried into Task 9):** document that a narrow
+per-command sudoers allowlist will NOT match, because every builder emits a `--`
+end-of-options guard and a fully-qualified `.service` unit name, whereas such
+rules are typically written `/bin/systemctl restart leadgen-web`. The `--` stays
+(user decision, 2026-08-18): it is the second layer of the argument-injection
+defense and is not worth trading for allowlist compatibility.
