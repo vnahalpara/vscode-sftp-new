@@ -3,6 +3,7 @@ import {
   servicesCommand, serviceActionCommand, serviceStatusCommand,
   detectWebServerCommand, configFilesCommand, testConfigCommand,
   certInfoCommand, readFileCommand, isConfigFilePath,
+  logDiscoveryCommand, tailCommand, followCommand, journalCommand, journalFollowCommand,
 } from '../ops/command';
 import { shellSingle } from '../../../core/dbExec';
 import {
@@ -426,6 +427,142 @@ describe('readFileCommand', () => {
     expect(() => readFileCommand('/var/log/evil\n; rm -rf /', 10)).toThrow();
     expect(() => readFileCommand('/var/log/evil\r.log', 10)).toThrow();
     expect(() => readFileCommand('/var/log/evil\0.log', 10)).toThrow();
+  });
+});
+
+describe('logDiscoveryCommand', () => {
+  it('lists candidate log files and journald units under @@ markers', () => {
+    const cmd = logDiscoveryCommand();
+    expect(cmd).toMatch(/@@files/);
+    expect(cmd).toMatch(/@@units/);
+    expect(cmd).toMatch(/find \/var\/log/);
+    expect(cmd).toMatch(/journalctl -F _SYSTEMD_UNIT/);
+  });
+  it('uses printf, not echo, for its @@ markers', () => {
+    // The whole script is itself single-quote escaped for the outer
+    // `sh -c` (see configFilesCommand's tests above for the same shape),
+    // so match structurally rather than against literal, unescaped quotes.
+    const cmd = logDiscoveryCommand();
+    expect(cmd).not.toMatch(/\becho\b/);
+    expect(cmd).toContain('printf');
+  });
+  it('bakes sudo -n into the returned command, per the file-wide privilege contract', () => {
+    expect(logDiscoveryCommand()).toMatch(/^sudo -n sh -c /);
+  });
+  it('reads size via stat -c%s, not find -printf, so it still works under busybox find', () => {
+    const cmd = logDiscoveryCommand();
+    expect(cmd).toMatch(/stat -c%s/);
+    expect(cmd).not.toMatch(/find[^|]*-printf/);
+  });
+  it('bounds the scan depth rather than walking the whole filesystem', () => {
+    expect(logDiscoveryCommand()).toMatch(/-maxdepth \d+/);
+  });
+  it('excludes journald\'s binary journal files from the file listing', () => {
+    expect(logDiscoveryCommand()).toMatch(/var\/log\/journal/);
+  });
+  it('explicitly newline-terminates each section, so a short last line cannot swallow the next @@ marker', () => {
+    // Mirrors the configFilesCommand trailing-newline fix: an explicit
+    // `printf '\n'` after each section is what stops the next section's
+    // `@@` marker from ever landing appended to a line that -- for
+    // whatever reason -- did not end in its own `\n`. The script is itself
+    // single-quote escaped for the outer `sh -c`, so pin the *count* of
+    // `printf` invocations (2 `@@` markers + 1 per-file line + 2 trailing
+    // guard newlines = 5) rather than matching literal, unescaped quoting.
+    const cmd = logDiscoveryCommand();
+    expect(cmd.match(/printf/g)!.length).toBe(5);
+  });
+});
+
+describe('tailCommand', () => {
+  it('quotes and -- guards the path', () => {
+    expect(tailCommand('/var/log/syslog', 200)).toBe(`sudo -n tail -n 200 -- '/var/log/syslog'`);
+  });
+  it('rejects a path with a newline', () => {
+    expect(() => tailCommand('/var/log/a\nb', 200)).toThrow();
+  });
+  it('rejects a path with a carriage return or NUL byte', () => {
+    expect(() => tailCommand('/var/log/a\r.log', 200)).toThrow();
+    expect(() => tailCommand('/var/log/a\0.log', 200)).toThrow();
+  });
+  it('rejects a non-integer line count', () => {
+    expect(() => tailCommand('/var/log/syslog', 1.5 as any)).toThrow();
+    expect(() => tailCommand('/var/log/syslog', -1)).toThrow();
+    expect(() => tailCommand('/var/log/syslog', '200; rm -rf /' as any)).toThrow();
+  });
+  it('rejects a zero or non-finite line count', () => {
+    expect(() => tailCommand('/var/log/syslog', 0)).toThrow();
+    expect(() => tailCommand('/var/log/syslog', NaN)).toThrow();
+    expect(() => tailCommand('/var/log/syslog', Infinity)).toThrow();
+  });
+  it('rejects a line count beyond the upper bound', () => {
+    expect(() => tailCommand('/var/log/syslog', 999999999)).toThrow();
+  });
+  it('adds a -- terminator so a path cannot be read as a tail flag (argument injection)', () => {
+    expect(tailCommand('--follow=name', 10)).toBe(`sudo -n tail -n 10 -- '--follow=name'`);
+  });
+  it('bakes sudo -n into the returned command', () => {
+    expect(tailCommand('/var/log/syslog', 10)).toMatch(/^sudo -n tail /);
+  });
+});
+
+describe('followCommand', () => {
+  it('builds a pure follow with no historical replay (tail -n 0 -F)', () => {
+    expect(followCommand('/var/log/syslog')).toBe(`sudo -n tail -n 0 -F -- '/var/log/syslog'`);
+  });
+  it('rejects a path with a newline, carriage return, or NUL byte', () => {
+    expect(() => followCommand('/var/log/a\nb')).toThrow();
+    expect(() => followCommand('/var/log/a\r.log')).toThrow();
+    expect(() => followCommand('/var/log/a\0.log')).toThrow();
+  });
+  it('adds a -- terminator so a path cannot be read as a tail flag', () => {
+    expect(followCommand('--follow=name')).toBe(`sudo -n tail -n 0 -F -- '--follow=name'`);
+  });
+  it('never wraps the follow in an extra sh -c shell layer, so a SIGTERM reaches tail directly', () => {
+    const cmd = followCommand('/var/log/syslog');
+    expect(cmd).not.toContain('sh -c');
+    expect(cmd).not.toContain('&');
+  });
+});
+
+describe('journalCommand', () => {
+  it('validates the unit with isSafeUnitName', () => {
+    expect(() => journalCommand('-Hroot@evil', 200)).toThrow();
+  });
+  it('builds a quoted journalctl call with a -- terminator', () => {
+    expect(journalCommand('nginx.service', 200))
+      .toBe(`sudo -n journalctl -n 200 --no-pager -u -- 'nginx.service'`);
+  });
+  it('rejects every shell metacharacter in the unit, same as serviceActionCommand', () => {
+    ['nginx; rm -rf /', 'nginx && reboot', 'nginx`id`', 'nginx$(id)', "nginx'", 'nginx"', 'nginx\nrestart']
+      .forEach(u => expect(() => journalCommand(u, 100)).toThrow());
+  });
+  it('rejects a non-integer or out-of-range line count', () => {
+    expect(() => journalCommand('nginx.service', 1.5 as any)).toThrow();
+    expect(() => journalCommand('nginx.service', -1)).toThrow();
+    expect(() => journalCommand('nginx.service', '200; rm -rf /' as any)).toThrow();
+    expect(() => journalCommand('nginx.service', 999999999)).toThrow();
+  });
+  it('bakes sudo -n into the returned command', () => {
+    expect(journalCommand('nginx.service', 10)).toMatch(/^sudo -n journalctl /);
+  });
+});
+
+describe('journalFollowCommand', () => {
+  it('validates the unit with isSafeUnitName', () => {
+    expect(() => journalFollowCommand('-Hroot@evil')).toThrow();
+  });
+  it('builds a pure follow with no historical replay (-n 0 -f)', () => {
+    expect(journalFollowCommand('nginx.service'))
+      .toBe(`sudo -n journalctl -n 0 -f --no-pager -u -- 'nginx.service'`);
+  });
+  it('rejects every shell metacharacter in the unit', () => {
+    ['nginx; rm -rf /', 'nginx && reboot', 'nginx`id`', 'nginx$(id)']
+      .forEach(u => expect(() => journalFollowCommand(u)).toThrow());
+  });
+  it('never wraps the follow in an extra sh -c shell layer, so a SIGTERM reaches journalctl directly', () => {
+    const cmd = journalFollowCommand('nginx.service');
+    expect(cmd).not.toContain('sh -c');
+    expect(cmd).not.toContain('&');
   });
 });
 

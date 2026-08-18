@@ -376,3 +376,144 @@ export function readFileCommand(path: string, lines: number): string {
   const n = clampLines(lines);
   return `sudo -n sed -n '1,${n}p' -- ${shellSingle(path)}`;
 }
+
+// ------------------------------------------------------------------- logs --
+
+// Where and how deep `logDiscoveryCommand` scans for candidate log files.
+// Fixed, not caller-supplied, so -- like NGINX_GLOBS/APACHE_GLOBS above --
+// neither needs escaping.
+const LOG_SCAN_ROOT = '/var/log';
+const LOG_SCAN_MAX_DEPTH = 3;
+
+// `/var/log/journal/**` holds systemd-journald's binary journal files, not
+// human-readable logs. Their content is already exposed -- properly, via
+// `journalctl` -- through journalCommand/journalFollowCommand below, so
+// listing them again here as "files" would duplicate the journald units
+// already surfaced under @@units and offer a path that `tailCommand`/
+// `followCommand` (plain `tail`) cannot usefully read anyway.
+const LOG_SCAN_EXCLUDE = `${LOG_SCAN_ROOT}/journal/*`;
+
+// Lists candidate log files under /var/log (regular files, bounded depth,
+// with sizes) and journald units that have ever logged, framed with the
+// `@@` marker convention and meant to be parsed with `splitAt` (see
+// `parseLogDiscovery` in `ops/logs.ts`, which does both).
+//
+// Size is read with `stat -c%s`, not `find -printf '%s'`: `-printf` is a
+// GNU findutils extension that busybox's `find` (Alpine and other minimal
+// containers) does not support, and this feature already treats busybox
+// compatibility as a real constraint (see the date fallback in
+// `monitor/probe.ts`). `stat -c%s` costs one extra process per file but
+// works on both GNU coreutils and busybox. A file that vanishes between
+// `find` listing it and `stat` reading it (log rotation is exactly this
+// race), or one this user cannot stat even under sudo, leaves `sz` empty
+// rather than aborting the scan -- `parseLogDiscovery` turns that into
+// `bytes: null`, never `bytes: 0`.
+//
+// Every line this command's own `stat` loop writes already ends in `\n`
+// (each is its own `printf '...\n'` call), unlike `configFilesCommand`'s
+// `cat "$f"`, which reproduces a THIRD PARTY file's bytes verbatim and can
+// genuinely lack a trailing newline. Even so, an explicit `printf '\n'` is
+// appended after each section here anyway, as a defensive belt-and-braces
+// measure: it is what actually stops the `configFilesCommand`-class bug --
+// the next `@@` marker landing appended to the previous section's last
+// line and being swallowed by `splitAt` (which only recognises `@@` at
+// index 0) -- from resurfacing the next time this script is edited to add
+// a line-emitting step that doesn't already end in `\n` on its own.
+export function logDiscoveryCommand(): string {
+  const script = [
+    `printf '%s\\n' '@@files'`,
+    `find ${LOG_SCAN_ROOT} -maxdepth ${LOG_SCAN_MAX_DEPTH} -type f ! -path ${shellSingle(LOG_SCAN_EXCLUDE)} 2>/dev/null | while IFS= read -r f; do sz=$(stat -c%s "$f" 2>/dev/null); printf '%s\\t%s\\n' "$sz" "$f"; done`,
+    `printf '\\n'`,
+    `printf '%s\\n' '@@units'`,
+    'journalctl -F _SYSTEMD_UNIT --no-pager 2>/dev/null',
+    `printf '\\n'`,
+  ].join('; ');
+  return `sudo -n sh -c ${shellSingle(script)}`;
+}
+
+// `tail -n <N>` / `journalctl -n <N>` interpolate N directly into the
+// command text with NO quoting -- this is a different kind of operand from
+// every path/unit above. A path or unit name is made safe by quoting it
+// (`shellSingle`) and/or validating its charset; a line count can't be
+// quoted the way a path can, because `tail`/`journalctl` need to see a bare
+// number in argv, not a quoted string -- `tail -n '200'` is fine, but
+// `tail -n '200; rm -rf /'` is just as fine from the shell's point of view,
+// because quoting only stops word-splitting, not `tail` itself later doing
+// something dangerous with its argument; the real danger here is passing
+// the value as a shell-syntax-bearing STRING at all. So instead of quoting,
+// N is proven to be nothing but a small positive integer -- via
+// `Number.isInteger` plus an explicit upper bound -- before it is
+// interpolated at all. Unlike `clampLines` (used by `readFileCommand`),
+// this THROWS rather than silently substituting a default: per the
+// bad-input contract at the top of this file, `tailCommand`/`journalCommand`
+// name one specific target by explicit request, so a bad count should
+// surface as an error, not a silently-different result. A non-`number`
+// value (e.g. the string `'200; rm -rf /'`) is rejected outright by the
+// `typeof` check, with no numeric coercion attempted on it at all.
+const MAX_TAIL_LINES = 5000;
+
+function validateLineCount(lines: number): number {
+  if (typeof lines !== 'number' || !Number.isInteger(lines) || lines <= 0 || lines > MAX_TAIL_LINES) {
+    throw new Error(`Invalid line count: ${lines}`);
+  }
+  return lines;
+}
+
+// Single, specific file named by explicit request (not a batch), so this
+// throws rather than skipping, per the bad-input contract. `--` stops GNU
+// tail from treating a leading-`-` "path" as a flag, same reasoning as
+// `readFileCommand`'s `sed -- `.
+export function tailCommand(path: string, lines: number): string {
+  if (hasControlChars(path)) {
+    throw new Error('Refusing to build a tail command for a path containing a newline or NUL byte');
+  }
+  const n = validateLineCount(lines);
+  return `sudo -n tail -n ${n} -- ${shellSingle(path)}`;
+}
+
+// A pure follow, not "show some history then follow": `-n 0` suppresses the
+// last-N-lines dump `tail -F` would otherwise print before switching to
+// follow mode, so a client (re)connecting to an already-flowing log (Task
+// 5's WebSocket layer) does not get a replay of old content interleaved
+// with genuinely new lines.
+//
+// No `sh -c` wrapper and no backgrounding (`&`) here, unlike the
+// multi-step framed commands above -- this is a single, direct,
+// long-running foreground process. That matters for the consumer's ability
+// to kill it cleanly: a SIGTERM sent to this process (e.g. Task 5 closing
+// the exec channel on client disconnect) reaches `tail` directly through
+// `sudo`, with no extra shell layer in between that could be left running
+// or need its own signal forwarded.
+export function followCommand(path: string): string {
+  if (hasControlChars(path)) {
+    throw new Error('Refusing to build a follow command for a path containing a newline or NUL byte');
+  }
+  return `sudo -n tail -n 0 -F -- ${shellSingle(path)}`;
+}
+
+// The unit is validated with the existing `isSafeUnitName` (see the top of
+// this file) -- deliberately not a second, parallel validator. Single,
+// specific unit named by explicit request, so this throws rather than
+// skipping.
+//
+// Flags before `--`, unit after -- the same convention `serviceStatusCommand`
+// uses above -- even though `-u`/`--unit` is an option that normally
+// consumes the very next argv element as its value regardless of content.
+export function journalCommand(unit: string, lines: number): string {
+  if (!isSafeUnitName(unit)) {
+    throw new Error(`Unsafe unit name: ${unit}`);
+  }
+  const n = validateLineCount(lines);
+  return `sudo -n journalctl -n ${n} --no-pager -u -- ${shellSingle(unit)}`;
+}
+
+// journalctl's own pure-follow shape: `-n 0` for the same "no replay on
+// connect" reason as `followCommand`'s `tail -n 0 -F`, `-f` to follow, and
+// -- like `followCommand` -- a single direct foreground process with no
+// `sh -c` wrapper, so a consumer's SIGTERM reaches `journalctl` cleanly.
+export function journalFollowCommand(unit: string): string {
+  if (!isSafeUnitName(unit)) {
+    throw new Error(`Unsafe unit name: ${unit}`);
+  }
+  return `sudo -n journalctl -n 0 -f --no-pager -u -- ${shellSingle(unit)}`;
+}

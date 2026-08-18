@@ -393,3 +393,59 @@ export const NGINX_SECOND_TEXT = [
   '}',
   '',
 ].join('\n'); // ends with a newline, as most files do
+
+/* -------------------------------------------------------------- logDiscoveryCommand */
+// Raw `@@files` / `@@units`-sectioned text matching exactly what
+// `logDiscoveryCommand` (src/modules/serverManager/ops/command.ts) frames:
+// one `<size>\t<path>` line per candidate log file under /var/log, then one
+// journald unit name per line (`journalctl -F _SYSTEMD_UNIT`).
+
+export const LOG_DISCOVERY_TEXT = [
+  '@@files',
+  // Ordinary file with a readable size -- the baseline case.
+  '8832\t/var/log/syslog',
+  // A genuinely empty file: `bytes` must be 0, a real, known size --
+  // distinct from the "not computable" case right below it.
+  '0\t/var/log/wtmp',
+  // `stat` produced no output at all (permission denied even under sudo,
+  // or the file was rotated out from under the scan between `find` and
+  // `stat`). Must parse to `bytes: null`, never `bytes: 0` -- an
+  // unreadable file must never be mistaken for a genuinely empty one.
+  '\t/var/log/private/protected.log',
+  // A path containing spaces -- proves parsing splits on the first TAB,
+  // not on whitespace generally.
+  '4096\t/var/log/app 2/access log',
+  '',
+  '@@units',
+  'nginx.service',
+  'sshd.service',
+  'cron.service',
+  '',
+].join('\n');
+
+// Nothing found under /var/log (a near-empty container) and no journald
+// units either -- both sections present but empty.
+export const LOG_DISCOVERY_EMPTY_TEXT = ['@@files', '', '@@units', ''].join('\n');
+
+// The `@@files` section's LAST content line is not itself newline-terminated
+// -- simulating what would happen if a future edit to the `stat` loop in
+// `logDiscoveryCommand` ever emitted a line without its own trailing `\n`
+// (every current line does, via `printf '...\n'`, but nothing enforces that
+// at the type level). `logDiscoveryCommand` defends against exactly this by
+// unconditionally appending one more `printf '\n'` after each section
+// regardless of whether the last line already had one. This fixture pins
+// that the defence actually works: `@@units` still parses as its own
+// section even though the byte immediately before it did not come from a
+// `\n`-terminated line.
+export const LOG_DISCOVERY_GUARDED_NO_FINAL_NEWLINE_TEXT =
+  '@@files\n4096\t/var/log/nginx/access.log\n@@units\nnginx.service\n';
+
+// The same content with the guard newline removed -- the bug
+// `logDiscoveryCommand`'s defensive `printf '\n'` exists to prevent. `@@units`
+// is glued onto the previous line's end and is no longer recognised as a
+// section marker at all by `splitAt` (which requires `@@` at index 0 of a
+// line), so the unit name is silently lost from `units` and leaks into the
+// previous file's `path` instead -- the same class of misattribution the
+// `configFilesCommand` trailing-newline bug produced.
+export const LOG_DISCOVERY_UNGUARDED_NO_FINAL_NEWLINE_TEXT =
+  '@@files\n4096\t/var/log/nginx/access.log@@units\nnginx.service\n';
