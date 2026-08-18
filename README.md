@@ -138,32 +138,75 @@ the server.
 
 ### Sudo requirement for Services and Web server
 
-Every command that changes state or reads a protected file — `systemctl start/stop/restart/
-reload/reload-or-restart`, reading web server config files, `nginx -t`/`apachectl configtest`,
-and reading certificate files with `openssl` — runs as `sudo -n` (non-interactive: it never
-prompts for a password). If sudo isn't set up to allow that without a prompt, the action fails
-and the tab shows a hint naming the account and host and suggesting a sudoers line, instead of
-silently doing nothing.
+Every command that changes state or reads a protected file is wrapped in `sudo -n`
+(non-interactive: it never prompts for a password). If sudo isn't set up to allow that without a
+prompt, the action fails and the tab shows a hint naming the account and host, instead of silently
+doing nothing. Listing services, `systemctl status` and detecting nginx/Apache carry no `sudo` and
+need no privilege at all — those parts of both tabs load regardless.
+
+What sudo actually executes matters, because a sudoers rule matches the argv it sees, not the
+intent behind it:
+
+| What you clicked | What sudo runs |
+| --- | --- |
+| A Services / Web server action button | `sudo -n systemctl <action> -- '<unit>.service'` |
+| Loading the vhost table | `sudo -n sh -c '…cat each config file…'` |
+| **Test config** | `sudo -n sh -c 'nginx -t 2>&1'` (or the `apachectl`/`httpd` chain) |
+| Certificate expiry on the vhost table | `sudo -n sh -c '…openssl x509…'` |
+| The **View** button on a vhost row | `sudo -n sed -n '1,400p' -- '<path>'` |
+
+So `nginx`, `apache2ctl`, `httpd` and `openssl` are **never** the program sudo runs — they run
+*inside* a `sudo -n sh -c` script, and sudoers only ever sees `/bin/sh`. A `NOPASSWD` rule naming
+those binaries gets you nothing; it is the single most common way to end up with a working
+Services tab and a Web server tab that fails on every panel.
 
 You need either:
-- **Passwordless sudo** for the connection's own user on the target host, broad enough to cover
-  `systemctl`, `nginx`/`apache2ctl`/`httpd`, and `openssl` (see the caveat below on why a narrow,
-  per-command allowlist rule will not actually match); or
-- **Root credentials on the profile** (see next section), so privileged commands run as root
-  directly instead of through the connection's own user's sudo.
+
+- **Root credentials on the profile** (next section) — recommended; or
+- **Passwordless sudo** for the connection's own user, covering `/bin/systemctl` (Services) plus
+  `/bin/sh` and `/bin/sed` (Web server):
+
+  ```
+  deploy ALL=(ALL) NOPASSWD: /bin/systemctl
+  deploy ALL=(ALL) NOPASSWD: /bin/sh, /bin/sed
+  ```
+
+> **`NOPASSWD: /bin/sh` is equivalent to giving that account unrestricted root.** A shell will run
+> anything, so the rule places no limit whatsoever on what the account can do — it is a full root
+> grant written in five words. `/bin/sed` is very nearly as bad (`sed` can write files as root via
+> `w`). If that isn't a trade you want to make, grant only `/bin/systemctl` — the Services tab then
+> works and the Web server tab reports sudo failures — or use the root-credential lane below, which
+> at least keeps the privilege attached to a credential you control and can rotate, rather than
+> permanently widening what the deploy account can do on the host.
 
 #### Root-credential lane (optional)
 
 If a connection profile in `sftp.json` carries both `root_user` and `root_password`, every
-privileged command (the `systemctl`/`nginx`/`openssl` calls above) runs over a **second SSH
-connection** authenticated with those credentials, instead of `sudo -n` under the profile's own
-user. Only privileged commands use this second connection — opening the dashboard or browsing the
-Overview tab does not open it; the first Services or Web server action does. If a profile connects
-through a hop/bastion (`hop`), `root_user`/`root_password` describe the **innermost hop** — the
-real destination server — never the jump host; the jump host's own credentials are never touched.
+privileged command runs over a **second SSH connection** authenticated with those credentials
+instead of under the profile's own user. Only privileged commands use this second connection —
+opening the dashboard, browsing the Overview tab, listing services, `systemctl status` and
+detecting nginx/Apache all use the connection you already have; the first Services or Web server
+*action* (or the vhost listing) is what opens it.
+
+**The commands still carry `sudo -n` on this lane.** The root lane changes *who* runs them, not
+*how*: `sudo -n systemctl …` is what gets executed either way, and `root` simply sudos to itself.
+On a host with no `sudo` installed, or with a `requiretty`/`secure_path` restriction in
+`/etc/sudoers` that blocks a non-interactive session, the root lane fails on every action too —
+and the hint says so rather than suggesting a sudoers rule for root.
+
+Note also that most Linux distributions ship `PermitRootLogin prohibit-password` in
+`/etc/ssh/sshd_config`, which refuses password authentication for root. Setting `root_user`/
+`root_password` alone is not enough on such a host; root password login has to be enabled on the
+server as well, or the actions will fail with `All configured authentication methods failed`.
+
+If a profile connects through a hop/bastion (`hop`), `root_user`/`root_password` describe the
+**innermost hop** — the real destination server — never the jump host; the jump host's own
+credentials are never touched.
 
 If a profile has only one of `root_user`/`root_password` (a half-finished edit), it is treated as
 having neither, and commands fall back to `sudo -n` under the profile's own user.
+
+The **Servers & settings** page shows which account privileged commands will actually run as.
 
 ```json
 {
@@ -178,8 +221,8 @@ having neither, and commands fall back to `sudo -n` under the profile's own user
 
 #### Why a narrow sudoers allowlist rule will not work
 
-Every command this feature runs is built with a `--` end-of-options guard before the target name,
-and a fully-qualified unit name — for example:
+Beyond the `/bin/sh` point above, every command is built with a `--` end-of-options guard before
+the target name, and unit names are fully qualified — both tabs send the same shape:
 
 ```
 sudo -n systemctl restart -- 'nginx.service'
@@ -190,9 +233,9 @@ A sudoers `NOPASSWD` rule written the way people usually write one, e.g.
 sudoers matches the exact argv, and neither the `--` nor the `.service` suffix appears in a rule
 written that way. This is deliberate, not an oversight — the `--` guard is a defence against a
 unit/path name being reinterpreted as a flag, and it is not going to be removed for allowlist
-compatibility. If you want a narrow rule rather than granting the root-credential lane above, write
-it to match what's actually run (including the `--` and the `.service` suffix), or use a wildcard
-covering the commands this feature issues (`systemctl`, `nginx`, `apache2ctl`/`httpd`, `openssl`).
+compatibility. If you want a narrow rule, write it to match what is actually run (including the
+`--` and the `.service` suffix); otherwise grant the binary without arguments, as in the examples
+above.
 
 ### Install the .vsix (both platforms)
 - **UI:** Extensions panel → `…` menu → **Install from VSIX…** → pick `vaibhav-sftp-plus-<version>.vsix` → reload.

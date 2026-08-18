@@ -62,9 +62,29 @@ export function sudoHint(stderr: string, user: string, host: string): string | n
       `requiretty/secure_path restriction that blocks a non-interactive session.`
     );
   }
+  // Name what sudo ACTUALLY execs, not what the command is conceptually
+  // about. Of the privileged builders in ops/command.ts only
+  // serviceActionCommand execs a web-server-agnostic binary directly
+  // (`sudo -n systemctl ...`); configFilesCommand, testConfigCommand and
+  // certInfoCommand all exec `sudo -n sh -c <script>`, and readFileCommand
+  // execs `sudo -n sed`. nginx, apache2ctl, httpd and openssl only ever run
+  // INSIDE that sh script, so sudoers matches /bin/sh -- never them. The
+  // previous version of this hint told users to grant
+  // `NOPASSWD: /bin/systemctl, /usr/sbin/nginx, /usr/sbin/apache2ctl`, which
+  // got Services working and left every part of the Web server tab failing
+  // with the same hint naming the binaries they had just granted: there was
+  // no path from the advice to a working tab.
+  //
+  // And the honest advice for the Web server tab is not "grant /bin/sh":
+  // NOPASSWD on a shell is unrestricted root by any other name, so the root
+  // credential lane is the better trade and is named first.
   return (
     `${user}@${host} cannot run this command with sudo without a password. ` +
-    `Add a sudoers rule on ${host}, for example: ` +
-    `${user} ALL=(ALL) NOPASSWD: /bin/systemctl, /usr/sbin/nginx, /usr/sbin/apache2ctl`
+    `For the Services tab, add a sudoers rule on ${host}: ` +
+    `${user} ALL=(ALL) NOPASSWD: /bin/systemctl. ` +
+    `The Web server tab runs sudo on /bin/sh and /bin/sed instead (nginx, apache2ctl, httpd and ` +
+    `openssl all run INSIDE a "sudo -n sh -c" script, so a rule naming those binaries never ` +
+    `matches), and NOPASSWD on /bin/sh grants unrestricted root -- so for that tab, setting ` +
+    `root_user and root_password on the connection profile is the safer option.`
   );
 }

@@ -70,6 +70,28 @@ describe('sudoHint', () => {
     expect(hint).toContain('NOPASSWD');
   });
 
+  // The hint has to name the binaries sudo actually execs. Only
+  // serviceActionCommand execs a named tool (`sudo -n systemctl`); every
+  // other privileged builder execs `sudo -n sh -c <script>` or `sudo -n sed`,
+  // with nginx/apache2ctl/httpd/openssl running INSIDE that script where
+  // sudoers can never see them. Advice naming those binaries got Services
+  // working and left the whole Web server tab failing with the same hint.
+  it('names /bin/systemctl, /bin/sh and /bin/sed -- not nginx/apache2ctl/openssl', () => {
+    const hint = sudoHint('sudo: a password is required', 'deploy', 'web1') as string;
+    expect(hint).toContain('/bin/systemctl');
+    expect(hint).toContain('/bin/sh');
+    expect(hint).toContain('/bin/sed');
+    expect(hint).not.toContain('/usr/sbin/nginx');
+    expect(hint).not.toContain('/usr/sbin/apache2ctl');
+  });
+
+  it('says plainly that NOPASSWD on /bin/sh is unrestricted root, and points at the root lane', () => {
+    const hint = sudoHint('sudo: a password is required', 'deploy', 'web1') as string;
+    expect(hint).toContain('unrestricted root');
+    expect(hint).toContain('root_user');
+    expect(hint).toContain('root_password');
+  });
+
   it('explains a missing tty', () => {
     const hint = sudoHint(
       'sudo: no tty present and no askpass program specified',

@@ -10,6 +10,19 @@ import { Badge, Card, Empty } from './ui.jsx';
 // Services row's, just scoped to a single unit instead of a whole table.
 const ACTIONS = ['reload', 'restart', 'stop', 'start'];
 
+// The systemd unit name for a detected server. parseDetect (ops/webserver.ts)
+// reports the bare binary name -- `nginx`, `apache2`, `httpd` -- because that
+// is what `command -v` found, whereas the Services tab posts what `systemctl
+// list-units` printed, which is always fully qualified (`nginx.service`).
+// systemd accepts both, but the two tabs were producing two DIFFERENT argv
+// shapes for the same action, so a narrow sudoers rule could only ever match
+// one of them -- and the documented example is the qualified one. Qualifying
+// here gives both tabs a single shape. An already-qualified name (anything
+// carrying a suffix) is left exactly as it is.
+function serviceUnit(server) {
+  return server.unit.indexOf('.') === -1 ? `${server.unit}.service` : server.unit;
+}
+
 // Mirrors Services.jsx's stateTone: any 'active' state reads as 'ok'
 // regardless of `sub` (parseDetect never reports a `sub`, only `active`, so
 // this is simpler than Services' version), 'failed' stays its own 'bad'
@@ -419,6 +432,10 @@ function ServerCard({
   vhostState,
   onView,
 }) {
+  // Everything action-related -- the confirm dialog, the POST, the busy set,
+  // the result banner -- names the same fully-qualified unit, so what the
+  // dialog shows is what actually runs.
+  const unit = serviceUnit(server);
   return (
     <Card
       title={`${kindLabel(server.kind)} — ${server.unit}`}
@@ -438,7 +455,7 @@ function ServerCard({
             key={action}
             className={`btn sm ${action === 'stop' ? 'danger' : ''}`}
             disabled={busy}
-            onClick={() => onConfirm({ unit: server.unit, action })}
+            onClick={() => onConfirm({ unit, action })}
           >
             {action}
           </button>
@@ -451,9 +468,9 @@ function ServerCard({
 
       {actionResult && (
         <ResultBanner
-          label={`systemctl ${actionResult.action} ${server.unit}`}
+          label={`systemctl ${actionResult.action} ${unit}`}
           result={actionResult}
-          onDismiss={() => onDismissAction(server.unit)}
+          onDismiss={() => onDismissAction(unit)}
         />
       )}
       {testResult && (
@@ -705,8 +722,8 @@ export default function WebServer() {
             <ServerCard
               key={server.unit}
               server={server}
-              busy={busyUnits.has(server.unit)}
-              actionResult={actionResults[server.unit]}
+              busy={busyUnits.has(serviceUnit(server))}
+              actionResult={actionResults[serviceUnit(server)]}
               onConfirm={setConfirm}
               onDismissAction={dismissAction}
               testing={testBusy.has(server.kind)}
