@@ -35,12 +35,19 @@ const TYPES = {
   '.json': 'application/json; charset=utf-8',
 };
 
+// Every identity below is deliberately fake. This fixture once carried a real
+// server's name, IP and hostname, copied from a live profile -- which made a
+// screenshot of the mock indistinguishable from a screenshot of production,
+// right down to a "restart nginx" confirm dialog naming a real host. The
+// addresses here are reserved: 192.0.2.0/24 is TEST-NET-1 (RFC 5737) and
+// .invalid is reserved (RFC 6761), so neither can ever resolve to a real
+// machine. Keep it that way -- never reseed this from a real profile.
 const PROFILE = {
   id: 'devprofile000001',
-  name: 'kewlab-cloudways-en248',
-  host: '168.144.38.186',
+  name: 'mock-fixture-host',
+  host: '192.0.2.1',
   port: 22,
-  username: 'master_swkqjgcbuc',
+  username: 'mockuser',
   protocol: 'sftp',
   remotePath: '/home/master/applications',
   workspace: '/dev/workspace',
@@ -49,7 +56,7 @@ const PROFILE = {
 };
 
 const FACTS = {
-  hostname: '1624335.cloudwaysapps.com',
+  hostname: 'mock-fixture-host.invalid',
   prettyName: 'Debian GNU/Linux 12 (bookworm)',
   distroId: 'debian',
   cpuModel: 'Intel(R) Xeon(R) Platinum 8358 CPU @ 2.60GHz',
@@ -104,7 +111,7 @@ function snapshot() {
         txBps: first ? null : Math.max(0, wave(2, 90_000, 120_000)),
         rxTotal: 79_500_000,
         txTotal: 72_800_000,
-        address: '168.144.38.186',
+        address: '192.0.2.1',
       },
       { name: 'lo', rxBps: first ? null : 100, txBps: first ? null : 100, rxTotal: 1, txTotal: 1 },
     ],
@@ -136,7 +143,7 @@ const SLOW = {
     { device: '/dev/vdb', deviceName: 'vdb', fstype: 'ext4', mount: '/var/log', totalBytes: 340_000_000, usedBytes: 307_600_000 },
   ],
   psRows: [],
-  addrs: [{ name: 'eth0', address: '168.144.38.186' }],
+  addrs: [{ name: 'eth0', address: '192.0.2.1' }],
 };
 
 function state(status) {
@@ -259,10 +266,10 @@ function serviceStatusText(unit) {
       '    Process: 1188 ExecStartPre=/usr/sbin/sshd -t (code=exited, status=1/FAILURE)',
       '   Main PID: 1188 (code=exited, status=1/FAILURE)',
       '',
-      'Aug 17 04:12:09 1624335.cloudwaysapps.com sshd[1188]: /etc/ssh/sshd_config line 42: Bad configuration option: PermitRootLogins',
-      'Aug 17 04:12:09 1624335.cloudwaysapps.com systemd[1]: sshd.service: Control process exited, code=exited, status=1/FAILURE',
-      'Aug 17 04:12:09 1624335.cloudwaysapps.com systemd[1]: sshd.service: Failed with result \'exit-code\'.',
-      'Aug 17 04:12:09 1624335.cloudwaysapps.com systemd[1]: Failed to start OpenSSH server daemon.',
+      'Aug 17 04:12:09 mock-fixture-host sshd[1188]: /etc/ssh/sshd_config line 42: Bad configuration option: PermitRootLogins',
+      'Aug 17 04:12:09 mock-fixture-host systemd[1]: sshd.service: Control process exited, code=exited, status=1/FAILURE',
+      'Aug 17 04:12:09 mock-fixture-host systemd[1]: sshd.service: Failed with result \'exit-code\'.',
+      'Aug 17 04:12:09 mock-fixture-host systemd[1]: Failed to start OpenSSH server daemon.',
     ].join('\n');
   }
 
@@ -272,7 +279,7 @@ function serviceStatusText(unit) {
       loadedLine,
       '     Active: inactive (dead) since Sat 2026-08-16 22:03:41 UTC; 6h ago',
       '',
-      'Aug 16 22:03:41 1624335.cloudwaysapps.com systemd[1]: Stopped Advanced key-value store.',
+      'Aug 16 22:03:41 mock-fixture-host systemd[1]: Stopped Advanced key-value store.',
     ].join('\n');
   }
 
@@ -291,7 +298,7 @@ function serviceStatusText(unit) {
     `     CGroup: /system.slice/${unit}`,
     `             └─845 ${row.name.split('@')[0]}`,
     '',
-    `Aug 17 09:00:01 1624335.cloudwaysapps.com systemd[1]: Started ${row.description}.`,
+    `Aug 17 09:00:01 mock-fixture-host systemd[1]: Started ${row.description}.`,
   ].join('\n');
 }
 
