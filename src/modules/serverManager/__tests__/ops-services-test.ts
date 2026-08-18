@@ -1,4 +1,4 @@
-import { parseUnits, parseUnitFiles, mergeServices, sortServices, filterServices, ServiceRow } from '../ops/services';
+import { parseUnits, parseUnitFiles, mergeServices, sortServices, ServiceRow } from '../ops/services';
 import {
   UNITS_TEXT, UNIT_FILES_TEXT, EMPTY_UNITS_TEXT, EMPTY_UNIT_FILES_TEXT,
 } from '../__fixtures__/ops';
@@ -146,30 +146,3 @@ describe('sortServices', () => {
   });
 });
 
-describe('filterServices', () => {
-  const units = parseUnits(UNITS_TEXT);
-  const files = parseUnitFiles(UNIT_FILES_TEXT);
-  const merged = mergeServices(units, files);
-
-  it('matches against the unit name, case-insensitively', () => {
-    const found = filterServices(merged, 'NGINX');
-    expect(found.map(r => r.unit)).toEqual(['nginx.service']);
-  });
-
-  it('matches against the description, case-insensitively', () => {
-    const found = filterServices(merged, 'REGULAR');
-    expect(found.map(r => r.unit)).toEqual(['cron.service']);
-  });
-
-  it('returns everything for an empty needle', () => {
-    expect(filterServices(merged, '')).toEqual(merged);
-  });
-
-  it('returns everything for a whitespace-only needle', () => {
-    expect(filterServices(merged, '   ')).toEqual(merged);
-  });
-
-  it('returns nothing when the needle matches no unit or description', () => {
-    expect(filterServices(merged, 'zzz-does-not-exist')).toEqual([]);
-  });
-});

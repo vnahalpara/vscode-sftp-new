@@ -48,8 +48,24 @@ export default function Settings({ profile, session }) {
             <Row label="Protocol" value={profile.protocol} />
             <Row label="Remote path" value={profile.remotePath} />
             <Row label="Workspace" value={profile.workspace} />
+            {/* The account Services/Web server commands actually run as: the
+                profile's root_user when it carries root credentials, the
+                connection's own user otherwise. Worth surfacing because it
+                is the account a sudoers rule has to name — the sudo hint
+                shown on a failed action names the same one. */}
+            <Row
+              label="Privileged commands run as"
+              value={`${profile.privilegedAs || profile.username}@${profile.host}`}
+            />
             <Row label="VPN configured" value={profile.hasVpn ? 'Yes' : 'No'} />
             <Row label="Database configured" value={profile.hasDatabase ? 'Yes' : 'No'} />
+            <div className="muted" style={{ fontSize: 11.5, marginTop: 10 }}>
+              Services and Web server commands are wrapped in{' '}
+              <span className="mono">sudo -n</span> and run as that account
+              {profile.privilegedAs && profile.privilegedAs !== profile.username
+                ? ' over a second SSH connection using the profile’s root credentials.'
+                : '. If one fails with a sudo error, that is the account that needs the sudoers rule.'}
+            </div>
           </div>
         ) : (
           <div className="muted">No profile loaded yet.</div>

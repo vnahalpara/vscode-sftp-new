@@ -56,8 +56,11 @@ export function redactProfile(workspace: string, config: any): RedactedProfile {
     // Which account privileged commands (systemctl, nginx -t, openssl) will
     // actually run as. Never the password itself -- this object is the
     // RedactedProfile, serialised straight to the browser -- just the name of
-    // the lane so the UI (and the sudo hint) can tell the user who to grant
-    // sudo to. The fallback (no root credentials) is target.username, NOT
+    // the lane so the UI and the sudo hint can tell the user who to grant
+    // sudo to. Both consume it: the hint in activity.ts names this account,
+    // and the Servers & settings page renders it as "Privileged commands run
+    // as" (webui/src/pages/Settings.jsx), which is where a user goes to find
+    // out who the sudoers rule has to be written for. The fallback (no root credentials) is target.username, NOT
     // config.username: on a hop profile without root credentials the
     // privileged lane still authenticates as the HOP's own username (see
     // privilegedConfig -- it returns a value-identical copy of target()

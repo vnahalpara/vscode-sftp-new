@@ -110,14 +110,3 @@ export function sortServices(rows: ServiceRow[]): ServiceRow[] {
     return a.unit < b.unit ? -1 : a.unit > b.unit ? 1 : 0;
   });
 }
-
-/** Case-insensitive substring match against the unit name or description; empty needle matches all. */
-export function filterServices(rows: ServiceRow[], needle: string): ServiceRow[] {
-  const trimmed = (needle || '').trim().toLowerCase();
-  if (!trimmed) {
-    return rows.slice();
-  }
-  return rows.filter(row =>
-    row.unit.toLowerCase().indexOf(trimmed) !== -1 || row.description.toLowerCase().indexOf(trimmed) !== -1
-  );
-}
