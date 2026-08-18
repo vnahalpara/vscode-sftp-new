@@ -2,6 +2,21 @@ import { Route } from './router';
 import { Ctx, Handler } from './httpServer';
 import { ManagedSession } from './session';
 import { SseSink } from './sse';
+import { sudoHint } from './activity';
+import { OpsDeps, runPrivileged } from './ops/exec';
+import {
+  servicesCommand,
+  serviceActionCommand,
+  serviceStatusCommand,
+  detectWebServerCommand,
+  configFilesCommand,
+  testConfigCommand,
+  certInfoCommand,
+  readFileCommand,
+  splitAt,
+} from './ops/command';
+import { parseUnits, parseUnitFiles, mergeServices, sortServices } from './ops/services';
+import { parseDetect, parseNginxVhosts, parseApacheVhosts, parseCertInfo, CertInfo } from './ops/webserver';
 
 export interface SessionLookup {
   get(token: string): ManagedSession | undefined;
@@ -12,13 +27,21 @@ export interface RouteDeps {
   pingMs: number;
   schedule(fn: () => void, ms: number): any;
   cancel(handle: any): void;
+  // Builds the privileged-exec dependencies for one session (its SSH exec
+  // channel, its activity log, and the user/host pair sudoHint() needs).
+  // Optional so that a caller which has not wired up a transport lookup yet
+  // still produces a server that type-checks and serves every other route;
+  // any route that actually needs to run a remote command answers 503
+  // rather than crashing when it is absent. See the comment on opsFor()
+  // below for why this could not be sourced from ManagedSession itself.
+  ops?(session: ManagedSession): OpsDeps;
 }
 
 // Everything the later milestones will turn on. The UI reads these to decide
 // which tabs are live, so an unfinished tab is greyed out rather than broken.
 const CAPABILITIES = {
-  services: false,
-  webserver: false,
+  services: true,
+  webserver: true,
   logs: false,
   terminal: false,
   database: false,
@@ -35,7 +58,94 @@ function resolve(deps: RouteDeps, ctx: Ctx): ManagedSession | null {
   return session;
 }
 
+// ManagedSession (session.ts) deliberately does not expose the SSH transport
+// it drives its Collector with — only id/token/profile/sse/activity are
+// public. Reaching a real remote exec channel for the routes below therefore
+// requires deps.ops(session), supplied by whoever constructs RouteDeps
+// (production wires it to the same transport the session's Collector uses;
+// tests inject a fake). If that wiring is missing, every route that needs to
+// run a command answers 503 instead of throwing past a null.
+function opsFor(deps: RouteDeps, ctx: Ctx, session: ManagedSession): OpsDeps | null {
+  if (!deps.ops) {
+    ctx.text(503, 'Privileged operations are not configured for this server.');
+    return null;
+  }
+  return deps.ops(session);
+}
+
+// A builder in ops/command.ts throws on a bad :action, a bad :unit, or an
+// unknown :kind — that is the caller (client) asking for something invalid,
+// not a server fault. Letting it fall through to httpServer's generic 500
+// handler would misreport a client mistake as a server fault and would bury
+// real 500s (transport/exec failures) in the same noise. Every builder call
+// below that can throw on caller-supplied input is therefore wrapped and
+// mapped to 400 here rather than left to propagate.
+function badRequest(ctx: Ctx, error: unknown): void {
+  ctx.text(400, (error as Error).message);
+}
+
+type Kind = 'nginx' | 'apache';
+
+function isKind(value: string): value is Kind {
+  return value === 'nginx' || value === 'apache';
+}
+
+// Runs testConfigCommand and reports pass/fail without ever throwing.
+//
+// This deliberately does NOT use runPrivileged. testConfigCommand's script
+// redirects the tested binary's own stderr into stdout (`nginx -t 2>&1`), so
+// a genuine "the config is broken" failure — the most useful message on this
+// page — lands in stdout, not stderr. runPrivileged's error selection only
+// ever looks at stderr (sudoHint(stderr) || stderr.trim() || generic exit
+// code message), which is right for systemctl-style failures but would
+// silently discard the real nginx/apache diagnostic here and replace it with
+// "command exited with code 1". This mirrors runPrivileged's activity
+// logging (same fields, pushed unconditionally) but keeps stdout available
+// on the failure path.
+async function runConfigTest(
+  ops: OpsDeps,
+  kind: Kind,
+  command: string
+): Promise<{ ok: boolean; output: string }> {
+  const start = ops.now();
+  const result = await ops.exec(command);
+  const ms = ops.now() - start;
+  const ok = result.code === 0;
+  const hint = !ok ? sudoHint(result.stderr, ops.user, ops.host) : null;
+  const output = hint || result.stdout || result.stderr || `command exited with code ${result.code}`;
+
+  ops.activity.push({
+    at: ops.now(),
+    label: `test ${kind} config`,
+    command,
+    code: result.code,
+    ms,
+    error: ok ? null : output,
+  });
+
+  return { ok, output };
+}
+
 export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
+  // Paths a vhost listing has actually returned to this session, keyed by
+  // token. GET /api/file is the vhost "View" button's config-file reader,
+  // not a general file browser — the token authenticates the page, it does
+  // not authorise arbitrary filesystem reads, and this endpoint runs sudo.
+  // Restricting reads to exactly what a vhost listing surfaced for that
+  // session (populated in the /api/webserver/:kind/vhosts handler below) is
+  // what keeps an authenticated browser tab from being able to ask for any
+  // root-readable file on the host.
+  const allowedFiles = new Map<string, Set<string>>();
+
+  function allowFiles(token: string, paths: string[]): void {
+    let set = allowedFiles.get(token);
+    if (!set) {
+      set = new Set<string>();
+      allowedFiles.set(token, set);
+    }
+    paths.forEach(p => set!.add(p));
+  }
+
   return [
     {
       method: 'GET',
@@ -114,6 +224,202 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
           deps.cancel(heartbeat);
           unsubscribe();
         });
+      },
+    },
+    {
+      method: 'GET',
+      path: '/api/services',
+      handler: async ctx => {
+        const session = resolve(deps, ctx);
+        if (!session) {
+          return;
+        }
+        const ops = opsFor(deps, ctx, session);
+        if (!ops) {
+          return;
+        }
+        const result = await ops.exec(servicesCommand());
+        const sections = splitAt(result.stdout);
+        const units = parseUnits(sections.units || '');
+        const files = parseUnitFiles(sections.files || '');
+        ctx.json(200, { services: sortServices(mergeServices(units, files)) });
+      },
+    },
+    {
+      method: 'POST',
+      path: '/api/services/:unit/:action',
+      handler: async ctx => {
+        const session = resolve(deps, ctx);
+        if (!session) {
+          return;
+        }
+        const ops = opsFor(deps, ctx, session);
+        if (!ops) {
+          return;
+        }
+        const { unit, action } = ctx.params;
+        let command: string;
+        try {
+          command = serviceActionCommand(unit, action);
+        } catch (error) {
+          badRequest(ctx, error);
+          return;
+        }
+        try {
+          const result = await runPrivileged(ops, `${action} ${unit}`, command);
+          ctx.json(200, { ok: true, output: result.stdout || result.stderr });
+        } catch (error) {
+          // A failed action (e.g. a sudo hint, or systemctl rejecting it) is a
+          // legitimate result the UI shows inline next to the row, not a
+          // server fault — 500 would send it to a toast/error boundary
+          // instead of the per-row result the Services tab needs.
+          ctx.json(200, { ok: false, output: (error as Error).message });
+        }
+      },
+    },
+    {
+      method: 'GET',
+      path: '/api/services/:unit/status',
+      handler: async ctx => {
+        const session = resolve(deps, ctx);
+        if (!session) {
+          return;
+        }
+        const ops = opsFor(deps, ctx, session);
+        if (!ops) {
+          return;
+        }
+        const { unit } = ctx.params;
+        let command: string;
+        try {
+          command = serviceStatusCommand(unit);
+        } catch (error) {
+          badRequest(ctx, error);
+          return;
+        }
+        const result = await ops.exec(command);
+        ctx.json(200, { output: result.stdout || result.stderr });
+      },
+    },
+    {
+      method: 'GET',
+      path: '/api/webserver',
+      handler: async ctx => {
+        const session = resolve(deps, ctx);
+        if (!session) {
+          return;
+        }
+        const ops = opsFor(deps, ctx, session);
+        if (!ops) {
+          return;
+        }
+        const result = await ops.exec(detectWebServerCommand());
+        ctx.json(200, parseDetect(result.stdout));
+      },
+    },
+    {
+      method: 'GET',
+      path: '/api/webserver/:kind/vhosts',
+      handler: async ctx => {
+        const session = resolve(deps, ctx);
+        if (!session) {
+          return;
+        }
+        const ops = opsFor(deps, ctx, session);
+        if (!ops) {
+          return;
+        }
+        const kind = ctx.params.kind;
+        if (!isKind(kind)) {
+          ctx.text(400, `Unknown web server kind: ${kind}`);
+          return;
+        }
+
+        const configResult = await runPrivileged(ops, `read ${kind} vhost configs`, configFilesCommand(kind));
+        const sections = splitAt(configResult.stdout);
+        const files = Object.keys(sections).map(file => ({ file, content: sections[file] }));
+        allowFiles(session.token, Object.keys(sections));
+
+        const vhosts = kind === 'nginx' ? parseNginxVhosts(files) : parseApacheVhosts(files);
+
+        const certPaths = Array.from(
+          new Set(vhosts.map(v => v.certificate).filter((p): p is string => Boolean(p)))
+        );
+        const certCmd = certInfoCommand(certPaths);
+
+        let certificates: CertInfo[] = [];
+        let skipped = certCmd.skipped;
+        // certInfoCommand legitimately returns command: '' when every path
+        // was rejected (e.g. all contained control characters) — runPrivileged
+        // has no guard against an empty command string, so it must never be
+        // called with one; there is nothing to run.
+        if (certCmd.command) {
+          try {
+            const certResult = await runPrivileged(ops, `inspect ${kind} certificates`, certCmd.command);
+            certificates = parseCertInfo(certResult.stdout, ops.now());
+          } catch (error) {
+            // A total failure to run openssl (e.g. sudo misconfigured) must
+            // not blank the vhosts we already have — surface it as every
+            // requested path being uninspectable rather than 500ing the
+            // whole tab.
+            skipped = skipped.concat(certPaths);
+          }
+        }
+
+        ctx.json(200, { vhosts, certificates, skipped });
+      },
+    },
+    {
+      method: 'POST',
+      path: '/api/webserver/:kind/test',
+      handler: async ctx => {
+        const session = resolve(deps, ctx);
+        if (!session) {
+          return;
+        }
+        const ops = opsFor(deps, ctx, session);
+        if (!ops) {
+          return;
+        }
+        const kind = ctx.params.kind;
+        if (!isKind(kind)) {
+          ctx.text(400, `Unknown web server kind: ${kind}`);
+          return;
+        }
+        const result = await runConfigTest(ops, kind, testConfigCommand(kind));
+        ctx.json(200, result);
+      },
+    },
+    {
+      method: 'GET',
+      path: '/api/file',
+      handler: async ctx => {
+        const session = resolve(deps, ctx);
+        if (!session) {
+          return;
+        }
+        const ops = opsFor(deps, ctx, session);
+        if (!ops) {
+          return;
+        }
+        const requestedPath = typeof ctx.query.path === 'string' ? ctx.query.path : '';
+        const allowed = allowedFiles.get(session.token);
+        if (!requestedPath || !allowed || !allowed.has(requestedPath)) {
+          ctx.text(403, 'That file was not returned by a vhost listing for this session.');
+          return;
+        }
+
+        const linesParam = typeof ctx.query.lines === 'string' ? Number(ctx.query.lines) : NaN;
+        let command: string;
+        try {
+          command = readFileCommand(requestedPath, linesParam);
+        } catch (error) {
+          badRequest(ctx, error);
+          return;
+        }
+
+        const result = await runPrivileged(ops, `view ${requestedPath}`, command);
+        ctx.json(200, { content: result.stdout });
       },
     },
   ];
