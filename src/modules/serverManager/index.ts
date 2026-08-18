@@ -4,10 +4,13 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import * as vscode from 'vscode';
 import logger from '../../logger';
+import { getHostInfo } from '../../core/fileService';
+import { removeRemoteFs } from '../../core/remoteFs';
 import { Collector, MonitorTransport } from '../monitor/collector';
 import { sshTransport, readFacts } from '../monitor/transport';
 import { HostFacts } from '../monitor/types';
 import { profileId, redactProfile } from './registry';
+import { targetOption, hasRootCreds } from './privilege';
 import { ManagedSession } from './session';
 import { createServer, listen } from './httpServer';
 import { bootstrapHtml } from './bootstrap';
@@ -32,31 +35,149 @@ let generation = 0;
 // directory has to be handed to us at activation time — the same way
 // vpnTunnel receives globalStoragePath.
 let extensionRoot: string | null = null;
-const byToken = new Map<string, ManagedSession>();
-const byProfile = new Map<string, string>();
 
 export function init(extensionPath: string): void {
   extensionRoot = extensionPath;
 }
 
-// Both fields are required before switching lanes: a profile carrying only
-// root_user (a common half-finished edit) must not silently produce a
-// connection that tries root with the ordinary user's password, locking the
-// account out on hosts that count failed auths.
-export function privilegedConfig(config: any): any {
-  const next = Object.assign({}, config);
-  if (config.root_user && config.root_password) {
-    next.username = config.root_user;
-    next.password = config.root_password;
-    // Key/agent auth would take precedence over the password we just set and
-    // would authenticate as the WRONG user -- the key belongs to the session
-    // user, not to root.
-    delete next.privateKeyPath;
-    delete next.privateKey;
-    delete next.agent;
-  }
-  return next;
+// True when this profile's destination option (see targetOption) carries
+// root credentials distinct from the session's own -- i.e. privilegedConfig
+// below will actually build a second, separately-pooled connection rather
+// than a value-identical copy that shares the session's pooled entry.
+// Exported so index.ts's own session bookkeeping can decide whether tearing
+// the privileged lane down on dispose is safe (a distinct connection) or
+// would kill the user's live SFTP connection (a shared one).
+export function hasRootLane(config: any): boolean {
+  return hasRootCreds(targetOption(config));
 }
+
+// Builds the config for the privileged (systemctl/nginx/openssl) lane. The
+// credential swap lands on targetOption(config) -- the real destination --
+// not unconditionally on the top level. Getting this wrong on a hop profile
+// is a credential leak, not just a bug: rewriting the top-level username/
+// password would hand the destination server's root password to the
+// BASTION's sshd instead, a machine that should never see it, while
+// deleting the bastion's own key auth and leaving the lane unable to
+// connect to anything.
+export function privilegedConfig(config: any): any {
+  const target = targetOption(config);
+  if (!hasRootCreds(target)) {
+    return Object.assign({}, config);
+  }
+
+  const swapped = Object.assign({}, target);
+  swapped.username = target.root_user;
+  swapped.password = target.root_password;
+  // Key/agent auth would take precedence over the password we just set and
+  // would authenticate as the WRONG user -- the key belongs to the session
+  // user, not to root. passphrase and interactiveAuth are auth prompts tied
+  // to that same session-user credential and must go with it: left in place,
+  // passphrase (sshClient.ts's _connectSSHClient prompts whenever
+  // `passphrase === true`, without checking a key is present) pops a
+  // passphrase dialog for a key that no longer exists, and interactiveAuth's
+  // pre-canned array answers -- or its bare `true` prompt, unlabelled as
+  // belonging to root -- would replay the session user's own password into
+  // root's keyboard-interactive auth.
+  delete swapped.privateKeyPath;
+  delete swapped.privateKey;
+  delete swapped.agent;
+  delete swapped.passphrase;
+  delete swapped.interactiveAuth;
+
+  if (target === config) {
+    return swapped;
+  }
+  if (Array.isArray(config.hop)) {
+    // Copy the array and replace only the last (innermost) entry -- earlier
+    // hops in a multi-hop chain keep their own credentials untouched, and
+    // the original array/objects are never mutated.
+    const hop = config.hop.slice(0, -1).concat([swapped]);
+    return Object.assign({}, config, { hop });
+  }
+  return Object.assign({}, config, { hop: swapped });
+}
+
+// A cheap fingerprint of "which account will privileged commands run as".
+// ensureSession() compares this against the identity a cached session was
+// built with, so editing root_user/root_password in sftp.json (adding,
+// removing, or changing them) invalidates the cached session immediately
+// instead of silently keeping the old identity -- and the stale privileged
+// connection open -- until VS Code restarts.
+export function privilegedIdentity(config: any): string {
+  const target = targetOption(config);
+  return hasRootCreds(target) ? `root:${target.root_user}:${target.root_password}` : 'session';
+}
+
+export interface SessionRegistryEntry {
+  session: ManagedSession;
+  privilegedIdentity: string;
+  // Ends the privileged SSH lane's pooled connection, or does nothing when
+  // that lane is value-identical to (and therefore sharing a pooled
+  // connection with) the session's own transport -- see hasRootLane. Ending
+  // a shared connection here would kill the user's live SFTP connection, not
+  // just the privileged lane.
+  disposePrivileged: () => void;
+}
+
+// Owns the token/profile lookup tables ensureSession() and disposeAll() used
+// to manage inline as two raw Maps. Pulled out into its own factory so the
+// bookkeeping around tearing a privileged lane down -- on disposeAll(), and
+// on a profile's root credentials changing under an already-open session --
+// can be unit tested without a real HTTP server or the `vscode` module, both
+// of which the rest of this file depends on.
+export function createSessionRegistry() {
+  const byToken = new Map<string, SessionRegistryEntry>();
+  const byProfile = new Map<string, string>();
+
+  function disposeToken(token: string): void {
+    const entry = byToken.get(token);
+    if (!entry) {
+      return;
+    }
+    entry.session.dispose();
+    entry.disposePrivileged();
+    byToken.delete(token);
+  }
+
+  return {
+    // The live token for this profile id, but only when the session now
+    // cached for it still carries the identity privileged commands were
+    // authenticated with when it was created. A mismatch tears the stale
+    // session (and its privileged lane, if it had one of its own) down and
+    // reports no existing token, so the caller falls through to build a
+    // fresh session under the current credentials.
+    get(id: string, identity: string): string | undefined {
+      const token = byProfile.get(id);
+      if (token === undefined) {
+        return undefined;
+      }
+      const entry = byToken.get(token);
+      if (entry && entry.privilegedIdentity === identity) {
+        return token;
+      }
+      disposeToken(token);
+      byProfile.delete(id);
+      return undefined;
+    },
+    set(id: string, token: string, entry: SessionRegistryEntry): void {
+      byToken.set(token, entry);
+      byProfile.set(id, token);
+    },
+    lookupSession(token: string): ManagedSession | undefined {
+      const entry = byToken.get(token);
+      return entry ? entry.session : undefined;
+    },
+    disposeAll(): void {
+      // Snapshot the tokens first: disposeToken() mutates byToken mid-walk,
+      // which a live forEach would otherwise skip entries around.
+      Array.from(byToken.keys()).forEach(disposeToken);
+      byToken.clear();
+      byProfile.clear();
+    },
+  };
+}
+
+const registry = createSessionRegistry();
 
 function settings() {
   const cfg = vscode.workspace.getConfiguration('sftp.serverManager');
@@ -91,12 +212,12 @@ async function ensureServer(): Promise<Running> {
     const server = createServer({
       root,
       routes: buildRoutes({
-        sessions: { get: token => byToken.get(token) },
+        sessions: { get: token => registry.lookupSession(token) },
         pingMs: PING_MS,
         schedule: (fn, ms) => setInterval(fn, ms),
         cancel: handle => clearInterval(handle),
       }),
-      hasToken: token => byToken.has(token),
+      hasToken: token => registry.lookupSession(token) !== undefined,
       fallbackHtml: bootstrapHtml,
     });
     const port = await listen(server);
@@ -135,8 +256,15 @@ async function ensureServer(): Promise<Running> {
 export async function ensureSession(fileService: any, config: any): Promise<string> {
   const { port } = await ensureServer();
   const id = profileId(fileService.workspace, config);
+  const identity = privilegedIdentity(config);
 
-  const existingToken = byProfile.get(id);
+  // registry.get() itself tears down and evicts a session whose cached
+  // identity no longer matches -- e.g. root_user/root_password were added,
+  // removed, or edited in sftp.json since this session was opened. Without
+  // that check a stale session would keep running commands under the old
+  // identity (and the UI would keep reporting the old privilegedAs) until
+  // VS Code restarted.
+  const existingToken = registry.get(id, identity);
   if (existingToken) {
     return `http://127.0.0.1:${port}/?t=${existingToken}`;
   }
@@ -174,8 +302,15 @@ export async function ensureSession(fileService: any, config: any): Promise<stri
   session.activity.onEntry = entry =>
     logger.info(`${entry.label}: ${entry.command} -> ${entry.code}`, 'serverManager');
 
-  byToken.set(token, session);
-  byProfile.set(id, token);
+  // Only end the privileged lane's pooled connection when it is genuinely
+  // its own -- when there are no root credentials, privilegedConfig(config)
+  // returned a value-identical copy that hashes to (and shares) the same
+  // fsTable entry as the session's own transport, and ending that would cut
+  // the user's live SFTP connection out from under them.
+  const disposePrivileged = hasRootLane(config)
+    ? () => removeRemoteFs(getHostInfo(privilegedConfig(config)))
+    : () => undefined;
+  registry.set(id, token, { session, privilegedIdentity: identity, disposePrivileged });
   return `http://127.0.0.1:${port}/?t=${token}`;
 }
 
@@ -215,9 +350,7 @@ export async function openInBrowser(target: string): Promise<void> {
 }
 
 export function disposeAll(): void {
-  byToken.forEach(session => session.dispose());
-  byToken.clear();
-  byProfile.clear();
+  registry.disposeAll();
   // Clear the latch too, so a dispose racing a start cannot leave a stale
   // in-flight promise that later invocations would join. Bumping the
   // generation orphans any start still binding: it will close its own server

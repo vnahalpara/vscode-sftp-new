@@ -48,6 +48,20 @@ export function sudoHint(stderr: string, user: string, host: string): string | n
   if (!matched) {
     return null;
   }
+  // Every builder wraps its command in `sudo -n ...` unconditionally, even
+  // when the lane is already authenticated as root (see registry.ts's
+  // privilegedAs). "Add a sudoers rule for root" is nonsensical advice
+  // there -- root failing to sudo to itself is almost never a missing
+  // sudoers entry; it is usually sudo not being installed/on PATH, or a
+  // requiretty/secure_path restriction, since this runs over a non-tty exec
+  // channel.
+  if (user === 'root') {
+    return (
+      `${user}@${host} is already authenticated as root, so a sudoers rule will not help. ` +
+      `This usually means sudo is missing or not on PATH, or /etc/sudoers on ${host} has a ` +
+      `requiretty/secure_path restriction that blocks a non-interactive session.`
+    );
+  }
   return (
     `${user}@${host} cannot run this command with sudo without a password. ` +
     `Add a sudoers rule on ${host}, for example: ` +

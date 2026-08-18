@@ -91,4 +91,22 @@ describe('sudoHint', () => {
   it('returns null for empty stderr', () => {
     expect(sudoHint('', 'deploy', 'web1')).toBeNull();
   });
+
+  it('gives root-specific advice instead of a sudoers rule when the lane is already root', () => {
+    const hint = sudoHint('sudo: a password is required', 'root', 'web1');
+    expect(hint).toContain('root');
+    expect(hint).toContain('web1');
+    expect(hint).not.toContain('NOPASSWD');
+    expect(hint).not.toContain('Add a sudoers rule');
+  });
+
+  it('gives the same root-specific advice for a missing tty as root', () => {
+    const hint = sudoHint(
+      'sudo: no tty present and no askpass program specified',
+      'root',
+      'web1'
+    );
+    expect(hint).not.toContain('NOPASSWD');
+    expect(hint).toContain('sudo');
+  });
 });

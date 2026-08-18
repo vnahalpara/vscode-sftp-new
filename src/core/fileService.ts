@@ -144,7 +144,12 @@ function filesIgnoredFromConfig(config: FileServiceConfig): string[] {
   return ignore.concat(ignoreFromFile.split(/\r?\n/g));
 }
 
-function getHostInfo(config) {
+// Exported so callers that build a SECOND connection option for the same
+// host (serverManager's root lane -- see modules/serverManager/index.ts) can
+// compute the exact same pool key createRemoteIfNoneExist used, and tear
+// that entry down later with removeRemoteFs without duplicating (and
+// risking drifting from) this ignore-list.
+export function getHostInfo(config) {
   const ignoreOptions = [
     'name',
     'remotePath',

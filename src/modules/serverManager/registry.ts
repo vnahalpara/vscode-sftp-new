@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import { targetOption, hasRootCreds } from './privilege';
 
 export interface RedactedProfile {
   id: string;
@@ -37,6 +38,15 @@ export function profileId(workspace: string, config: any): string {
 // `username` is intentionally included: the UI header shows root@host:port, and
 // a username is not a secret the way a password is.
 export function redactProfile(workspace: string, config: any): RedactedProfile {
+  // targetOption resolves to the hop (the real destination) when one is
+  // configured, and to config itself otherwise -- the same resolution
+  // index.ts's privilegedConfig uses to build the actual SSH connection.
+  // Reading root_user/root_password off anything else (e.g. always the top
+  // level) would report the wrong account on a hop/bastion profile, where
+  // the top level is the jump host: the UI, and the sudo hint that reads
+  // this field, would name the bastion's user while the connection is
+  // actually authenticated as root on the target.
+  const target = targetOption(config);
   return {
     id: profileId(workspace, config),
     name: config.name || config.host || '',
@@ -48,7 +58,7 @@ export function redactProfile(workspace: string, config: any): RedactedProfile {
     // RedactedProfile, serialised straight to the browser -- just the name of
     // the lane so the UI (and the sudo hint) can tell the user who to grant
     // sudo to.
-    privilegedAs: config.root_user && config.root_password ? config.root_user : config.username || '',
+    privilegedAs: hasRootCreds(target) ? target.root_user : config.username || '',
     protocol: config.protocol || 'sftp',
     remotePath: config.remotePath || '/',
     workspace,

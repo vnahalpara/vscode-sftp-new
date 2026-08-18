@@ -9,6 +9,7 @@ const SECRETS = [
   'interactive-secret',
   'glpat-abcdef',
   'db-root-password',
+  'root-hunter3',
 ];
 
 const CONFIG = {
@@ -25,6 +26,12 @@ const CONFIG = {
   vpn: { configFile: '/etc/wireguard/wg0.conf' },
   git: { username: 'bot', password: 'glpat-abcdef' },
   database: [{ name: 'shop', user: 'root', password: 'db-root-password' }],
+  // root_user is deliberately absent from this shared fixture: privilegedAs
+  // requires BOTH root fields (see index.ts's hasRootCreds), so carrying
+  // root_password alone here still exercises the general leak assertions
+  // below without changing what every other test in this file expects
+  // privilegedAs/username to be.
+  root_password: 'root-hunter3',
 };
 
 describe('profileId', () => {
@@ -96,8 +103,40 @@ describe('redactProfile', () => {
   });
 
   it('falls back to username for privilegedAs when only one root field is present', () => {
-    const halfRoot = { ...CONFIG, root_user: 'root' };
+    // CONFIG already carries root_password (for the leak assertions above);
+    // clearing it here is what keeps this "only root_user" case honest.
+    const halfRoot = { ...CONFIG, root_user: 'root', root_password: undefined };
     expect(redactProfile('/ws', halfRoot).privilegedAs).toBe('deploy');
+  });
+
+  it('reads privilegedAs off the hop, not the top level, on a hop/bastion profile', () => {
+    // Top level = bastion; hop = the actual managed target. This must match
+    // exactly what index.ts's privilegedConfig/hasRootLane resolve to, or
+    // the UI (and the sudo hint) would name the bastion's user while the
+    // privileged lane is really authenticated as root on the target.
+    const hopConfig = {
+      ...CONFIG,
+      username: 'bastionUser',
+      root_password: undefined,
+      hop: { host: 'target', username: 'targetUser', password: 'p', root_user: 'root', root_password: 'target-root-secret' },
+    };
+    const redacted = redactProfile('/ws', hopConfig);
+
+    expect(redacted.privilegedAs).toBe('root');
+    expect(redacted.username).toBe('bastionUser');
+
+    const json = JSON.stringify(redacted);
+    expect(json).not.toContain('target-root-secret');
+  });
+
+  it('ignores top-level root credentials on a hop profile for privilegedAs', () => {
+    const hopConfig = {
+      ...CONFIG,
+      username: 'bastionUser',
+      root_user: 'root',
+      hop: { host: 'target', username: 'targetUser', password: 'p' },
+    };
+    expect(redactProfile('/ws', hopConfig).privilegedAs).toBe('bastionUser');
   });
 
   it('survives a config that grows a new secret field', () => {
