@@ -81,6 +81,19 @@ function hasPlottableValue(points, series) {
   return points.some((p) => series.some((s) => typeof p[s.key] === 'number'));
 }
 
+// The y-domain to use while nothing is plottable. [0,'auto'] can't be
+// resolved without a numeric column (see above), so a finite domain is
+// required just to keep the axis structurally present — but the domain's
+// actual numbers must not be shown as if they meant something. '%' is the
+// one unit whose true range genuinely is [0,100], so that placeholder scale
+// is honest and its labels stay visible. Every other unit (bytes/sec, etc.)
+// has no fixed range: [0,1] here is an arbitrary finite pair chosen only to
+// satisfy recharts, and `tick: false` hides its labels so no invented number
+// (e.g. "20 B/s" on an idle network chart) is ever drawn.
+function fallbackYAxis(unit) {
+  return unit === '%' ? { domain: [0, 100], tick: true } : { domain: [0, 1], tick: false };
+}
+
 /**
  * Shared frame for the area/line variants below. One y-axis, always — two
  * measures of different scale belong in two charts.
@@ -93,7 +106,14 @@ function SeriesChart({ data, series, height, unit, format, area }) {
   const raw = data || [];
   const plottable = hasPlottableValue(raw, series);
   const now = Date.now();
+  // Key-less on purpose: the placeholder frame has nothing to plot, so it
+  // omits every series key entirely rather than setting them to `null`.
+  // Recharts treats a missing key the same as an explicit `null` for both
+  // `connectNulls` and the tooltip's `p.value == null` check, so this reads
+  // identically to "no data" without a real series key ever needing to
+  // carry a value that doesn't exist.
   const points = raw.length && plottable ? raw : [{ at: now - EMPTY_WINDOW_MS }, { at: now }];
+  const fallback = fallbackYAxis(unit);
   const Chart = area ? AreaChart : LineChart;
   return (
     <>
@@ -118,9 +138,9 @@ function SeriesChart({ data, series, height, unit, format, area }) {
             minTickGap={44}
           />
           <YAxis
-            domain={plottable ? [0, 'auto'] : [0, 100]}
+            domain={plottable ? [0, 'auto'] : fallback.domain}
             stroke={INK.axis}
-            tick={{ fill: INK.muted, fontSize: 11 }}
+            tick={plottable || fallback.tick ? { fill: INK.muted, fontSize: 11 } : false}
             tickLine={false}
             axisLine={false}
             width={54}
