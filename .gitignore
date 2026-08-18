@@ -47,3 +47,6 @@ Surfshark_Config/us-nyc-st004.wireguard.conf
 
 ### Web UI build output ###
 media/webui
+
+# Playwright MCP scratch output (console logs, page snapshots) from UI verification
+.playwright-mcp/
