@@ -328,6 +328,63 @@ test('double teardown (socket close then stream close) does not throw', async ()
   expect(socket.closed).toBe(true);
 });
 
+// A socket-level failure (a bad frame, a dead transport) is not a clean
+// exit, and reporting it as 1000 would tell the UI "session ended" for what
+// was actually a broken bridge. 1011 is the same code the shell-channel
+// -error path uses for the mirror-image failure.
+test('a socket error closes with 1011, not a clean 1000', async () => {
+  const stream = new FakeStream();
+  const socket = new FakeSocket();
+  bridgeTerminal(deps(Promise.resolve(stream)), socket);
+  await flush();
+
+  socket.emit('error', new Error('protocol error'));
+
+  expect(socket.closeCode).toBe(1011);
+  expect(socket.closeReason).toBe('socket error');
+});
+
+// Without this guard, in-flight ssh2 data arriving after teardown would call
+// socket.send() on an already-closing socket -- `ws`'s sendAfterClose only
+// ever increments its buffered-bytes counter, never decrements it.
+test('remote data arriving after teardown is not forwarded to the socket', async () => {
+  const stream = new FakeStream();
+  const socket = new FakeSocket();
+  bridgeTerminal(deps(Promise.resolve(stream)), socket);
+  await flush();
+
+  socket.emit('close'); // runs teardown()
+  stream.emit('data', Buffer.from('late output'));
+
+  expect(socket.sent).toEqual([]);
+});
+
+// A throw from setWindow() or the queued-input replay must not leave the
+// stream adopted with no 'error' listener attached -- that is the exact
+// ERR_UNHANDLED_ERROR class releaseStream's own listener already guards
+// against on every other path. Attaching data/close/error BEFORE replaying
+// queued input closes that gap.
+test('data/close/error listeners are attached before the queued-input replay runs', async () => {
+  const stream = new FakeStream();
+  let listenersReadyDuringReplay = false;
+  const originalWrite = stream.write.bind(stream);
+  stream.write = data => {
+    const listeners = (stream as any)._listeners;
+    listenersReadyDuringReplay = !!(listeners.data && listeners.close && listeners.error);
+    originalWrite(data);
+  };
+  const socket = new FakeSocket();
+  bridgeTerminal(deps(Promise.resolve(stream)), socket);
+
+  // Queued while the shell is still "opening" (the promise has not resolved
+  // yet), so it is replayed via inputQueue once the stream is adopted.
+  socket.emit('message', 'queued input\n', false);
+  await flush();
+
+  expect(listenersReadyDuringReplay).toBe(true);
+  expect(stream.written).toEqual(['queued input\n']);
+});
+
 // A BINARY frame is terminal input, byte for byte, whatever it happens to
 // contain -- that is what lets a client paste text that looks exactly like a
 // control message without it being swallowed.

@@ -284,7 +284,11 @@ export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
   });
 
   socket.on('close', () => teardown());
-  socket.on('error', () => teardown());
+  // A socket-level failure is not a clean exit -- reporting it as CLOSE_NORMAL
+  // would tell the UI "session ended" for what was actually a broken bridge.
+  // 1011 is the same code the shell-channel-error path below uses for the
+  // mirror-image failure.
+  socket.on('error', () => teardown(CLOSE_INTERNAL_ERROR, 'socket error'));
 
   deps.openShell(DEFAULT_SIZE).then(
     openedStream => {
@@ -297,11 +301,15 @@ export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
       }
 
       stream = openedStream;
-      if (pendingResize) {
-        openedStream.setWindow(pendingResize.rows, pendingResize.cols, 0, 0);
-      }
-      inputQueue.splice(0).forEach(chunk => openedStream.write(chunk));
 
+      // Attached BEFORE setWindow()/the inputQueue replay below, on purpose:
+      // either of those can throw (a channel that died the instant it was
+      // handed back), and a stream adopted with listeners attached only
+      // afterward would be released with no 'error' listener on it -- the
+      // exact ERR_UNHANDLED_ERROR class releaseStream's own comment already
+      // guards against on every other path. Attaching first closes that gap
+      // for free.
+      //
       // Output is forwarded with backpressure. The browser is the slow end
       // here -- a throttled background tab reads at a trickle while the
       // remote shell can produce megabytes a second -- and `ws` buffers
@@ -311,6 +319,15 @@ export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
       // backlog around.
       let paused = false;
       openedStream.on('data', chunk => {
+        // Teardown already closed this channel; further in-flight data has
+        // nowhere useful to go. Without this, socket.send() below runs on a
+        // CLOSING/CLOSED socket -- `ws`'s sendAfterClose only ever
+        // increments _sender._bufferedBytes, never decrements it, so
+        // bufferedAmount climbs without bound and an already-released stream
+        // can be pause()d a second time.
+        if (torndown) {
+          return;
+        }
         try {
           socket.send(chunk, () => {
             // Fired once `ws` has written the frame (or failed to). Let the
@@ -343,6 +360,13 @@ export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
       // the channel failing under us is 1011.
       openedStream.on('close', () => teardown(CLOSE_NORMAL));
       openedStream.on('error', () => teardown(CLOSE_INTERNAL_ERROR, 'shell channel error'));
+
+      // Only now, with every listener already attached, replay what arrived
+      // while the round trip to the remote host was still in flight.
+      if (pendingResize) {
+        openedStream.setWindow(pendingResize.rows, pendingResize.cols, 0, 0);
+      }
+      inputQueue.splice(0).forEach(chunk => openedStream.write(chunk));
     },
     error => {
       // No stream was ever assigned, so teardown() only needs to close the
