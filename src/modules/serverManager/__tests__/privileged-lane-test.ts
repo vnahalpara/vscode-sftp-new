@@ -1,4 +1,4 @@
-import { privilegedConfig, hasRootLane, privilegedIdentity, privilegedConnectionIsSeparate } from '../index';
+import { privilegedConfig, privilegedIdentity, privilegedConnectionIsSeparate } from '../index';
 
 test('prefers root credentials when both are present', () => {
   const out = privilegedConfig({
@@ -152,31 +152,6 @@ describe('hop-aware target selection', () => {
   });
 });
 
-describe('hasRootLane', () => {
-  test('false with no root credentials', () => {
-    expect(hasRootLane({ host: 'h', username: 'u', password: 'p' })).toBe(false);
-  });
-
-  test('true with both root credentials at the top level', () => {
-    expect(hasRootLane({ username: 'u', password: 'p', root_user: 'root', root_password: 'r' })).toBe(true);
-  });
-
-  test('reads root credentials off the hop, not the top level, when a hop is configured', () => {
-    const config = {
-      host: 'bastion', username: 'u', password: 'p',
-      hop: { host: 'target', username: 'tu', password: 'tp', root_user: 'root', root_password: 'r' },
-    };
-    expect(hasRootLane(config)).toBe(true);
-  });
-
-  test('ignores top-level root credentials when a hop is configured', () => {
-    const config = {
-      host: 'bastion', username: 'u', password: 'p', root_user: 'root', root_password: 'r',
-      hop: { host: 'target', username: 'tu', password: 'tp' },
-    };
-    expect(hasRootLane(config)).toBe(false);
-  });
-});
 
 describe('privilegedIdentity', () => {
   test('is stable for the session lane (no root credentials)', () => {
@@ -203,7 +178,7 @@ describe('privilegedIdentity', () => {
     expect(withRoot).not.toBe(withoutRoot);
   });
 
-  test('is hop-aware, matching hasRootLane/privilegedConfig', () => {
+  test('is hop-aware, matching privilegedConfig', () => {
     const config = {
       host: 'bastion', username: 'u', password: 'p',
       hop: { host: 'target', username: 'tu', password: 'tp', root_user: 'root', root_password: 'r' },
@@ -216,12 +191,12 @@ describe('privilegedIdentity', () => {
 // The guard that decides whether disposePrivileged() is allowed to end the
 // privileged connection's pooled entry -- ending it when it is really the
 // SAME pool entry as the session's own SFTP connection would kill the
-// user's live transfer. hasRootLane("does this config carry root
+// user's live transfer. A credential-presence check ("does this config carry root
 // credentials") looks like the right question but is not: before hashOption
 // (core/remoteFs.ts) was made structure-aware, a hop profile with root
 // credentials on the target hashed IDENTICALLY to the session's own config
 // (every hop object stringified to the literal "[object Object]" under the
-// old value-only join), so hasRootLane reported true for a config that was
+// old value-only join), so that check reported true for a config that was
 // actually sharing the session's pool entry. privilegedConnectionIsSeparate
 // answers by comparing the real pool keys instead, so it stays correct
 // regardless of what hashOption's own bug or fix was.

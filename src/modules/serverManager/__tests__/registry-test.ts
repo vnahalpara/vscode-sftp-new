@@ -111,7 +111,7 @@ describe('redactProfile', () => {
 
   it('reads privilegedAs off the hop, not the top level, on a hop/bastion profile', () => {
     // Top level = bastion; hop = the actual managed target. This must match
-    // exactly what index.ts's privilegedConfig/hasRootLane resolve to, or
+    // exactly what index.ts's privilegedConfig resolves to, or
     // the UI (and the sudo hint) would name the bastion's user while the
     // privileged lane is really authenticated as root on the target.
     const hopConfig = {

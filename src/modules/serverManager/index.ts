@@ -40,19 +40,6 @@ export function init(extensionPath: string): void {
   extensionRoot = extensionPath;
 }
 
-// True when this profile's destination option (see targetOption) carries
-// root credentials at all. NOT used to decide whether the privileged
-// connection is safe to tear down independently -- that question is
-// answered by comparing actual pool keys (privilegedConnectionIsSeparate,
-// below), because credential presence and pool-key distinctness used to be
-// two different questions with two different answers on a hop profile (see
-// privilegedConnectionIsSeparate's comment). Exported as a general
-// "does this profile even have a root lane" predicate for callers (and
-// tests) that only need that, not the pool-identity question.
-export function hasRootLane(config: any): boolean {
-  return hasRootCreds(targetOption(config));
-}
-
 // Builds the config for the privileged (systemctl/nginx/openssl) lane. The
 // credential swap lands on targetOption(config) -- the real destination --
 // not unconditionally on the top level. Getting this wrong on a hop profile
@@ -103,16 +90,19 @@ export function privilegedConfig(config: any): any {
 // connection from the session's own -- answered the only way that is
 // correct by construction: comparing the exact pool keys both configs hash
 // to (hashOption, in core/remoteFs.ts), the same key createRemoteIfNoneExist
-// and removeRemoteFs use. hasRootLane(config) ("does this config carry root
-// credentials") looks like the same question but is not: before hashOption
-// was made structure-aware, a hop profile with root credentials on the
-// target hashed IDENTICALLY to the session's own config (every hop object
-// stringified to the literal "[object Object]"), so hasRootLane reported
-// true while the two configs actually shared one pooled connection --
-// tearing that "separate" connection down on dispose would have ended the
-// user's live SFTP connection instead. Deciding by key equality stays
-// correct even if hashOption's implementation changes again, which
-// hasRootLane's credential-presence check never could.
+// and removeRemoteFs use.
+//
+// "Does this config carry root credentials?" looks like the same question
+// and is not. This code used to ask that one, and it was a real bug: before
+// hashOption was made structure-aware, a hop profile with root credentials
+// on the target hashed IDENTICALLY to the session's own config (every hop
+// object stringified to the literal "[object Object]"), so the credential
+// check said "separate" while the two configs actually shared one pooled
+// connection. Tearing that "separate" connection down on dispose would have
+// ended the user's live SFTP transfer. The credential-presence predicate
+// was deleted rather than left exported, so nobody reaches for it again.
+// Deciding by key equality stays correct even if hashOption changes again,
+// which a credential check never could.
 export function privilegedConnectionIsSeparate(config: any): boolean {
   return hashOption(getHostInfo(privilegedConfig(config))) !== hashOption(getHostInfo(config));
 }
