@@ -93,8 +93,9 @@ The dashboard streams live metrics over the connection's SSH channel and renders
 tab: five stat cards (CPU, Memory, Disk, Load (1m), Uptime), charts for CPU usage, per-core usage,
 memory usage, load average and network throughput, plus tables for filesystems, top processes by
 CPU, disk I/O (IOPS and latency) and network interfaces. A range selector switches the charts
-between the last 5, 15 and 60 minutes of in-memory history. Services, Web server, Logs, Terminal
-and Database appear as visibly disabled tabs, pending later releases.
+between the last 5, 15 and 60 minutes of in-memory history. **Services** and **Web server** are
+also live tabs — see below. Logs, Terminal and Database appear as visibly disabled tabs, pending
+later releases.
 
 Metric history lives in memory only and is not persisted across VS Code restarts.
 
@@ -108,7 +109,90 @@ Settings:
 | `sftp.serverManager.historyMinutes` | `60` | Minutes of in-memory history for the charts |
 
 Requires an SFTP (SSH) connection — FTP has no exec channel — and a Linux host, because
-collection reads `/proc`.
+collection reads `/proc` and every action below shells out to `systemctl`/`nginx`/`apache2`.
+
+### Services tab
+
+Lists every `systemd` service unit (`systemctl list-units --type=service --all`, merged with
+`list-unit-files` for the enabled/disabled/generated state), sorted with active units first, then
+failed, then everything else alphabetically. A search box filters by unit name or description.
+
+Each row has buttons for **start**, **stop**, **restart**, **reload** and **reload-or-restart**.
+Every button — including start — opens a confirmation dialog first, because these run on the live
+host over SSH; there is no fast path that skips the confirmation. `enable`/`disable` (changing
+whether a unit starts on boot) are intentionally not offered here. A row's result (success or
+failure, with the command's output) stays inline under that row until you dismiss it — nothing
+auto-clears or times out.
+
+### Web server tab
+
+Detects `nginx` and/or Apache (`apache2`/`httpd`) on the host: whether each is installed, its
+version, its `systemd` active/enabled state, and which of ports 80/443/8080/8443 are listening.
+For whichever is present, it parses the site config files under `/etc/nginx` or `/etc/apache2`
+(and RHEL-style `/etc/httpd`) into a table of virtual hosts — server name, aliases, listen
+addresses, SSL, document root, proxy target, log paths — and reads each referenced TLS
+certificate with `openssl x509` to show its expiry, subject and issuer, colour-coded by days
+remaining. A **Test config** button runs `nginx -t` or `apachectl configtest`/`httpd -t` and shows
+the raw output. A view button on each vhost row shows the actual config file text as read from
+the server.
+
+### Sudo requirement for Services and Web server
+
+Every command that changes state or reads a protected file — `systemctl start/stop/restart/
+reload/reload-or-restart`, reading web server config files, `nginx -t`/`apachectl configtest`,
+and reading certificate files with `openssl` — runs as `sudo -n` (non-interactive: it never
+prompts for a password). If sudo isn't set up to allow that without a prompt, the action fails
+and the tab shows a hint naming the account and host and suggesting a sudoers line, instead of
+silently doing nothing.
+
+You need either:
+- **Passwordless sudo** for the connection's own user on the target host, broad enough to cover
+  `systemctl`, `nginx`/`apache2ctl`/`httpd`, and `openssl` (see the caveat below on why a narrow,
+  per-command allowlist rule will not actually match); or
+- **Root credentials on the profile** (see next section), so privileged commands run as root
+  directly instead of through the connection's own user's sudo.
+
+#### Root-credential lane (optional)
+
+If a connection profile in `sftp.json` carries both `root_user` and `root_password`, every
+privileged command (the `systemctl`/`nginx`/`openssl` calls above) runs over a **second SSH
+connection** authenticated with those credentials, instead of `sudo -n` under the profile's own
+user. Only privileged commands use this second connection — opening the dashboard or browsing the
+Overview tab does not open it; the first Services or Web server action does. If a profile connects
+through a hop/bastion (`hop`), `root_user`/`root_password` describe the **innermost hop** — the
+real destination server — never the jump host; the jump host's own credentials are never touched.
+
+If a profile has only one of `root_user`/`root_password` (a half-finished edit), it is treated as
+having neither, and commands fall back to `sudo -n` under the profile's own user.
+
+```json
+{
+  "name": "prod",
+  "host": "example.com",
+  "username": "deploy",
+  "password": "…",
+  "root_user": "root",
+  "root_password": "…"
+}
+```
+
+#### Why a narrow sudoers allowlist rule will not work
+
+Every command this feature runs is built with a `--` end-of-options guard before the target name,
+and a fully-qualified unit name — for example:
+
+```
+sudo -n systemctl restart -- 'nginx.service'
+```
+
+A sudoers `NOPASSWD` rule written the way people usually write one, e.g.
+`deploy ALL=(ALL) NOPASSWD: /bin/systemctl restart nginx`, will **not** match that command line:
+sudoers matches the exact argv, and neither the `--` nor the `.service` suffix appears in a rule
+written that way. This is deliberate, not an oversight — the `--` guard is a defence against a
+unit/path name being reinterpreted as a flag, and it is not going to be removed for allowlist
+compatibility. If you want a narrow rule rather than granting the root-credential lane above, write
+it to match what's actually run (including the `--` and the `.service` suffix), or use a wildcard
+covering the commands this feature issues (`systemctl`, `nginx`, `apache2ctl`/`httpd`, `openssl`).
 
 ### Install the .vsix (both platforms)
 - **UI:** Extensions panel → `…` menu → **Install from VSIX…** → pick `vaibhav-sftp-plus-<version>.vsix` → reload.
