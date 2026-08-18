@@ -56,17 +56,47 @@ function resolve(deps: RouteDeps, ctx: Ctx): ManagedSession | null {
 // session routes.ts already has via resolve() — one owner of the exec
 // channel, not a second token-keyed map living alongside index.ts's byToken.
 //
-// exec runs over privilegedTransport, not transport: systemctl/nginx/openssl
-// need sudo, and privilegedTransport is the lane authenticated as root_user
-// when the profile supplies those credentials (session-user otherwise). user
-// is fed profile.privilegedAs to match -- sudoHint must name the account that
-// actually ran the command, or it tells the operator to grant sudo to the
-// wrong one.
+// exec runs over privilegedTransport: this builder is for the commands that
+// actually carry `sudo -n` (service actions, config reads, `nginx -t`,
+// openssl, /api/file), and privilegedTransport is the lane authenticated as
+// root_user when the profile supplies those credentials (session-user
+// otherwise). user is fed profile.privilegedAs to match -- sudoHint must name
+// the account that actually ran the command, or it tells the operator to
+// grant sudo to the wrong one. Commands with no sudo in them use readOpsFor
+// below instead, so a read never dials the root lane.
 function opsFor(session: ManagedSession): OpsDeps {
   return {
     exec: cmd => session.privilegedTransport.exec(cmd),
     activity: session.activity,
     user: session.profile.privilegedAs,
+    host: session.profile.host,
+    now: () => Date.now(),
+  };
+}
+
+// The unprivileged read lane, for the three commands under this router that
+// carry no `sudo` at all: servicesCommand(), serviceStatusCommand() and
+// detectWebServerCommand(). They need no privilege, so they must not be the
+// thing that dials the root connection.
+//
+// Running them over privilegedTransport meant merely OPENING the Services
+// tab opened the root SSH lane. Ubuntu and Debian ship
+// `PermitRootLogin prohibit-password`, so a user who configured
+// root_user/root_password exactly as documented -- without also enabling
+// root password login -- got BOTH tabs failing to load with a raw ssh2 "All
+// configured authentication methods failed": no sudo hint, no mention of the
+// root lane, and (since these three bypass runPrivileged) not even an
+// activity-log entry to explain it. Reading over the session's own transport
+// -- the lane the Overview tab already holds open -- degrades that to "the
+// list loads, and only the actions fail, with a hint that names the account".
+//
+// `user` is the session's own username here, not privilegedAs: sudoHint must
+// name the account that actually ran the command.
+function readOpsFor(session: ManagedSession): OpsDeps {
+  return {
+    exec: cmd => session.transport.exec(cmd),
+    activity: session.activity,
+    user: session.profile.username,
     host: session.profile.host,
     now: () => Date.now(),
   };
@@ -240,7 +270,8 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
         if (!session) {
           return;
         }
-        const ops = opsFor(session);
+        // No sudo in servicesCommand() -- read it over the session's own lane.
+        const ops = readOpsFor(session);
         const result = await ops.exec(servicesCommand());
         const sections = splitAt(result.stdout);
         const units = parseUnits(sections.units || '');
@@ -285,7 +316,8 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
         if (!session) {
           return;
         }
-        const ops = opsFor(session);
+        // `systemctl status` carries no sudo either.
+        const ops = readOpsFor(session);
         const { unit } = ctx.params;
         let command: string;
         try {
@@ -306,7 +338,8 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
         if (!session) {
           return;
         }
-        const ops = opsFor(session);
+        // Detection is `command -v` and `systemctl is-active`: no sudo.
+        const ops = readOpsFor(session);
         const result = await ops.exec(detectWebServerCommand());
         ctx.json(200, parseDetect(result.stdout));
       },

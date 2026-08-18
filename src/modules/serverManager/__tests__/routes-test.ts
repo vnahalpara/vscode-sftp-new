@@ -10,13 +10,15 @@ type ExecFn = (cmd: string) => Promise<{ stdout: string; stderr: string; code: n
 
 const noopExec: ExecFn = async () => ({ stdout: '', stderr: '', code: 0 });
 
-// A fake ManagedSession. `privilegedTransport` backs routes.ts's
-// opsFor(session) via session.privilegedTransport.exec(cmd) -- the real
-// accessor added to ManagedSession in session.ts -- so a test's `exec` fake
-// is the thing that proves a route actually reached the session's privileged
-// exec channel, not just that it returned a response. `transport` (the
-// unprivileged metrics lane) is included for parity with the real
-// ManagedSession shape but nothing under routes.ts reads it.
+// A fake ManagedSession with BOTH exec lanes, because routes.ts uses both
+// and which one a route picks is load-bearing. `privilegedTransport` backs
+// opsFor(session) -- the commands that carry `sudo -n` -- and `transport`
+// backs readOpsFor(session), the reads that carry no sudo at all
+// (servicesCommand, serviceStatusCommand, detectWebServerCommand). Tests
+// that pin the lane fake both and assert the other one was never called: a
+// read that reaches the privileged lane opens the root SSH connection, which
+// on a stock Ubuntu/Debian host (PermitRootLogin prohibit-password) fails
+// outright and takes the whole tab down with it.
 function fakeSession(overrides: any = {}, token: string = 'tok') {
   const written: string[] = [];
   return {
@@ -353,25 +355,69 @@ describe('buildRoutes', () => {
   });
 
   describe('services', () => {
-    it('lists services parsed, merged and sorted, and drives the command through the session privileged transport', async () => {
+    it('lists services parsed, merged and sorted, and drives the command through the session\'s own (unprivileged) transport', async () => {
       const exec = jest.fn(async (_cmd: string) => ({ stdout: SERVICES_OUTPUT, stderr: '', code: 0 }));
-      const { session } = fakeSession({ privilegedTransport: { exec } });
+      const privilegedExec = jest.fn(noopExec);
+      const { session } = fakeSession({
+        transport: { exec },
+        privilegedTransport: { exec: privilegedExec },
+      });
       store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'GET', '/api/services')(ctx);
 
-      // Proves the route actually reached this session's privileged transport,
-      // not just that it produced a 200 -- a fake transport that was never called
-      // would still let a stub response through.
+      // Proves the route actually reached this session's transport, not just
+      // that it produced a 200 -- a fake transport that was never called would
+      // still let a stub response through. servicesCommand() carries no sudo,
+      // so merely opening the Services tab must not dial the root lane: on a
+      // Ubuntu/Debian host with PermitRootLogin prohibit-password that made
+      // the whole tab fail to load with a raw ssh2 auth error.
       expect(exec).toHaveBeenCalledTimes(1);
       expect(exec.mock.calls[0][0]).toContain('systemctl list-units');
+      expect(privilegedExec).not.toHaveBeenCalled();
 
       const body = JSON.parse(res.body);
       expect(res.status).toBe(200);
       expect(body.services.map((s: any) => s.unit)).toEqual(['nginx.service', 'mysql.service']);
       expect(body.services[1].active).toBe('failed');
       expect(body.services[0].enabled).toBe('enabled');
+    });
+
+    it('reads `systemctl status` over the session transport, not the root lane', async () => {
+      const exec = jest.fn(async (_cmd: string) => ({ stdout: 'active (running)', stderr: '', code: 0 }));
+      const privilegedExec = jest.fn(noopExec);
+      const { session } = fakeSession({
+        transport: { exec },
+        privilegedTransport: { exec: privilegedExec },
+      });
+      store.set('tok', session);
+      const { ctx, res } = fakeCtx('tok');
+
+      await find(routes, 'GET', '/api/services/:unit/status')(withParams(ctx, { unit: 'nginx.service' }));
+
+      expect(res.status).toBe(200);
+      expect(exec).toHaveBeenCalledTimes(1);
+      expect(privilegedExec).not.toHaveBeenCalled();
+    });
+
+    it('runs an ACTION over the privileged lane (it is the one command that carries sudo)', async () => {
+      const exec = jest.fn(noopExec);
+      const privilegedExec = jest.fn(async (_cmd: string) => ({ stdout: 'ok', stderr: '', code: 0 }));
+      const { session } = fakeSession({
+        transport: { exec },
+        privilegedTransport: { exec: privilegedExec },
+      });
+      store.set('tok', session);
+      const { ctx } = fakeCtx('tok');
+
+      await find(routes, 'POST', '/api/services/:unit/:action')(
+        withParams(ctx, { unit: 'nginx.service', action: 'restart' })
+      );
+
+      expect(privilegedExec).toHaveBeenCalledTimes(1);
+      expect(privilegedExec.mock.calls[0][0]).toContain('sudo -n systemctl restart');
+      expect(exec).not.toHaveBeenCalled();
     });
 
     it('runs a service action and reports ok with output', async () => {
@@ -454,7 +500,7 @@ describe('buildRoutes', () => {
 
     it('returns raw status output regardless of exit code', async () => {
       const { session } = fakeSession({
-        privilegedTransport: {
+        transport: {
           exec: async () => ({
             stdout: '● nginx.service - A web server\n   Active: active (running)',
             stderr: '',
@@ -484,7 +530,7 @@ describe('buildRoutes', () => {
 
   describe('web server', () => {
     it('detects installed web servers', async () => {
-      const { session } = fakeSession({ privilegedTransport: { exec: async () => ({ stdout: DETECT_OUTPUT, stderr: '', code: 0 }) } });
+      const { session } = fakeSession({ transport: { exec: async () => ({ stdout: DETECT_OUTPUT, stderr: '', code: 0 }) } });
       store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
@@ -494,6 +540,23 @@ describe('buildRoutes', () => {
       expect(res.status).toBe(200);
       expect(body.servers[0].kind).toBe('nginx');
       expect(body.listening.length).toBe(1);
+    });
+
+    it('detects web servers over the session transport, not the root lane', async () => {
+      const exec = jest.fn(async (_cmd: string) => ({ stdout: DETECT_OUTPUT, stderr: '', code: 0 }));
+      const privilegedExec = jest.fn(noopExec);
+      const { session } = fakeSession({
+        transport: { exec },
+        privilegedTransport: { exec: privilegedExec },
+      });
+      store.set('tok', session);
+      const { ctx, res } = fakeCtx('tok');
+
+      await find(routes, 'GET', '/api/webserver')(ctx);
+
+      expect(res.status).toBe(200);
+      expect(exec).toHaveBeenCalledTimes(1);
+      expect(privilegedExec).not.toHaveBeenCalled();
     });
 
     it('rejects an unknown kind on /webserver/:kind/vhosts with 400', async () => {

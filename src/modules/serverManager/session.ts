@@ -73,8 +73,11 @@ export class ManagedSession {
     this._opts = opts;
   }
 
-  // Public on purpose: the ops layer (routes.ts) needs this session's exec
-  // lane to run systemctl/nginx/openssl commands for it. Routing that
+  // Public on purpose: the ops layer (routes.ts, readOpsFor) runs this
+  // session's UNPRIVILEGED reads over this lane -- listing services,
+  // `systemctl status`, detecting nginx/apache. None of those commands
+  // carries sudo, so none of them should be what opens the root connection;
+  // this is the same channel the Overview tab already holds open. Routing it
   // through the session -- rather than a second token-keyed map living
   // alongside byToken in index.ts -- keeps a single owner of the SSH
   // connection instead of two maps that could drift out of sync.
