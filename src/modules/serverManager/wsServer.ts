@@ -206,11 +206,49 @@ function livePort(server: http.Server): number | null {
   return address && typeof address === 'object' ? address.port : null;
 }
 
-export function attachWs(server: http.Server, opts: WsOpts): { close(): void } {
+// What the owner of an http.Server gets back from attachWs: the two ways a
+// live upgraded socket ever needs to be taken away from a client.
+export interface WsHandle {
+  // Stop accepting upgrades and terminate every socket already accepted.
+  close(): void;
+  // Terminate the sockets belonging to ONE session, leaving the server (and
+  // every other session's sockets) alone.
+  closeToken(token: string): void;
+}
+
+export function attachWs(server: http.Server, opts: WsOpts): WsHandle {
   // noServer: true means `ws` never binds a listener of its own -- upgrades
   // arrive only via the http.Server's 'upgrade' event, which we handle
   // below so checkUpgrade runs before `ws` ever sees the request.
   const wss = new WebSocketServer({ noServer: true });
+
+  // Every socket this server has accepted and not yet seen close, and the
+  // session token it was opened under.
+  //
+  // This register exists because NOTHING else can take these sockets away.
+  // Once an HTTP connection is upgraded, http.Server#close() stops accepting
+  // new connections and then simply waits -- it does not touch an upgraded
+  // socket. WebSocketServer#close() in noServer mode is no help either: it
+  // removes listeners and waits for its own 'close', and never calls
+  // terminate() on a client. So without this, a disposed dashboard (or a
+  // session evicted because its credentials changed) left the browser's
+  // Terminal socket live, and with it a real shell running on the user's
+  // production host, until the tab was closed or the shell exited on its
+  // own.
+  //
+  // Terminating the socket is enough to reap the remote end as well, without
+  // this module needing to know anything about shells or log follows: every
+  // handler tears its own resources down off the socket's 'close'. That is
+  // what makes this general enough for /ws/logs to inherit unchanged.
+  const live = new Map<WebSocket, string>();
+
+  function terminate(ws: WebSocket): void {
+    try {
+      ws.terminate();
+    } catch (error) {
+      // Already gone is exactly what we wanted.
+    }
+  }
 
   // Node calls this straight out of the parser, inside the raw socket's
   // 'data' callback: there is no promise, no request object and no framework
@@ -256,7 +294,17 @@ export function attachWs(server: http.Server, opts: WsOpts): { close(): void } {
       return;
     }
 
+    // The token the upgrade authenticated with -- checkUpgrade has already
+    // proved it valid, but does not hand it back, and the register needs it
+    // to answer closeToken().
+    const parsedForToken = parseSafe(req.url || '', true) as url.UrlWithParsedQuery | null;
+    const token = tokenFromUpgrade(parsedForToken && parsedForToken.query, req.headers);
+
     wss.handleUpgrade(req, socket, head, ws => {
+      live.set(ws, token);
+      ws.on('close', () => {
+        live.delete(ws);
+      });
       // `ws` installs NO default 'error' handler on the sockets it accepts,
       // and both receiverOnError and senderOnError re-emit as 'error' -- so
       // an 'error' with no listener is EventEmitter's ERR_UNHANDLED_ERROR
@@ -267,14 +315,8 @@ export function attachWs(server: http.Server, opts: WsOpts): { close(): void } {
       // attach its own is still not a crash. (Handlers should attach their
       // own anyway -- this one only keeps the process alive; it does not
       // tear the handler's own state down.)
-      ws.on('error', () => {
-        try {
-          ws.terminate();
-        } catch (error) {
-          // Nothing left to do: the socket is already unusable.
-        }
-      });
-      const pathname = (parseSafe(req.url || '', true) || {}).pathname;
+      ws.on('error', () => terminate(ws));
+      const pathname = parsedForToken ? parsedForToken.pathname : undefined;
       if (pathname === '/ws/terminal' && opts.onTerminal) {
         opts.onTerminal(ws, req);
         return;
@@ -295,10 +337,23 @@ export function attachWs(server: http.Server, opts: WsOpts): { close(): void } {
   return {
     close(): void {
       server.removeListener('upgrade', onUpgrade);
-      // Terminates every currently-open connection this server accepted;
-      // sockets rejected in onUpgrade were never handed to `wss` and are
-      // unaffected.
+      // Snapshot first: terminate() makes `ws` emit 'close', which deletes
+      // from the map we would otherwise be iterating.
+      Array.from(live.keys()).forEach(terminate);
+      live.clear();
+      // Releases `wss`'s own listeners. Deliberately AFTER the loop above,
+      // and not relied on to do the terminating: in noServer mode
+      // WebSocketServer#close() removes listeners and waits, and never
+      // terminates a client.
       wss.close();
+    },
+    closeToken(token: string): void {
+      Array.from(live.keys())
+        .filter(ws => live.get(ws) === token)
+        .forEach(ws => {
+          live.delete(ws);
+          terminate(ws);
+        });
     },
   };
 }

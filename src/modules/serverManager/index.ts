@@ -14,7 +14,7 @@ import { HostFacts } from '../monitor/types';
 import { profileId, redactProfile } from './registry';
 import { targetOption, hasRootCreds } from './privilege';
 import { ManagedSession } from './session';
-import { createServer, listen, tokenFrom } from './httpServer';
+import { closeServer, closeSessionSockets, createServer, listen, tokenFrom } from './httpServer';
 import { bootstrapHtml } from './bootstrap';
 import { buildRoutes } from './routes';
 import { browserCommand, BrowserKind } from './browser';
@@ -151,7 +151,16 @@ export interface SessionRegistryEntry {
 // on a profile's root credentials changing under an already-open session --
 // can be unit tested without a real HTTP server or the `vscode` module, both
 // of which the rest of this file depends on.
-export function createSessionRegistry() {
+export interface SessionRegistryHooks {
+  // Called for every token the registry lets go of -- disposed on shutdown,
+  // or evicted because its credentials changed under it. index.ts uses it to
+  // terminate that session's live WebSockets: a disposed session whose
+  // Terminal socket stays open is a shell still running on the user's
+  // production host, since nothing else ever closes it.
+  onTokenDisposed?(token: string): void;
+}
+
+export function createSessionRegistry(hooks: SessionRegistryHooks = {}) {
   const byToken = new Map<string, SessionRegistryEntry>();
   const byProfile = new Map<string, string>();
 
@@ -178,6 +187,15 @@ export function createSessionRegistry() {
       return;
     }
     try {
+      // First, because it is the only one of the three that is still costing
+      // the user something on the far end: session.dispose() does not close
+      // the pooled SSH connection (SFTP shares it), so a live terminal
+      // socket keeps its remote shell running indefinitely.
+      disposeSafely('closeSockets()', () => {
+        if (hooks.onTokenDisposed) {
+          hooks.onTokenDisposed(token);
+        }
+      });
       disposeSafely('session.dispose()', () => entry.session.dispose());
       disposeSafely('disposePrivileged()', () => entry.disposePrivileged());
     } finally {
@@ -223,7 +241,13 @@ export function createSessionRegistry() {
   };
 }
 
-const registry = createSessionRegistry();
+const registry = createSessionRegistry({
+  onTokenDisposed: token => {
+    if (running) {
+      closeSessionSockets(running.server, token);
+    }
+  },
+});
 
 // The upgrade already passed checkUpgrade's token check (wsServer.ts) before
 // this ever runs, but that check only proved the token is VALID -- it does
@@ -300,7 +324,7 @@ async function ensureServer(): Promise<Running> {
       // disposeAll() ran while we were binding. Nothing will ever own this
       // server, so close it here rather than leaking a held port, and fail the
       // caller instead of handing back a URL to a teardown in progress.
-      server.close();
+      closeServer(server);
       throw new Error('Server manager was disposed while starting.');
     }
     running = { server, port };
@@ -432,7 +456,14 @@ export function disposeAll(): void {
   starting = null;
   generation += 1;
   if (running) {
-    running.server.close();
+    // closeServer, not server.close(): an already-upgraded WebSocket keeps
+    // its socket out of http.Server#close()'s reach entirely, so a plain
+    // close() would leave the Terminal socket -- and the shell it is bridged
+    // to on the user's production host -- alive until the browser tab went
+    // away. registry.disposeAll() above has already terminated the sockets
+    // it knows about by token; this also catches any that outlived their
+    // session.
+    closeServer(running.server);
     running = null;
   }
 }

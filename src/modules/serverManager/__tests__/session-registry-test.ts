@@ -181,4 +181,44 @@ describe('createSessionRegistry', () => {
       });
     });
   });
+
+  // Nothing else closes a session's WebSockets: session.dispose() leaves the
+  // pooled SSH connection alone (SFTP shares it), so a terminal socket that
+  // outlives its session keeps a real shell running on the user's server.
+  describe('websocket teardown hook', () => {
+    it('reports every token disposed by disposeAll()', () => {
+      const onTokenDisposed = jest.fn();
+      const registry = createSessionRegistry({ onTokenDisposed });
+      registry.set('profile-1', 'tok-1', entry());
+      registry.set('profile-2', 'tok-2', entry());
+
+      registry.disposeAll();
+
+      expect(onTokenDisposed.mock.calls.map(c => c[0]).sort()).toEqual(['tok-1', 'tok-2']);
+    });
+
+    it('reports a token EVICTED because its identity changed', () => {
+      const onTokenDisposed = jest.fn();
+      const registry = createSessionRegistry({ onTokenDisposed });
+      registry.set('profile-1', 'tok-1', entry({ privilegedIdentity: 'session' }));
+
+      registry.get('profile-1', 'root:abc123');
+
+      expect(onTokenDisposed).toHaveBeenCalledWith('tok-1');
+    });
+
+    it('still disposes the session when the hook throws', () => {
+      const e = entry();
+      const registry = createSessionRegistry({
+        onTokenDisposed: () => {
+          throw new Error('socket teardown blew up');
+        },
+      });
+      registry.set('profile-1', 'tok-1', e);
+
+      expect(() => registry.disposeAll()).not.toThrow();
+      expect(e.session.dispose).toHaveBeenCalledTimes(1);
+      expect(e.disposePrivileged).toHaveBeenCalledTimes(1);
+    });
+  });
 });

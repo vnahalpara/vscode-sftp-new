@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as url from 'url';
 import { Route, RouteParams, matchRoute } from './router';
-import { attachWs, WsOpts } from './wsServer';
+import { attachWs, WsHandle, WsOpts } from './wsServer';
 
 export interface Ctx {
   req: http.IncomingMessage;
@@ -98,6 +98,12 @@ function isApi(pathname: string): boolean {
 // are excluded correctly -- see webpack.config.js) was the point of standing
 // this up before either feature existed, rather than alongside one of them
 // under pressure to ship it.
+// The WebSocket side of a server built by createServer(), kept beside the
+// http.Server rather than returned from it so createServer keeps its
+// single-value signature and every existing caller keeps working. A WeakMap
+// so a discarded server takes its entry with it.
+const wsHandles = new WeakMap<http.Server, WsHandle>();
+
 export function createServer(deps: ServerDeps): http.Server {
   const server = http.createServer((req, res) => {
     const parsed = url.parse(req.url || '/', true);
@@ -154,12 +160,42 @@ export function createServer(deps: ServerDeps): http.Server {
     serveStatic(deps, ctx, pathname);
   });
 
-  // Same predicate as the /api/* gate above (deps.hasToken): one token, one
-  // set of valid sessions, whether the request arrives as a plain HTTP call
-  // or a WebSocket upgrade.
-  attachWs(server, { hasToken: deps.hasToken, onTerminal: deps.onTerminal });
+  // Same predicate as the /api/* gate above: one token, one set of valid
+  // sessions, whether the request arrives as a plain HTTP call or a
+  // WebSocket upgrade. Wrapped rather than passed by reference so hasToken
+  // is always invoked as a method of deps -- an unbound method that later
+  // grows a `this` would break here, silently and only on the upgrade path.
+  const ws = attachWs(server, {
+    hasToken: token => deps.hasToken(token),
+    onTerminal: deps.onTerminal,
+  });
+  wsHandles.set(server, ws);
 
   return server;
+}
+
+// Shut a server down for real. http.Server#close() alone is NOT a teardown
+// when WebSockets are involved: it stops accepting new connections and waits
+// for existing ones to end, and an already-upgraded socket never ends on its
+// own -- so a disposed dashboard would leave a live Terminal socket, and a
+// live shell on the user's production host, running until the browser tab
+// was closed. Terminate the sockets first, then close the listener.
+export function closeServer(server: http.Server): void {
+  const ws = wsHandles.get(server);
+  if (ws) {
+    ws.close();
+  }
+  server.close();
+}
+
+// Terminate the WebSockets belonging to one session, leaving the server up
+// for every other session. Used when a single session is disposed or evicted
+// (its credentials changed under it) while the dashboard stays open.
+export function closeSessionSockets(server: http.Server, token: string): void {
+  const ws = wsHandles.get(server);
+  if (ws) {
+    ws.closeToken(token);
+  }
 }
 
 // `detail` is only ever true on the /api path, which is behind the token check.
