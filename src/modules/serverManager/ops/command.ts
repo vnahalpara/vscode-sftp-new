@@ -5,6 +5,20 @@ import { shellSingle } from '../../../core/dbExec';
 // every value that came from outside this process (a unit name, a file
 // path, a "kind") is validated and/or single-quote escaped before it is
 // interpolated. Nothing downstream should build a command string itself.
+//
+// Privilege contract: every builder below returns a COMPLETE, ready-to-run
+// command with any required privilege escalation already baked in as a
+// literal `sudo -n` in the returned string. The exec layer that eventually
+// runs these strings must never prepend `sudo` itself -- if a command needs
+// it, it is already there.
+//
+// Quoting alone is not enough: a value can be a perfectly safe single shell
+// word and still be a *flag* rather than an *operand* if it starts with
+// `-` (e.g. a "path" of `--expression=1w/etc/passwd` handed to `sed`, or a
+// unit name of `-Hroot@evil` handed to `systemctl`). Every caller-supplied
+// operand below is therefore both quoted AND passed after a `--`
+// end-of-options marker wherever the target tool honours one, so a
+// leading-`-` value can never be reinterpreted as an option.
 
 // -------------------------------------------------------------- services --
 
@@ -19,7 +33,11 @@ export function isAllowedAction(action: string): boolean {
 
 // Real systemd unit names look like `nginx.service`, `php8.2-fpm@www.service`
 // or `getty@tty1.service`. Anything with a space, quote, backtick, `$`, `;`,
-// `|`, `&`, a newline or a path separator is rejected outright.
+// `|`, `&`, a newline or a path separator is rejected outright. A leading
+// `-` is rejected too: systemd's own charset (letters, `@`, `.`, `-`) is
+// exactly enough to spell an option like `-Huser@host`, which `systemctl`
+// would parse as `--host=` if it ever reached argv without a `--` guard --
+// belt and braces alongside the `--` inserted by the command builders below.
 const UNIT_NAME_RE = /^[A-Za-z0-9._@:-]+$/;
 const MAX_UNIT_NAME_LENGTH = 128;
 
@@ -28,6 +46,7 @@ export function isSafeUnitName(unit: string): boolean {
     typeof unit === 'string' &&
     unit.length > 0 &&
     unit.length <= MAX_UNIT_NAME_LENGTH &&
+    unit.charAt(0) !== '-' &&
     UNIT_NAME_RE.test(unit)
   );
 }
@@ -36,8 +55,12 @@ export function isSafeUnitName(unit: string): boolean {
 // by the text after each `@@` marker. Deliberately separate from
 // `splitSections` in `src/modules/monitor/frame.ts`, which is tuned to that
 // module's own TICK/END + `--name` framing.
+//
+// Uses a null-prototype accumulator so a forged `@@__proto__` (or
+// `@@constructor`) section in remote output becomes an ordinary own-key
+// entry instead of reaching or mutating `Object.prototype`.
 export function splitAt(text: string): { [key: string]: string } {
-  const result: { [key: string]: string } = {};
+  const result: { [key: string]: string } = Object.create(null);
   let currentKey: string | null = null;
   let currentLines: string[] = [];
 
@@ -59,11 +82,16 @@ export function splitAt(text: string): { [key: string]: string } {
   return result;
 }
 
+// `printf '%s\n'` rather than `echo`: POSIX `sh`'s builtin `echo` is free to
+// expand backslash escapes in its argument (dash's does, unconditionally),
+// so a value containing a literal `\n` could forge a second `@@` line.
+// `printf`'s `%s` conversion copies its argument verbatim -- only the
+// format string itself is escape-processed, never the substituted data.
 export function servicesCommand(): string {
   return [
-    'echo "@@units"',
+    `printf '%s\\n' '@@units'`,
     'systemctl list-units --type=service --all --no-pager --plain --no-legend 2>/dev/null',
-    'echo "@@files"',
+    `printf '%s\\n' '@@files'`,
     'systemctl list-unit-files --type=service --no-pager --plain --no-legend 2>/dev/null',
   ].join('; ');
 }
@@ -72,7 +100,9 @@ export function servicesCommand(): string {
 // action and the unit are validated against an allowlist/pattern before
 // being used, and the unit is single-quoted on top of that -- belt and
 // braces, since the validator is a denylist of consequences and the
-// quoting is the positive guarantee.
+// quoting is the positive guarantee. The `--` stops `systemctl` from ever
+// reinterpreting the unit as an option, independent of the leading-`-`
+// check in `isSafeUnitName`.
 export function serviceActionCommand(unit: string, action: string): string {
   if (!isAllowedAction(action)) {
     throw new Error(`Action not allowed: ${action}`);
@@ -80,30 +110,33 @@ export function serviceActionCommand(unit: string, action: string): string {
   if (!isSafeUnitName(unit)) {
     throw new Error(`Unsafe unit name: ${unit}`);
   }
-  return `sudo -n systemctl ${action} ${shellSingle(unit)}`;
+  return `sudo -n systemctl ${action} -- ${shellSingle(unit)}`;
 }
 
 export function serviceStatusCommand(unit: string): string {
   if (!isSafeUnitName(unit)) {
     throw new Error(`Unsafe unit name: ${unit}`);
   }
-  return `systemctl status ${shellSingle(unit)} --no-pager -l 2>&1 | head -n 60`;
+  // Flags before `--`, unit after: systemctl's own option parsing only
+  // stops at `--`, so putting it before `--no-pager`/`-l` would make those
+  // flags be swallowed as extra positional units instead of options.
+  return `systemctl status --no-pager -l -- ${shellSingle(unit)} 2>&1 | head -n 60`;
 }
 
 // ----------------------------------------------------------- web servers --
 
 export function detectWebServerCommand(): string {
   return [
-    'echo "@@nginx"',
+    `printf '%s\\n' '@@nginx'`,
     '(command -v nginx >/dev/null 2>&1 && nginx -v 2>&1) || true',
-    'echo "@@apache_bin"',
+    `printf '%s\\n' '@@apache_bin'`,
     '(command -v apache2 >/dev/null 2>&1 && echo apache2) || (command -v httpd >/dev/null 2>&1 && echo httpd) || true',
-    'echo "@@apache"',
+    `printf '%s\\n' '@@apache'`,
     '(command -v apache2 >/dev/null 2>&1 && apache2 -v 2>&1) || (command -v httpd >/dev/null 2>&1 && httpd -v 2>&1) || true',
-    'echo "@@active"',
+    `printf '%s\\n' '@@active'`,
     // A pipe-delimited record keeps empty fields from collapsing when systemctl prints nothing.
     'for u in nginx apache2 httpd; do printf "%s|%s|%s\\n" "$u" "$(systemctl is-active $u 2>/dev/null)" "$(systemctl is-enabled $u 2>/dev/null)"; done',
-    'echo "@@ports"',
+    `printf '%s\\n' '@@ports'`,
     '(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep -E ":(80|443|8080|8443)[[:space:]]" || true',
   ].join('; ');
 }
@@ -126,7 +159,7 @@ const APACHE_GLOBS =
 export function configFilesCommand(kind: WebServerKind): string {
   assertWebServerKind(kind);
   const globs = kind === 'nginx' ? NGINX_GLOBS : APACHE_GLOBS;
-  const script = `for f in ${globs}; do [ -f "$f" ] && { echo "@@$f"; cat "$f"; }; done 2>/dev/null || true`;
+  const script = `for f in ${globs}; do [ -f "$f" ] && { printf '%s\\n' "@@$f"; cat "$f"; }; done 2>/dev/null || true`;
   return `sudo -n sh -c ${shellSingle(script)}`;
 }
 
@@ -144,35 +177,39 @@ export function testConfigCommand(kind: WebServerKind): string {
 // Certificate paths cannot be pattern-validated the way unit names can -- a
 // legitimate path contains `/` -- so they rely on `shellSingle` alone.
 //
-// Each path is also announced to the caller via an `@@<path>` marker line so
-// the combined openssl output can be split back apart per-path. That header
-// is built as `echo @@` immediately followed (no space) by the single-quoted
-// path, so the two words concatenate into one argument for `echo`. This
-// deliberately avoids `echo "@@$path"`, which would place the path inside a
-// double-quoted context where `$(...)` and backticks in the path would still
-// be expanded by the remote shell.
+// Each path is passed as a positional parameter to a `sh -c` script rather
+// than spliced into the script text: the script body only ever refers to
+// `$1`, `$2`, ... and the actual values are appended, each `shellSingle`-
+// quoted exactly once, after the script. This sidesteps the classic nested-
+// quoting trap where wrapping an already-quoted value in a second outer
+// quoting layer would require re-escaping it -- here every value is quoted
+// exactly once, for the one shell that will parse this string.
 //
-// Deliberately NOT wrapped in an outer `sh -c ${shellSingle(...)}` layer: the
-// per-path values here are already `shellSingle`-quoted for the one real
-// shell that will parse this string, and re-quoting the whole script for a
-// second, nested shell would require re-escaping those already-quoted spans
-// (a doubling that is easy to get subtly wrong). One command string, one
-// escaping pass per value, one shell to parse it.
+// `openssl x509 -in "$1"` needs no `--` guard: the path is only ever the
+// *value* of the `-in` option (OpenSSL's own option table unconditionally
+// consumes the next argv element for an option declared to take a value),
+// never a bare positional operand, so there is no flag/operand ambiguity
+// for a leading `-` to exploit.
 export function certInfoCommand(paths: string[]): string {
   const list: string[] = [];
-  const seen: { [key: string]: boolean } = {};
+  const seen = new Set<string>();
   (paths || []).forEach(p => {
-    if (p && !seen[p]) {
-      seen[p] = true;
+    if (p && !seen.has(p)) {
+      seen.add(p);
       list.push(p);
     }
   });
   if (list.length === 0) {
     return '';
   }
-  return list
-    .map(p => `echo @@${shellSingle(p)}; openssl x509 -noout -enddate -subject -issuer -in ${shellSingle(p)} 2>&1`)
+  const script = list
+    .map((_p, i) => {
+      const posParam = `$${i + 1}`;
+      return `printf '%s\\n' "@@${posParam}"; openssl x509 -noout -enddate -subject -issuer -in "${posParam}" 2>&1`;
+    })
     .join('; ');
+  const args = list.map(shellSingle).join(' ');
+  return `sudo -n sh -c ${shellSingle(script)} sh ${args}`;
 }
 
 // ------------------------------------------------------------------- files --
@@ -188,7 +225,12 @@ function clampLines(lines: number): number {
   return Math.min(Math.floor(n), MAX_READ_LINES);
 }
 
+// `--` stops GNU sed from treating a "path" like `--expression=1w/etc/passwd`
+// as a flag: sed scans its argv for options up to the file operand, and
+// without `--` a leading-`-` value is a valid single argv element that sed
+// happily parses as `-e '1w/etc/passwd'` -- opening (and truncating)
+// `/etc/passwd` at script-compile time, before any input is even read.
 export function readFileCommand(path: string, lines: number): string {
   const n = clampLines(lines);
-  return `sudo -n sed -n '1,${n}p' ${shellSingle(path)}`;
+  return `sudo -n sed -n '1,${n}p' -- ${shellSingle(path)}`;
 }

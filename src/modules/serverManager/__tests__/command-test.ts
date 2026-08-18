@@ -38,18 +38,27 @@ describe('isSafeUnitName', () => {
   it('rejects an absurdly long name', () => {
     expect(isSafeUnitName('a'.repeat(129))).toBe(false);
   });
+  it('rejects a unit name that begins with a dash, since it would read as a flag', () => {
+    // isSafeUnitName's charset (letters, @, ., -) is exactly enough to spell
+    // an option like -Huser@host; a leading dash is rejected outright as
+    // defence in depth alongside the `--` the command builders also add.
+    ['-Hroot@evil', '-Mmachine', '--help', '-'].forEach(u => expect(isSafeUnitName(u)).toBe(false));
+  });
 });
 
 describe('serviceActionCommand', () => {
-  it('builds a quoted systemctl call', () => {
+  it('builds a quoted systemctl call with a -- terminator', () => {
     expect(serviceActionCommand('nginx.service', 'restart'))
-      .toBe(`sudo -n systemctl restart 'nginx.service'`);
+      .toBe(`sudo -n systemctl restart -- 'nginx.service'`);
   });
   it('throws rather than building anything for a bad action', () => {
     expect(() => serviceActionCommand('nginx', 'enable')).toThrow();
   });
   it('throws rather than building anything for a bad unit', () => {
     expect(() => serviceActionCommand('nginx; reboot', 'restart')).toThrow();
+  });
+  it('throws for a unit that could be parsed as a systemctl flag (argument injection)', () => {
+    expect(() => serviceActionCommand('-Hroot@evil', 'restart')).toThrow();
   });
   it('never emits an unquoted unit name', () => {
     // Property check: whatever passes validation must still be quoted.
@@ -59,9 +68,9 @@ describe('serviceActionCommand', () => {
 });
 
 describe('serviceStatusCommand', () => {
-  it('builds a quoted systemctl status call', () => {
+  it('builds a quoted systemctl status call with flags before -- and the unit after', () => {
     expect(serviceStatusCommand('nginx.service')).toBe(
-      `systemctl status 'nginx.service' --no-pager -l 2>&1 | head -n 60`
+      `systemctl status --no-pager -l -- 'nginx.service' 2>&1 | head -n 60`
     );
   });
   it('throws rather than building anything for a bad unit', () => {
@@ -69,6 +78,9 @@ describe('serviceStatusCommand', () => {
   });
   it('throws for an empty unit', () => {
     expect(() => serviceStatusCommand('')).toThrow();
+  });
+  it('throws for a unit that could be parsed as a systemctl flag (argument injection)', () => {
+    expect(() => serviceStatusCommand('-Hroot@evil')).toThrow();
   });
 });
 
@@ -85,25 +97,37 @@ describe('certInfoCommand', () => {
   it('returns an empty string for no paths, so no command is run at all', () => {
     expect(certInfoCommand([])).toBe('');
   });
-  it('never lets a path reach a double-quoted (interpolating) shell context', () => {
-    // The @@header line must not place the raw path inside double quotes,
-    // where $(...) or `...` would still be expanded by the remote shell.
+  it('keeps the path out of any double-quoted (interpolating) shell context', () => {
+    // The path is never spliced into the script body -- the script only
+    // ever refers to the positional parameter "$1", so a value containing
+    // $(...) or `...` can never reach an interpolating context.
     const evil = '$(touch /tmp/pwned)`id`';
     const cmd = certInfoCommand([evil]);
+    expect(cmd).toMatch(/"@@\$1"/);
+    expect(cmd).toMatch(/-in "\$1"/);
     expect(cmd).not.toContain(`"@@${evil}`);
     expect(cmd).not.toMatch(/echo "@@\$\(/);
-    // The whole hostile value must instead appear as one properly
-    // single-quote-escaped token, exactly as shellSingle would produce it.
-    expect(cmd.split(shellSingle(evil)).length - 1).toBe(2); // once in @@header, once in -in
+    // The hostile value appears exactly once: as the single-quoted
+    // positional argument appended after the script.
+    expect(cmd.split(shellSingle(evil)).length - 1).toBe(1);
   });
   it('quotes a path that tries to close the surrounding quoting, so the injected command never runs unquoted', () => {
     const evil = "/tmp/x'; rm -rf / #";
     const cmd = certInfoCommand([evil]);
     // The hostile text must reach the command only inside a correctly
     // escaped single-quoted span -- never as bare, executable shell syntax.
-    expect(cmd.split(shellSingle(evil)).length - 1).toBe(2);
+    expect(cmd.split(shellSingle(evil)).length - 1).toBe(1);
     const withoutEscapedSpans = cmd.split(shellSingle(evil)).join('');
     expect(withoutEscapedSpans).not.toMatch(/;\s*rm -rf \//);
+  });
+  it('bakes sudo -n into the returned command, per the file-wide privilege contract', () => {
+    expect(certInfoCommand(['/a.pem'])).toMatch(/^sudo -n sh -c /);
+  });
+  it('uses printf, not the shell builtin echo, for its @@ marker', () => {
+    const cmd = certInfoCommand(['/a.pem']);
+    expect(cmd).not.toMatch(/echo /);
+    expect(cmd).toContain('printf');
+    expect(cmd).toMatch(/"@@\$1"/);
   });
 });
 
@@ -117,6 +141,23 @@ describe('splitAt', () => {
   it('keeps a section that is present but empty', () => {
     expect(splitAt('@@units\n@@files\nc')).toEqual({ units: '', files: 'c' });
   });
+  it('keeps the last occurrence when a key repeats', () => {
+    expect(splitAt('@@units\na\n@@units\nb')).toEqual({ units: 'b' });
+  });
+  it('treats any @@-prefixed line as a new section, even mid-content', () => {
+    // This documents the framing's actual behaviour: it has no concept of
+    // an "expected" set of markers, so any line beginning with @@ starts a
+    // new section. Guarding against attacker-chosen output reaching this
+    // parser at all is the job of the command builders (e.g. certInfoCommand
+    // keeping paths out of interpolating contexts), not of splitAt itself.
+    expect(splitAt('@@units\na\n@@forged\nb')).toEqual({ units: 'a', forged: 'b' });
+  });
+  it('does not let a forged @@__proto__ section pollute Object.prototype', () => {
+    const result = splitAt('@@__proto__\npolluted') as any;
+    expect(({} as any).polluted).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(result, '__proto__')).toBe(true);
+    expect(result.__proto__).toBe('polluted');
+  });
 });
 
 describe('configFilesCommand', () => {
@@ -129,6 +170,12 @@ describe('configFilesCommand', () => {
     const cmd = configFilesCommand('apache');
     expect(cmd).toContain('sudo -n sh -c');
     expect(cmd).toMatch(/apache|httpd/);
+  });
+  it('uses printf, not echo, for its per-file @@ marker', () => {
+    const cmd = configFilesCommand('nginx');
+    expect(cmd).toContain('printf');
+    expect(cmd).toContain('"@@$f"');
+    expect(cmd).not.toMatch(/echo "@@/);
   });
   it('rejects a kind other than nginx/apache', () => {
     expect(() => configFilesCommand('haproxy' as any)).toThrow();
@@ -176,6 +223,15 @@ describe('readFileCommand', () => {
     const withoutEscapedSpan = cmd.split(shellSingle(evil)).join('');
     expect(withoutEscapedSpan).not.toMatch(/;\s*rm -rf \//);
   });
+  it('adds a -- terminator so a path cannot be read as a sed flag (argument injection)', () => {
+    // Without `--`, GNU sed happily parses a leading-`-` operand as a flag:
+    // `-e '1w/etc/passwd'` would open (and truncate) /etc/passwd at
+    // script-compile time, before any input is read. Quoting alone does
+    // NOT defend against this -- a quoted flag is still a flag.
+    const cmd = readFileCommand('--expression=1w/etc/passwd', 100);
+    expect(cmd).toBe(`sudo -n sed -n '1,100p' -- '--expression=1w/etc/passwd'`);
+    expect(cmd).toMatch(/ -- '--expression=1w\/etc\/passwd'$/);
+  });
 });
 
 describe('servicesCommand', () => {
@@ -186,6 +242,12 @@ describe('servicesCommand', () => {
     expect(cmd).toMatch(/systemctl list-units/);
     expect(cmd).toMatch(/systemctl list-unit-files/);
   });
+  it('uses printf, not echo, for its @@ markers', () => {
+    const cmd = servicesCommand();
+    expect(cmd).not.toMatch(/echo "@@/);
+    expect(cmd).toContain(`printf '%s\\n' '@@units'`);
+    expect(cmd).toContain(`printf '%s\\n' '@@files'`);
+  });
 });
 
 describe('detectWebServerCommand', () => {
@@ -195,5 +257,10 @@ describe('detectWebServerCommand', () => {
     expect(cmd).toMatch(/@@apache/);
     expect(cmd).toMatch(/@@active/);
     expect(cmd).toMatch(/@@ports/);
+  });
+  it('uses printf, not echo, for its @@ markers', () => {
+    const cmd = detectWebServerCommand();
+    expect(cmd).not.toMatch(/echo "@@/);
+    expect(cmd).toContain(`printf '%s\\n' '@@nginx'`);
   });
 });
