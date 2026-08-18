@@ -1,4 +1,4 @@
-import { privilegedConfig, hasRootLane, privilegedIdentity } from '../index';
+import { privilegedConfig, hasRootLane, privilegedIdentity, privilegedConnectionIsSeparate } from '../index';
 
 test('prefers root credentials when both are present', () => {
   const out = privilegedConfig({
@@ -210,5 +210,64 @@ describe('privilegedIdentity', () => {
     };
     const sessionIdentity = privilegedIdentity({ host: 'bastion', username: 'u', password: 'p', hop: { host: 'target', username: 'tu', password: 'tp' } });
     expect(privilegedIdentity(config)).not.toBe(sessionIdentity);
+  });
+});
+
+// The guard that decides whether disposePrivileged() is allowed to end the
+// privileged connection's pooled entry -- ending it when it is really the
+// SAME pool entry as the session's own SFTP connection would kill the
+// user's live transfer. hasRootLane("does this config carry root
+// credentials") looks like the right question but is not: before hashOption
+// (core/remoteFs.ts) was made structure-aware, a hop profile with root
+// credentials on the target hashed IDENTICALLY to the session's own config
+// (every hop object stringified to the literal "[object Object]" under the
+// old value-only join), so hasRootLane reported true for a config that was
+// actually sharing the session's pool entry. privilegedConnectionIsSeparate
+// answers by comparing the real pool keys instead, so it stays correct
+// regardless of what hashOption's own bug or fix was.
+describe('privilegedConnectionIsSeparate (the pool-key guard for teardown)', () => {
+  test('false (shared) for a flat config with no root credentials', () => {
+    expect(privilegedConnectionIsSeparate({ host: 'h', username: 'u', password: 'p' })).toBe(false);
+  });
+
+  test('true (separate) for a flat config with root credentials', () => {
+    expect(
+      privilegedConnectionIsSeparate({ host: 'h', username: 'u', password: 'p', root_user: 'root', root_password: 'r' })
+    ).toBe(true);
+  });
+
+  test('false (shared) for a hop profile with no root credentials', () => {
+    const config = {
+      protocol: 'sftp', host: 'bastion', username: 'jump', privateKeyPath: '/k',
+      hop: { host: 'target', username: 'app', password: 'p' },
+    };
+    expect(privilegedConnectionIsSeparate(config)).toBe(false);
+  });
+
+  test('true (separate) for a hop profile with root credentials on the target -- the exact case the review found broken', () => {
+    const config = {
+      protocol: 'sftp', host: 'bastion', username: 'jump', privateKeyPath: '/k',
+      hop: { host: 'target', username: 'app', password: 'p', root_user: 'root', root_password: 'r' },
+    };
+    expect(privilegedConnectionIsSeparate(config)).toBe(true);
+  });
+
+  test('true (separate) for a multi-hop profile with root credentials on the innermost hop', () => {
+    const config = {
+      host: 'hopA', username: 'a',
+      hop: [
+        { host: 'hopB', username: 'b' },
+        { host: 'target', username: 'app', password: 'p', root_user: 'root', root_password: 'r' },
+      ],
+    };
+    expect(privilegedConnectionIsSeparate(config)).toBe(true);
+  });
+
+  test('false (shared) for a multi-hop profile with no root credentials anywhere', () => {
+    const config = {
+      host: 'hopA', username: 'a',
+      hop: [{ host: 'hopB', username: 'b' }, { host: 'target', username: 'app', password: 'p' }],
+    };
+    expect(privilegedConnectionIsSeparate(config)).toBe(false);
   });
 });

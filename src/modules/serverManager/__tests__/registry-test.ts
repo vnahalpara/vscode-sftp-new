@@ -129,12 +129,26 @@ describe('redactProfile', () => {
     expect(json).not.toContain('target-root-secret');
   });
 
-  it('ignores top-level root credentials on a hop profile for privilegedAs', () => {
+  it('ignores top-level root credentials on a hop profile, and falls back to the HOP\'s own username, not the bastion\'s', () => {
+    // Without root credentials the privileged lane authenticates as
+    // whatever privilegedConfig leaves target() as -- the hop's own
+    // username, since privilegedConfig returns the hop unchanged in this
+    // case. It never falls back to the bastion's (top-level) username: that
+    // account exists on a different machine and never runs the command.
     const hopConfig = {
       ...CONFIG,
       username: 'bastionUser',
       root_user: 'root',
       hop: { host: 'target', username: 'targetUser', password: 'p' },
+    };
+    expect(redactProfile('/ws', hopConfig).privilegedAs).toBe('targetUser');
+  });
+
+  it('falls back to config.username only when the hop itself has no username (degenerate profile)', () => {
+    const hopConfig = {
+      ...CONFIG,
+      username: 'bastionUser',
+      hop: { host: 'target', password: 'p' },
     };
     expect(redactProfile('/ws', hopConfig).privilegedAs).toBe('bastionUser');
   });

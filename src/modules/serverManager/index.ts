@@ -5,7 +5,7 @@ import { spawn } from 'child_process';
 import * as vscode from 'vscode';
 import logger from '../../logger';
 import { getHostInfo } from '../../core/fileService';
-import { removeRemoteFs } from '../../core/remoteFs';
+import { removeRemoteFs, hashOption } from '../../core/remoteFs';
 import { Collector, MonitorTransport } from '../monitor/collector';
 import { sshTransport, readFacts } from '../monitor/transport';
 import { HostFacts } from '../monitor/types';
@@ -41,12 +41,14 @@ export function init(extensionPath: string): void {
 }
 
 // True when this profile's destination option (see targetOption) carries
-// root credentials distinct from the session's own -- i.e. privilegedConfig
-// below will actually build a second, separately-pooled connection rather
-// than a value-identical copy that shares the session's pooled entry.
-// Exported so index.ts's own session bookkeeping can decide whether tearing
-// the privileged lane down on dispose is safe (a distinct connection) or
-// would kill the user's live SFTP connection (a shared one).
+// root credentials at all. NOT used to decide whether the privileged
+// connection is safe to tear down independently -- that question is
+// answered by comparing actual pool keys (privilegedConnectionIsSeparate,
+// below), because credential presence and pool-key distinctness used to be
+// two different questions with two different answers on a hop profile (see
+// privilegedConnectionIsSeparate's comment). Exported as a general
+// "does this profile even have a root lane" predicate for callers (and
+// tests) that only need that, not the pool-identity question.
 export function hasRootLane(config: any): boolean {
   return hasRootCreds(targetOption(config));
 }
@@ -97,6 +99,24 @@ export function privilegedConfig(config: any): any {
   return Object.assign({}, config, { hop: swapped });
 }
 
+// Whether privilegedConfig(config) actually produces a SEPARATE pooled
+// connection from the session's own -- answered the only way that is
+// correct by construction: comparing the exact pool keys both configs hash
+// to (hashOption, in core/remoteFs.ts), the same key createRemoteIfNoneExist
+// and removeRemoteFs use. hasRootLane(config) ("does this config carry root
+// credentials") looks like the same question but is not: before hashOption
+// was made structure-aware, a hop profile with root credentials on the
+// target hashed IDENTICALLY to the session's own config (every hop object
+// stringified to the literal "[object Object]"), so hasRootLane reported
+// true while the two configs actually shared one pooled connection --
+// tearing that "separate" connection down on dispose would have ended the
+// user's live SFTP connection instead. Deciding by key equality stays
+// correct even if hashOption's implementation changes again, which
+// hasRootLane's credential-presence check never could.
+export function privilegedConnectionIsSeparate(config: any): boolean {
+  return hashOption(getHostInfo(privilegedConfig(config))) !== hashOption(getHostInfo(config));
+}
+
 // A cheap fingerprint of "which account will privileged commands run as".
 // ensureSession() compares this against the identity a cached session was
 // built with, so editing root_user/root_password in sftp.json (adding,
@@ -105,16 +125,29 @@ export function privilegedConfig(config: any): any {
 // connection open -- until VS Code restarts.
 export function privilegedIdentity(config: any): string {
   const target = targetOption(config);
-  return hasRootCreds(target) ? `root:${target.root_user}:${target.root_password}` : 'session';
+  if (!hasRootCreds(target)) {
+    return 'session';
+  }
+  // Hashed, not plaintext: this string lives on a long-lived
+  // SessionRegistryEntry (in memory for as long as the dashboard stays
+  // open), and the raw root password has no business surviving in a second
+  // place beyond the closures that actually need it to authenticate. Same
+  // approach as profileId (registry.ts) next door.
+  const fingerprint = crypto
+    .createHash('sha1')
+    .update([target.root_user, target.root_password].join('\u0000'))
+    .digest('hex')
+    .slice(0, 16);
+  return `root:${fingerprint}`;
 }
 
 export interface SessionRegistryEntry {
   session: ManagedSession;
   privilegedIdentity: string;
   // Ends the privileged SSH lane's pooled connection, or does nothing when
-  // that lane is value-identical to (and therefore sharing a pooled
-  // connection with) the session's own transport -- see hasRootLane. Ending
-  // a shared connection here would kill the user's live SFTP connection, not
+  // that lane hashes to (and therefore shares a pooled connection with) the
+  // session's own transport -- see privilegedConnectionIsSeparate. Ending a
+  // shared connection here would kill the user's live SFTP connection, not
   // just the privileged lane.
   disposePrivileged: () => void;
 }
@@ -129,14 +162,34 @@ export function createSessionRegistry() {
   const byToken = new Map<string, SessionRegistryEntry>();
   const byProfile = new Map<string, string>();
 
+  // Both calls are caught individually, and the entry is always forgotten in
+  // a finally: a throw from session.dispose() must not skip
+  // disposePrivileged() (a root SSH connection left open because the
+  // session's own teardown failed is exactly the leak this exists to
+  // close), and neither throw may skip byToken.delete(token) or escape out
+  // of disposeToken -- this runs synchronously inside registry.get() on the
+  // request path (a stale session's identity no longer matching), where an
+  // uncaught throw would surface as a 500 on an unrelated command instead of
+  // the cleanup failure it actually is.
+  function disposeSafely(label: string, fn: () => void): void {
+    try {
+      fn();
+    } catch (error) {
+      logger.error(`${label} failed during session disposal: ${(error as Error).message}`, 'serverManager');
+    }
+  }
+
   function disposeToken(token: string): void {
     const entry = byToken.get(token);
     if (!entry) {
       return;
     }
-    entry.session.dispose();
-    entry.disposePrivileged();
-    byToken.delete(token);
+    try {
+      disposeSafely('session.dispose()', () => entry.session.dispose());
+      disposeSafely('disposePrivileged()', () => entry.disposePrivileged());
+    } finally {
+      byToken.delete(token);
+    }
   }
 
   return {
@@ -303,11 +356,10 @@ export async function ensureSession(fileService: any, config: any): Promise<stri
     logger.info(`${entry.label}: ${entry.command} -> ${entry.code}`, 'serverManager');
 
   // Only end the privileged lane's pooled connection when it is genuinely
-  // its own -- when there are no root credentials, privilegedConfig(config)
-  // returned a value-identical copy that hashes to (and shares) the same
-  // fsTable entry as the session's own transport, and ending that would cut
-  // the user's live SFTP connection out from under them.
-  const disposePrivileged = hasRootLane(config)
+  // its own -- see privilegedConnectionIsSeparate. When it shares the
+  // session's own pooled fsTable entry, ending it would cut the user's live
+  // SFTP connection out from under them.
+  const disposePrivileged = privilegedConnectionIsSeparate(config)
     ? () => removeRemoteFs(getHostInfo(privilegedConfig(config)))
     : () => undefined;
   registry.set(id, token, { session, privilegedIdentity: identity, disposePrivileged });

@@ -57,8 +57,14 @@ export function redactProfile(workspace: string, config: any): RedactedProfile {
     // actually run as. Never the password itself -- this object is the
     // RedactedProfile, serialised straight to the browser -- just the name of
     // the lane so the UI (and the sudo hint) can tell the user who to grant
-    // sudo to.
-    privilegedAs: hasRootCreds(target) ? target.root_user : config.username || '',
+    // sudo to. The fallback (no root credentials) is target.username, NOT
+    // config.username: on a hop profile without root credentials the
+    // privileged lane still authenticates as the HOP's own username (see
+    // privilegedConfig -- it returns a value-identical copy of target()
+    // unchanged), which is the destination server's user, not the bastion's.
+    // config.username is only the right fallback when there is no hop, i.e.
+    // when target === config, so it stays as the second fallback.
+    privilegedAs: hasRootCreds(target) ? target.root_user : target.username || config.username || '',
     protocol: config.protocol || 'sftp',
     remotePath: config.remotePath || '/',
     workspace,

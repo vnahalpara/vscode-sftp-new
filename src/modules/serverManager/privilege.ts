@@ -19,7 +19,15 @@ export function targetOption(config: any): any {
   if (Array.isArray(hop) && hop.length > 0) {
     return hop[hop.length - 1];
   }
-  if (hop && typeof hop === 'object' && Object.keys(hop).length > 0) {
+  // No `typeof hop === 'object'` guard, deliberately: sshClient.ts's own
+  // check is the bare `hop && Object.keys(hop).length > 0`, so a malformed
+  // `hop: "somehost"` (a string) IS a configured hop there too -- Object.keys
+  // on a non-empty string returns its character indices, so this branch
+  // matches. Adding a stricter guard here would make this function disagree
+  // with the client it exists to mirror, for a case where downstream
+  // (hasRootCreds/privilegedConfig) already fails closed: a string has no
+  // .root_user/.root_password, so hasRootCreds(hop) is false regardless.
+  if (hop && Object.keys(hop).length > 0) {
     return hop;
   }
   return config;

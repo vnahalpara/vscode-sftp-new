@@ -106,21 +106,79 @@ describe('createSessionRegistry', () => {
       expect(registry.get('profile-1', 'session')).toBeUndefined();
     });
 
-    it('never calls disposePrivileged for a session whose caller marked it as sharing the pooled connection', () => {
-      // This is the guard itself: index.ts only ever installs a real
-      // (non-noop) disposePrivileged when hasRootLane(config) is true. The
-      // registry does not know or care which -- it always calls whatever
-      // function it was handed -- so this test pins that a no-op
-      // disposePrivileged (the no-root-credentials case) is safe to call
-      // unconditionally: it must do nothing observable.
-      const registry = createSessionRegistry();
-      const noopDisposePrivileged = jest.fn(() => undefined);
-      registry.set('profile-1', 'tok-1', entry({ disposePrivileged: noopDisposePrivileged }));
+    // Whether a given disposePrivileged is a real teardown or a no-op
+    // standing in for the shared-connection case is decided entirely by the
+    // CALLER (index.ts's privilegedConnectionIsSeparate -- see
+    // privileged-lane-test.ts for that decision's own coverage, including
+    // the hop/pool-key scenario that made a credential-presence check the
+    // wrong test). The registry itself does not know or care which kind it
+    // was handed; it always calls it exactly once. A no-op function is
+    // "safe to call" *because* it is a no-op, not because the registry
+    // treats it specially -- there is nothing here for the registry layer
+    // to assert beyond "it gets called", which the disposeAll tests above
+    // already establish for every disposePrivileged, no-op or not.
 
-      registry.disposeAll();
+    describe('resilience to a throwing session.dispose() or disposePrivileged() (a leaked root SSH connection must not survive either failing)', () => {
+      it('still calls disposePrivileged and forgets the token when session.dispose() throws', () => {
+        const registry = createSessionRegistry();
+        const disposePrivileged = jest.fn();
+        const e = entry({
+          session: { dispose: jest.fn(() => { throw new Error('dispose blew up'); }) } as any,
+          disposePrivileged,
+        });
+        registry.set('profile-1', 'tok-1', e);
 
-      expect(noopDisposePrivileged).toHaveBeenCalledTimes(1);
-      expect(noopDisposePrivileged).toHaveReturnedWith(undefined);
+        expect(() => registry.disposeAll()).not.toThrow();
+
+        expect(disposePrivileged).toHaveBeenCalledTimes(1);
+        expect(registry.lookupSession('tok-1')).toBeUndefined();
+      });
+
+      it('still calls session.dispose() and forgets the token when disposePrivileged() throws', () => {
+        const registry = createSessionRegistry();
+        const e = entry({
+          disposePrivileged: jest.fn(() => { throw new Error('removeRemoteFs blew up'); }),
+        });
+        registry.set('profile-1', 'tok-1', e);
+
+        expect(() => registry.disposeAll()).not.toThrow();
+
+        expect(e.session.dispose).toHaveBeenCalledTimes(1);
+        expect(registry.lookupSession('tok-1')).toBeUndefined();
+      });
+
+      it('does not let one entry throwing stop later entries from being disposed', () => {
+        const registry = createSessionRegistry();
+        const broken = entry({
+          session: { dispose: jest.fn(() => { throw new Error('boom'); }) } as any,
+        });
+        const healthy = entry();
+        registry.set('profile-1', 'tok-1', broken);
+        registry.set('profile-2', 'tok-2', healthy);
+
+        registry.disposeAll();
+
+        expect(healthy.session.dispose).toHaveBeenCalledTimes(1);
+        expect(healthy.disposePrivileged).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not let a throw during eviction (identity mismatch) escape to the caller', () => {
+        const registry = createSessionRegistry();
+        registry.set(
+          'profile-1',
+          'tok-1',
+          entry({
+            privilegedIdentity: 'session',
+            disposePrivileged: jest.fn(() => { throw new Error('removeRemoteFs blew up'); }),
+          })
+        );
+
+        // This runs on the request path (ensureSession -> registry.get()) --
+        // a cleanup failure here must not surface as an uncaught exception
+        // on an unrelated command.
+        expect(() => registry.get('profile-1', 'root:abc123')).not.toThrow();
+        expect(registry.lookupSession('tok-1')).toBeUndefined();
+      });
     });
   });
 });

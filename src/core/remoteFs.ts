@@ -11,10 +11,46 @@ import {
 } from './fs';
 import localFs from './localFs';
 
-function hashOption(opiton) {
-  return Object.keys(opiton)
-    .map(key => opiton[key])
-    .join('');
+// A NUL separator between every key and value, and between every entry --
+// the same defence profileId (registry.ts) uses for exactly the same reason,
+// documented there: "{name:'a',host:'b'}" must not hash the same as
+// "{name:'ab',host:''}". A bare value-only join has a second, worse failure
+// mode this function used to have: two DIFFERENT nested objects (e.g. two
+// hop configs with different target hosts) both stringify to the literal
+// text "[object Object]" under Array.prototype.join, so they hashed
+// IDENTICALLY regardless of their contents -- silently sharing one pooled
+// connection between two configs that should never share one. Recursing
+// into plain objects and arrays (with object keys sorted, so key order
+// never affects the hash) and including key names fixes both.
+//
+// fsTable is in-memory only and its keys are never persisted anywhere, so
+// there is no migration/compatibility concern in changing this -- the only
+// behavioural change is that configs which previously (incorrectly)
+// collided now correctly get their own connections.
+const HASH_SEP = '\u0000';
+
+function canonicalize(value: any): string {
+  if (value === null || value === undefined) {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return '[' + value.map(canonicalize).join(HASH_SEP) + ']';
+  }
+  if (typeof value === 'object') {
+    return (
+      '{' +
+      Object.keys(value)
+        .sort()
+        .map(key => key + HASH_SEP + canonicalize(value[key]))
+        .join(HASH_SEP) +
+      '}'
+    );
+  }
+  return String(value);
+}
+
+export function hashOption(option: any): string {
+  return canonicalize(option);
 }
 
 class KeepAliveRemoteFs {
