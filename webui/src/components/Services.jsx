@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost } from '../api.js';
 import { Badge, Card, Empty } from './ui.jsx';
 
@@ -48,6 +48,13 @@ function matchesFilter(row, needle) {
 // misclick landing on 'restart' for a database unit is exactly the failure
 // this dialog exists to prevent, so there is no fast path that skips it.
 function ConfirmDialog({ unit, action, onCancel, onConfirm }) {
+  // Guards against a double-click (or a fast repeat Enter) dispatching the
+  // action twice before the parent has a chance to close this dialog — the
+  // table row's own buttons already disable once busy, but that disabling
+  // only takes effect on the next render, which is not necessarily before a
+  // second click event on this same dialog is processed.
+  const [submitting, setSubmitting] = useState(false);
+
   useEffect(() => {
     const onKey = e => {
       if (e.key === 'Escape') {
@@ -57,6 +64,14 @@ function ConfirmDialog({ unit, action, onCancel, onConfirm }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onCancel]);
+
+  function handleConfirm() {
+    if (submitting) {
+      return;
+    }
+    setSubmitting(true);
+    onConfirm();
+  }
 
   return (
     <div
@@ -88,8 +103,13 @@ function ConfirmDialog({ unit, action, onCancel, onConfirm }) {
           <button className="btn" onClick={onCancel}>
             Cancel
           </button>
-          <button className={action === 'stop' ? 'btn danger' : 'btn primary'} onClick={onConfirm} autoFocus>
-            {action} {unit}
+          <button
+            className={action === 'stop' ? 'btn danger' : 'btn primary'}
+            onClick={handleConfirm}
+            disabled={submitting}
+            autoFocus
+          >
+            {submitting ? `${action}…` : `${action} ${unit}`}
           </button>
         </div>
       </div>
@@ -142,19 +162,48 @@ export default function Services() {
   const [loadError, setLoadError] = useState(null);
   const [filter, setFilter] = useState('');
   const [confirm, setConfirm] = useState(null); // { unit, action }
-  const [busyUnit, setBusyUnit] = useState('');
+  // A set, not a single string: two different rows can each have their own
+  // action in flight at once (start row A, then — while A is still
+  // running — confirm an action on row B). A single `busyUnit` string was
+  // last-write-wins, so starting B silently re-enabled A's buttons and
+  // cleared its disabled styling while A's systemctl call was still
+  // running, which is exactly the double-fire-on-a-live-host risk the
+  // confirmation dialog exists to prevent. Membership, not equality, is the
+  // busy check now.
+  const [busyUnits, setBusyUnits] = useState(() => new Set());
   const [results, setResults] = useState({}); // unit -> { pending, ok, output, action }
+
+  // Guards every post-await setState below: switching away from this tab
+  // while a load or an action is in flight would otherwise call setState on
+  // an unmounted component (a console warning, not a correctness bug, since
+  // every update here is already keyed by unit / is a fresh fetch — but
+  // there's no reason to let it happen).
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
     try {
       const res = await apiGet('/api/services');
+      if (!mountedRef.current) {
+        return;
+      }
       setServices((res && res.services) || []);
     } catch (err) {
+      if (!mountedRef.current) {
+        return;
+      }
       setLoadError(err.message);
     } finally {
-      setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -164,7 +213,11 @@ export default function Services() {
 
   async function runAction(unit, action) {
     setConfirm(null);
-    setBusyUnit(unit);
+    setBusyUnits(prev => {
+      const next = new Set(prev);
+      next.add(unit);
+      return next;
+    });
     setResults(prev => ({ ...prev, [unit]: { pending: true, action } }));
     try {
       // routes.ts's POST /api/services/:unit/:action returns HTTP 200 with
@@ -172,17 +225,32 @@ export default function Services() {
       // text (often the sudoHint) is data to render here, never an HTTP
       // error, so this never needs a catch for the "action failed" case.
       const res = await apiPost(`/api/services/${encodeURIComponent(unit)}/${action}`);
+      if (!mountedRef.current) {
+        return;
+      }
       const ok = Boolean(res && res.ok);
       setResults(prev => ({ ...prev, [unit]: { ok, output: (res && res.output) || '', action } }));
       if (ok) {
         await load();
       }
     } catch (err) {
+      if (!mountedRef.current) {
+        return;
+      }
       // A thrown error here means the request itself failed (session gone,
       // network drop) — still rendered inline, same as a { ok: false } result.
       setResults(prev => ({ ...prev, [unit]: { ok: false, output: err.message, action } }));
     } finally {
-      setBusyUnit('');
+      if (mountedRef.current) {
+        setBusyUnits(prev => {
+          if (!prev.has(unit)) {
+            return prev;
+          }
+          const next = new Set(prev);
+          next.delete(unit);
+          return next;
+        });
+      }
     }
   }
 
@@ -254,7 +322,7 @@ export default function Services() {
           </thead>
           <tbody>
             {rows.map(row => {
-              const busy = busyUnit === row.unit;
+              const busy = busyUnits.has(row.unit);
               return (
                 <React.Fragment key={row.unit}>
                   <tr style={busy ? { opacity: 0.55 } : undefined}>
