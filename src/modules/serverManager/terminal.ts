@@ -4,6 +4,27 @@
 // carved out of the input stream. All of the security decisions (is this
 // caller allowed to open a socket at all) already happened in wsServer.ts's
 // checkUpgrade before bridgeTerminal is ever called.
+//
+// THE WIRE PROTOCOL, and the one rule a client must not get wrong:
+//
+//   server -> client   Always terminal output, always raw bytes. Never
+//                      parsed, never interpreted, never control.
+//
+//   client -> server   BINARY frames are terminal input, byte for byte,
+//                      always. TEXT frames are control, currently only
+//                      {"type":"resize","cols":N,"rows":N}.
+//
+// So a client MUST send every keystroke and every paste as a BINARY frame,
+// and reserve text frames for control messages. This is not a stylistic
+// preference. Data and control share one channel in the client->server
+// direction, and a text frame is disambiguated only by whether it parses as
+// a control message -- so a user who pastes
+// `{"type":"resize","cols":80,"rows":24}` into a shell over a TEXT frame
+// silently resizes their PTY and never sees the characters arrive, and one
+// who pastes `{"type":"resize"}` watches it vanish with no feedback at all.
+// Sending input as binary makes that impossible by construction: the
+// !isBinary check below means binary input is never even offered to the
+// control parser.
 
 export interface TerminalSize {
   cols: number;
@@ -24,6 +45,11 @@ export interface ShellStream {
   // not release the channel -- see releaseStream below for why that matters.
   close(): void;
   setWindow(rows: number, cols: number, height: number, width: number): void;
+  // Flow control. Pausing an ssh2 channel stops it re-opening its SSH window,
+  // which is what makes the REMOTE end stop sending -- see the send path in
+  // bridgeTerminal for why that matters.
+  pause(): void;
+  resume(): void;
 }
 
 // The structural subset of a `ws` WebSocket this bridge drives -- declared
@@ -33,7 +59,13 @@ export interface WsLike {
   on(event: 'message', cb: (data: Buffer | string, isBinary: boolean) => void): void;
   on(event: 'close', cb: () => void): void;
   on(event: 'error', cb: (err: Error) => void): void;
-  send(data: string | Buffer): void;
+  // The callback fires once `ws` has handed the frame to the socket (or
+  // failed to), which is how this bridge learns that its send buffer has
+  // drained without polling for it.
+  send(data: string | Buffer, cb?: (err?: Error) => void): void;
+  // Bytes queued in `ws` but not yet written to the socket. This is the
+  // number that grows without bound if nothing throttles the producer.
+  readonly bufferedAmount: number;
   close(code?: number, reason?: string): void;
   // The ungraceful exit: destroys the underlying socket outright. Needed
   // because close() can leave a socket in CLOSING forever -- see teardown().
@@ -86,6 +118,21 @@ function truncateReason(reason: string): string {
   }
   return out;
 }
+
+// How much output may sit unsent in `ws`'s buffer before the remote shell is
+// told to stop talking, and how far it must drain before it is let go again.
+// Two marks rather than one so a busy terminal does not pause and resume on
+// every frame.
+//
+// Without this the bridge is an unbounded pipe from the remote host into the
+// extension host's heap: ssh2 re-opens its flow-control window as fast as a
+// synchronous 'data' handler drains it, so `cat /dev/urandom` with a
+// backgrounded (and therefore throttled) browser tab piles up tens of MB per
+// second in this process until it dies -- taking every other extension, and
+// the user's unsaved work, with it. A megabyte of pending output is far more
+// than any interactive session needs, and is bounded.
+const SEND_HIGH_WATER = 1024 * 1024;
+const SEND_LOW_WATER = 256 * 1024;
 
 const MIN_DIM = 1;
 const MAX_DIM = 1000;
@@ -255,12 +302,40 @@ export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
       }
       inputQueue.splice(0).forEach(chunk => openedStream.write(chunk));
 
+      // Output is forwarded with backpressure. The browser is the slow end
+      // here -- a throttled background tab reads at a trickle while the
+      // remote shell can produce megabytes a second -- and `ws` buffers
+      // whatever it cannot write, in this process's heap. Pausing the ssh2
+      // channel stops it re-opening its SSH window, which is what actually
+      // makes the remote host stop sending rather than just moving the
+      // backlog around.
+      let paused = false;
       openedStream.on('data', chunk => {
         try {
-          socket.send(chunk);
+          socket.send(chunk, () => {
+            // Fired once `ws` has written the frame (or failed to). Let the
+            // shell talk again once the backlog has genuinely drained.
+            if (paused && !torndown && socket.bufferedAmount <= SEND_LOW_WATER) {
+              paused = false;
+              try {
+                openedStream.resume();
+              } catch (error) {
+                // A dead channel cannot be resumed, and does not need to be.
+              }
+            }
+          });
         } catch (error) {
           // The socket closed a moment before this chunk arrived; teardown()
           // below (via the stream's own close/error) reaps the rest.
+        }
+        if (!paused && socket.bufferedAmount > SEND_HIGH_WATER) {
+          paused = true;
+          try {
+            openedStream.pause();
+          } catch (error) {
+            // Nothing to fall back to: without pause() this is an unbounded
+            // buffer, but a throw here means the channel is already gone.
+          }
         }
       });
       // The shell exiting (the user typed `exit`, or the remote host closed

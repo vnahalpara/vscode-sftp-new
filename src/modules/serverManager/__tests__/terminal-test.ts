@@ -21,9 +21,21 @@ class FakeSocket extends FakeEmitter implements WsLike {
   terminated = false;
   closeCode: number | undefined;
   closeReason: string | undefined;
+  // Stands in for `ws`'s own send buffer. Tests that care about
+  // backpressure set this directly and then call drain() to play back the
+  // send callbacks, the way `ws` does once the socket accepts the bytes.
+  bufferedAmount = 0;
+  private _pending: Array<(err?: Error) => void> = [];
 
-  send(data: string | Buffer): void {
+  send(data: string | Buffer, cb?: (err?: Error) => void): void {
     this.sent.push(data);
+    if (cb) {
+      this._pending.push(cb);
+    }
+  }
+  drain(): void {
+    const pending = this._pending.splice(0);
+    pending.forEach(cb => cb());
   }
   close(code?: number, reason?: string): void {
     this.closed = true;
@@ -39,6 +51,9 @@ class FakeStream extends FakeEmitter implements ShellStream {
   written: Array<string | Buffer> = [];
   ended = false;
   closed = false;
+  paused = false;
+  pauses = 0;
+  resumes = 0;
   windows: Array<{ rows: number; cols: number }> = [];
 
   write(data: string | Buffer): void {
@@ -49,6 +64,14 @@ class FakeStream extends FakeEmitter implements ShellStream {
   }
   close(): void {
     this.closed = true;
+  }
+  pause(): void {
+    this.paused = true;
+    this.pauses++;
+  }
+  resume(): void {
+    this.paused = false;
+    this.resumes++;
   }
   setWindow(rows: number, cols: number): void {
     this.windows.push({ rows, cols });
@@ -303,6 +326,121 @@ test('double teardown (socket close then stream close) does not throw', async ()
 
   expect(stream.ended).toBe(true);
   expect(socket.closed).toBe(true);
+});
+
+// A BINARY frame is terminal input, byte for byte, whatever it happens to
+// contain -- that is what lets a client paste text that looks exactly like a
+// control message without it being swallowed.
+test('a binary frame is written as input even when it is verbatim control JSON', async () => {
+  const stream = new FakeStream();
+  const socket = new FakeSocket();
+  bridgeTerminal(deps(Promise.resolve(stream)), socket);
+  await flush();
+
+  const payload = Buffer.from(JSON.stringify({ type: 'resize', cols: 120, rows: 40 }));
+  socket.emit('message', payload, true);
+
+  expect(stream.written).toEqual([payload]);
+  expect(stream.windows).toEqual([]);
+});
+
+// The protocol is control in ONE direction only. Output from the remote
+// shell is raw bytes and must never be run through the control parser --
+// otherwise a remote host could resize the user's terminal, and any program
+// printing this JSON would have its output eaten.
+test('terminal OUTPUT that looks like a control frame is forwarded, never interpreted', async () => {
+  const stream = new FakeStream();
+  const socket = new FakeSocket();
+  bridgeTerminal(deps(Promise.resolve(stream)), socket);
+  await flush();
+
+  const payload = Buffer.from(JSON.stringify({ type: 'resize', cols: 10, rows: 10 }));
+  stream.emit('data', payload);
+
+  expect(socket.sent).toEqual([payload]);
+  expect(stream.windows).toEqual([]);
+});
+
+describe('backpressure', () => {
+  // ssh2 re-opens its flow-control window as fast as a synchronous 'data'
+  // handler drains it, so an unthrottled bridge accumulates output in the
+  // extension host's heap at whatever rate the remote can produce it --
+  // `cat /dev/urandom` into a backgrounded browser tab is an OOM that takes
+  // every other extension down with it.
+  test('pauses the shell when the socket buffer passes the high-water mark', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    bridgeTerminal(deps(Promise.resolve(stream)), socket);
+    await flush();
+
+    socket.bufferedAmount = 4 * 1024 * 1024;
+    stream.emit('data', Buffer.from('flood'));
+
+    expect(stream.paused).toBe(true);
+    expect(stream.pauses).toBe(1);
+  });
+
+  test('does not pause an ordinary interactive session', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    bridgeTerminal(deps(Promise.resolve(stream)), socket);
+    await flush();
+
+    socket.bufferedAmount = 512;
+    stream.emit('data', Buffer.from('$ '));
+    socket.drain();
+
+    expect(stream.pauses).toBe(0);
+    expect(stream.resumes).toBe(0);
+  });
+
+  test('resumes the shell once the socket buffer has drained', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    bridgeTerminal(deps(Promise.resolve(stream)), socket);
+    await flush();
+
+    socket.bufferedAmount = 4 * 1024 * 1024;
+    stream.emit('data', Buffer.from('flood'));
+    expect(stream.paused).toBe(true);
+
+    socket.bufferedAmount = 0;
+    socket.drain();
+
+    expect(stream.paused).toBe(false);
+    expect(stream.resumes).toBe(1);
+  });
+
+  test('stays paused while the buffer is still above the low-water mark', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    bridgeTerminal(deps(Promise.resolve(stream)), socket);
+    await flush();
+
+    socket.bufferedAmount = 4 * 1024 * 1024;
+    stream.emit('data', Buffer.from('flood'));
+
+    socket.bufferedAmount = 900 * 1024;
+    socket.drain();
+
+    expect(stream.paused).toBe(true);
+  });
+
+  test('does not resume a stream after teardown', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    bridgeTerminal(deps(Promise.resolve(stream)), socket);
+    await flush();
+
+    socket.bufferedAmount = 4 * 1024 * 1024;
+    stream.emit('data', Buffer.from('flood'));
+    socket.emit('close');
+
+    socket.bufferedAmount = 0;
+    socket.drain();
+
+    expect(stream.resumes).toBe(0);
+  });
 });
 
 test('terminal bytes queued while the shell is still opening are not lost', async () => {

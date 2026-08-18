@@ -264,8 +264,8 @@ const registry = createSessionRegistry({
 function onTerminal(ws: WebSocket, req: http.IncomingMessage): void {
   const token = tokenFrom(url.parse(req.url || '', true).query, req.headers);
   const session = registry.lookupSession(token);
-  const openShell = session && session.transport.shell;
-  if (!openShell) {
+  const hasShell = session && session.transport.shell;
+  if (!hasShell) {
     // Unreachable in normal operation -- sshTransport always implements
     // shell(), and a valid token always resolves to a session (checkUpgrade
     // already required one to accept the upgrade at all) -- but a session
@@ -274,7 +274,12 @@ function onTerminal(ws: WebSocket, req: http.IncomingMessage): void {
     ws.close();
     return;
   }
-  bridgeTerminal({ openShell }, ws);
+  // Called as a method of the transport, not lifted off it. sshTransport
+  // happens to return an object literal whose shell() never touches `this`,
+  // so an unbound reference works today -- and would break silently the day
+  // a transport is implemented as a class or starts caching a client on
+  // itself.
+  bridgeTerminal({ openShell: opts => session!.transport.shell!(opts) }, ws);
 }
 
 function settings() {
