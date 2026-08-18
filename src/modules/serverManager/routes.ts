@@ -54,11 +54,18 @@ function resolve(deps: RouteDeps, ctx: Ctx): ManagedSession | null {
 // `transport` getter) precisely so this can be built straight from the
 // session routes.ts already has via resolve() — one owner of the exec
 // channel, not a second token-keyed map living alongside index.ts's byToken.
+//
+// exec runs over privilegedTransport, not transport: systemctl/nginx/openssl
+// need sudo, and privilegedTransport is the lane authenticated as root_user
+// when the profile supplies those credentials (session-user otherwise). user
+// is fed profile.privilegedAs to match -- sudoHint must name the account that
+// actually ran the command, or it tells the operator to grant sudo to the
+// wrong one.
 function opsFor(session: ManagedSession): OpsDeps {
   return {
-    exec: cmd => session.transport.exec(cmd),
+    exec: cmd => session.privilegedTransport.exec(cmd),
     activity: session.activity,
-    user: session.profile.username,
+    user: session.profile.privilegedAs,
     host: session.profile.host,
     now: () => Date.now(),
   };

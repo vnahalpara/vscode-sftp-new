@@ -39,6 +39,25 @@ export function init(extensionPath: string): void {
   extensionRoot = extensionPath;
 }
 
+// Both fields are required before switching lanes: a profile carrying only
+// root_user (a common half-finished edit) must not silently produce a
+// connection that tries root with the ordinary user's password, locking the
+// account out on hosts that count failed auths.
+export function privilegedConfig(config: any): any {
+  const next = Object.assign({}, config);
+  if (config.root_user && config.root_password) {
+    next.username = config.root_user;
+    next.password = config.root_password;
+    // Key/agent auth would take precedence over the password we just set and
+    // would authenticate as the WRONG user -- the key belongs to the session
+    // user, not to root.
+    delete next.privateKeyPath;
+    delete next.privateKey;
+    delete next.agent;
+  }
+  return next;
+}
+
 function settings() {
   const cfg = vscode.workspace.getConfiguration('sftp.serverManager');
   return {
@@ -124,12 +143,18 @@ export async function ensureSession(fileService: any, config: any): Promise<stri
 
   const cfg = settings();
   const transport = sshTransport(fileService, config);
+  // Built eagerly but never connects here: sshTransport only calls
+  // getSshClient inside exec()/openSampler(), so this does not open a root
+  // SSH session just because the dashboard was opened -- only the first
+  // privileged command (systemctl, nginx -t, openssl) does that.
+  const privileged = sshTransport(fileService, privilegedConfig(config));
   const token = crypto.randomBytes(32).toString('hex');
   const session = new ManagedSession(
     redactProfile(fileService.workspace, config),
     token,
     {
       transport,
+      privilegedTransport: privileged,
       readFacts: (t: MonitorTransport) => readFacts(t, config.host),
       makeCollector: (t: MonitorTransport, facts: HostFacts) =>
         new Collector(t, {

@@ -9,6 +9,7 @@ const PROFILE: RedactedProfile = {
   host: '10.0.0.5',
   port: 22,
   username: 'deploy',
+  privilegedAs: 'deploy',
   protocol: 'sftp',
   remotePath: '/var/www',
   workspace: '/ws',
@@ -102,6 +103,10 @@ function harness(
 
   const deps: SessionDeps = {
     transport: { openSampler: async () => ({} as any), exec: async () => ({ stdout: '', stderr: '', code: 0 }) },
+    privilegedTransport: {
+      openSampler: async () => ({} as any),
+      exec: async () => ({ stdout: '', stderr: '', code: 0 }),
+    },
     async readFacts() {
       factsCalls++;
       if (overrides.factsError) {
@@ -140,6 +145,29 @@ function harness(
 }
 
 describe('ManagedSession', () => {
+  it('exposes privilegedTransport as its own lane, distinct from transport', () => {
+    const transport = { openSampler: async () => ({} as any), exec: async () => ({ stdout: 'session', stderr: '', code: 0 }) };
+    const privilegedTransport = { openSampler: async () => ({} as any), exec: async () => ({ stdout: 'root', stderr: '', code: 0 }) };
+    const session = new ManagedSession(
+      PROFILE,
+      'tok',
+      {
+        transport,
+        privilegedTransport,
+        readFacts: async () => FACTS,
+        makeCollector: () => new FakeCollector(),
+        schedule: () => 0,
+        cancel: () => undefined,
+        now: () => 1234,
+      },
+      { graceMs: 30000, interval: 2000 }
+    );
+
+    expect(session.transport).toBe(transport);
+    expect(session.privilegedTransport).toBe(privilegedTransport);
+    expect(session.privilegedTransport).not.toBe(session.transport);
+  });
+
   it('starts idle with no collector running', () => {
     const h = harness();
     expect(h.session.state().status).toBe('idle');

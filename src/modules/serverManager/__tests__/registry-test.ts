@@ -70,6 +70,7 @@ describe('redactProfile', () => {
       host: '10.0.0.5',
       port: 2222,
       username: 'deploy',
+      privilegedAs: 'deploy',
       protocol: 'sftp',
       remotePath: '/var/www',
       workspace: '/ws',
@@ -81,6 +82,22 @@ describe('redactProfile', () => {
   it('leaks no secret when serialised', () => {
     const json = JSON.stringify(redactProfile('/ws', CONFIG));
     SECRETS.forEach(secret => expect(json).not.toContain(secret));
+  });
+
+  it('reports privilegedAs as root_user when both root credentials are present, and never leaks root_password', () => {
+    const withRoot = { ...CONFIG, root_user: 'root', root_password: 'root-hunter3' };
+    const redacted = redactProfile('/ws', withRoot);
+
+    expect(redacted.privilegedAs).toBe('root');
+
+    const json = JSON.stringify(redacted);
+    expect(json).not.toContain('root-hunter3');
+    expect(json).not.toContain('root_password');
+  });
+
+  it('falls back to username for privilegedAs when only one root field is present', () => {
+    const halfRoot = { ...CONFIG, root_user: 'root' };
+    expect(redactProfile('/ws', halfRoot).privilegedAs).toBe('deploy');
   });
 
   it('survives a config that grows a new secret field', () => {

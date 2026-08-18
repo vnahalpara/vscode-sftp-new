@@ -22,6 +22,7 @@ export interface CollectorLike {
 
 export interface SessionDeps {
   transport: MonitorTransport;
+  privilegedTransport: MonitorTransport;
   readFacts(transport: MonitorTransport): Promise<HostFacts>;
   makeCollector(transport: MonitorTransport, facts: HostFacts): CollectorLike;
   schedule(fn: () => void, ms: number): any;
@@ -79,6 +80,15 @@ export class ManagedSession {
   // connection instead of two maps that could drift out of sync.
   get transport(): MonitorTransport {
     return this._deps.transport;
+  }
+
+  // Privileged ops (systemctl, nginx -t, openssl) run over this lane, which is
+  // authenticated as root_user when the profile supplies those credentials and
+  // as the ordinary session user otherwise. Metrics keep using `transport` --
+  // reading /proc needs no privilege, and holding a root channel open for the
+  // whole session just to sample CPU would be gratuitous.
+  get privilegedTransport(): MonitorTransport {
+    return this._deps.privilegedTransport;
   }
 
   state(): SessionState {

@@ -6,6 +6,7 @@ export interface RedactedProfile {
   host: string;
   port: number;
   username: string;
+  privilegedAs: string;
   protocol: string;
   remotePath: string;
   workspace: string;
@@ -42,6 +43,12 @@ export function redactProfile(workspace: string, config: any): RedactedProfile {
     host: config.host || '',
     port: config.port || 22,
     username: config.username || '',
+    // Which account privileged commands (systemctl, nginx -t, openssl) will
+    // actually run as. Never the password itself -- this object is the
+    // RedactedProfile, serialised straight to the browser -- just the name of
+    // the lane so the UI (and the sudo hint) can tell the user who to grant
+    // sudo to.
+    privilegedAs: config.root_user && config.root_password ? config.root_user : config.username || '',
     protocol: config.protocol || 'sftp',
     remotePath: config.remotePath || '/',
     workspace,

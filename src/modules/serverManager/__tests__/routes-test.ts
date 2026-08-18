@@ -10,11 +10,13 @@ type ExecFn = (cmd: string) => Promise<{ stdout: string; stderr: string; code: n
 
 const noopExec: ExecFn = async () => ({ stdout: '', stderr: '', code: 0 });
 
-// A fake ManagedSession. `transport` backs routes.ts's opsFor(session) via
-// session.transport.exec(cmd) -- the real accessor added to ManagedSession
-// in session.ts -- so a test's `exec` fake is the thing that proves a route
-// actually reached the session's exec channel, not just that it returned a
-// response.
+// A fake ManagedSession. `privilegedTransport` backs routes.ts's
+// opsFor(session) via session.privilegedTransport.exec(cmd) -- the real
+// accessor added to ManagedSession in session.ts -- so a test's `exec` fake
+// is the thing that proves a route actually reached the session's privileged
+// exec channel, not just that it returned a response. `transport` (the
+// unprivileged metrics lane) is included for parity with the real
+// ManagedSession shape but nothing under routes.ts reads it.
 function fakeSession(overrides: any = {}, token: string = 'tok') {
   const written: string[] = [];
   return {
@@ -22,11 +24,12 @@ function fakeSession(overrides: any = {}, token: string = 'tok') {
     session: {
       id: 'abc',
       token,
-      profile: { id: 'abc', name: 'prod', host: '10.0.0.5', port: 22, username: 'deploy' },
+      profile: { id: 'abc', name: 'prod', host: '10.0.0.5', port: 22, username: 'deploy', privilegedAs: 'deploy' },
       transport: { exec: noopExec },
+      privilegedTransport: { exec: noopExec },
       state: () => ({
         id: 'abc',
-        profile: { id: 'abc', name: 'prod', host: '10.0.0.5', port: 22, username: 'deploy' },
+        profile: { id: 'abc', name: 'prod', host: '10.0.0.5', port: 22, username: 'deploy', privilegedAs: 'deploy' },
         status: 'online',
         error: null,
         facts: { hostname: 'web1', linux: true },
@@ -180,7 +183,7 @@ describe('buildRoutes', () => {
       }
       return { stdout: DETECT_OUTPUT, stderr: '', code: 0 };
     };
-    const { session } = fakeSession({ transport: { exec } }, SECRET_TOKEN);
+    const { session } = fakeSession({ privilegedTransport: { exec } }, SECRET_TOKEN);
     store.set(SECRET_TOKEN, session);
 
     const sessionCtx = fakeCtx(SECRET_TOKEN);
@@ -333,16 +336,16 @@ describe('buildRoutes', () => {
   });
 
   describe('services', () => {
-    it('lists services parsed, merged and sorted, and drives the command through the session transport', async () => {
+    it('lists services parsed, merged and sorted, and drives the command through the session privileged transport', async () => {
       const exec = jest.fn(async (_cmd: string) => ({ stdout: SERVICES_OUTPUT, stderr: '', code: 0 }));
-      const { session } = fakeSession({ transport: { exec } });
+      const { session } = fakeSession({ privilegedTransport: { exec } });
       store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'GET', '/api/services')(ctx);
 
-      // Proves the route actually reached this session's transport, not just
-      // that it produced a 200 -- a fake transport that was never called
+      // Proves the route actually reached this session's privileged transport,
+      // not just that it produced a 200 -- a fake transport that was never called
       // would still let a stub response through.
       expect(exec).toHaveBeenCalledTimes(1);
       expect(exec.mock.calls[0][0]).toContain('systemctl list-units');
@@ -356,7 +359,7 @@ describe('buildRoutes', () => {
 
     it('runs a service action and reports ok with output', async () => {
       const { session } = fakeSession({
-        transport: { exec: async () => ({ stdout: 'Restarting...', stderr: '', code: 0 }) },
+        privilegedTransport: { exec: async () => ({ stdout: 'Restarting...', stderr: '', code: 0 }) },
       });
       store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
@@ -371,7 +374,7 @@ describe('buildRoutes', () => {
 
     it('reports a failed action inline as ok:false rather than a 500', async () => {
       const { session } = fakeSession({
-        transport: { exec: async () => ({ stdout: '', stderr: 'sudo: a password is required', code: 1 }) },
+        privilegedTransport: { exec: async () => ({ stdout: '', stderr: 'sudo: a password is required', code: 1 }) },
       });
       store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
@@ -385,6 +388,27 @@ describe('buildRoutes', () => {
       expect(body.ok).toBe(false);
       expect(body.output).toContain('NOPASSWD');
       expect(body.output).toContain('deploy@10.0.0.5');
+    });
+
+    it('names the root lane in the sudo hint when the profile has root credentials, not the session user', async () => {
+      // A profile with root_user/root_password runs privileged commands as
+      // root, not as the session's own `deploy` user -- so a sudo hint that
+      // still named `deploy` would send the operator to grant sudo to the
+      // wrong account.
+      const { session } = fakeSession({
+        profile: { id: 'abc', name: 'prod', host: '10.0.0.5', port: 22, username: 'deploy', privilegedAs: 'root' },
+        privilegedTransport: { exec: async () => ({ stdout: '', stderr: 'sudo: a password is required', code: 1 }) },
+      });
+      store.set('tok', session);
+      const { ctx, res } = fakeCtx('tok');
+
+      await find(routes, 'POST', '/api/services/:unit/:action')(
+        withParams(ctx, { unit: 'nginx.service', action: 'restart' })
+      );
+
+      const body = JSON.parse(res.body);
+      expect(body.output).toContain('root@10.0.0.5');
+      expect(body.output).not.toContain('deploy@10.0.0.5');
     });
 
     it('rejects an unknown action with 400, not 500', async () => {
@@ -413,7 +437,7 @@ describe('buildRoutes', () => {
 
     it('returns raw status output regardless of exit code', async () => {
       const { session } = fakeSession({
-        transport: {
+        privilegedTransport: {
           exec: async () => ({
             stdout: '● nginx.service - A web server\n   Active: active (running)',
             stderr: '',
@@ -443,7 +467,7 @@ describe('buildRoutes', () => {
 
   describe('web server', () => {
     it('detects installed web servers', async () => {
-      const { session } = fakeSession({ transport: { exec: async () => ({ stdout: DETECT_OUTPUT, stderr: '', code: 0 }) } });
+      const { session } = fakeSession({ privilegedTransport: { exec: async () => ({ stdout: DETECT_OUTPUT, stderr: '', code: 0 }) } });
       store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
@@ -476,7 +500,7 @@ describe('buildRoutes', () => {
     });
 
     it('lists vhosts with no certificates and caches the config path for /api/file', async () => {
-      const { session } = fakeSession({ transport: { exec: async () => ({ stdout: VHOSTS_OUTPUT, stderr: '', code: 0 }) } });
+      const { session } = fakeSession({ privilegedTransport: { exec: async () => ({ stdout: VHOSTS_OUTPUT, stderr: '', code: 0 }) } });
       store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
@@ -504,7 +528,7 @@ describe('buildRoutes', () => {
         }
         return { stdout: VHOSTS_SSL_OUTPUT, stderr: '', code: 0 };
       };
-      const { session } = fakeSession({ transport: { exec } });
+      const { session } = fakeSession({ privilegedTransport: { exec } });
       store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
@@ -531,7 +555,7 @@ describe('buildRoutes', () => {
       ].join('\n');
       const output = [`@@${NGINX_SSL_FILE}`, confWithBadCertPath].join('\n');
       const exec = jest.fn(async () => ({ stdout: output, stderr: '', code: 0 }));
-      const { session } = fakeSession({ transport: { exec } });
+      const { session } = fakeSession({ privilegedTransport: { exec } });
       store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
@@ -549,7 +573,7 @@ describe('buildRoutes', () => {
 
     it('reports config test success with the real output', async () => {
       const { session } = fakeSession({
-        transport: { exec: async () => ({ stdout: 'nginx: configuration file test is successful', stderr: '', code: 0 }) },
+        privilegedTransport: { exec: async () => ({ stdout: 'nginx: configuration file test is successful', stderr: '', code: 0 }) },
       });
       store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
@@ -569,7 +593,7 @@ describe('buildRoutes', () => {
       // stderr-only error mapping would turn into a useless "command exited
       // with code 1" and lose the diagnostic.
       const diagnostic = 'nginx: [emerg] unexpected "}" in /etc/nginx/nginx.conf:12';
-      const { session } = fakeSession({ transport: { exec: async () => ({ stdout: diagnostic, stderr: '', code: 1 }) } });
+      const { session } = fakeSession({ privilegedTransport: { exec: async () => ({ stdout: diagnostic, stderr: '', code: 1 }) } });
       store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
@@ -583,7 +607,7 @@ describe('buildRoutes', () => {
 
     it('maps a sudo failure on config test to the sudo hint', async () => {
       const { session } = fakeSession({
-        transport: { exec: async () => ({ stdout: '', stderr: 'sudo: a password is required', code: 1 }) },
+        privilegedTransport: { exec: async () => ({ stdout: '', stderr: 'sudo: a password is required', code: 1 }) },
       });
       store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
@@ -624,7 +648,7 @@ describe('buildRoutes', () => {
         }
         return { stdout: VHOSTS_OUTPUT, stderr: '', code: 0 };
       };
-      const { session } = fakeSession({ transport: { exec } });
+      const { session } = fakeSession({ privilegedTransport: { exec } });
       store.set('tok', session);
 
       const { session: otherSession } = fakeSession({}, 'other-tok');
