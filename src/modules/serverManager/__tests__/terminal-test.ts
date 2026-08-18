@@ -18,6 +18,8 @@ class FakeEmitter {
 class FakeSocket extends FakeEmitter implements WsLike {
   sent: Array<string | Buffer> = [];
   closed = false;
+  terminated = false;
+  closeCode: number | undefined;
   closeReason: string | undefined;
 
   send(data: string | Buffer): void {
@@ -25,7 +27,11 @@ class FakeSocket extends FakeEmitter implements WsLike {
   }
   close(code?: number, reason?: string): void {
     this.closed = true;
+    this.closeCode = code;
     this.closeReason = reason;
+  }
+  terminate(): void {
+    this.terminated = true;
   }
 }
 
@@ -198,7 +204,89 @@ test('a shell that fails to open closes the socket with a reason', async () => {
   await flush();
 
   expect(socket.closed).toBe(true);
+  expect(socket.closeCode).toBe(1011);
   expect(socket.closeReason).toBe('connection refused');
+});
+
+// The UI has to be able to tell "your shell exited" from "the bridge broke",
+// and the close code is the only signal it gets.
+test('a shell that exits normally closes the socket with 1000, not an error code', async () => {
+  const stream = new FakeStream();
+  const socket = new FakeSocket();
+  bridgeTerminal(deps(Promise.resolve(stream)), socket);
+  await flush();
+
+  stream.emit('close');
+
+  expect(socket.closeCode).toBe(1000);
+});
+
+test('a stream error closes the socket with 1011', async () => {
+  const stream = new FakeStream();
+  const socket = new FakeSocket();
+  bridgeTerminal(deps(Promise.resolve(stream)), socket);
+  await flush();
+
+  stream.emit('error', new Error('channel died'));
+
+  expect(socket.closeCode).toBe(1011);
+});
+
+// A close frame carries at most 123 bytes of reason, and `ws` throws a
+// RangeError rather than truncating -- after it has already moved the socket
+// to CLOSING, so no close frame is sent and no timer is armed to destroy it.
+// The reason is remote-controlled here: ssh2 builds a channel-open failure
+// message out of text the remote sshd supplied.
+test('a huge failure reason is truncated to fit a close frame', async () => {
+  const socket = new FakeSocket();
+  const reason = 'x'.repeat(5000);
+  bridgeTerminal(deps(Promise.reject(new Error(reason))), socket);
+  await flush();
+  await flush();
+
+  expect(Buffer.byteLength(socket.closeReason || '', 'utf8')).toBeLessThanOrEqual(123);
+});
+
+test('a multi-byte failure reason is truncated by BYTES, not characters', async () => {
+  const socket = new FakeSocket();
+  // Four bytes per character: 123 characters would be 492 bytes.
+  bridgeTerminal(deps(Promise.reject(new Error('\u{1F4A9}'.repeat(200)))), socket);
+  await flush();
+  await flush();
+
+  expect(Buffer.byteLength(socket.closeReason || '', 'utf8')).toBeLessThanOrEqual(123);
+});
+
+// If close() throws anyway, `ws` has already set CLOSING and a retry is a
+// no-op: the socket would sit half-open forever with the browser on a
+// spinner. terminate() is the only thing left that works.
+test('a socket whose close() throws is terminated instead of left half-open', async () => {
+  const stream = new FakeStream();
+  const socket = new FakeSocket();
+  socket.close = () => {
+    throw new RangeError('nope');
+  };
+  bridgeTerminal(deps(Promise.resolve(stream)), socket);
+  await flush();
+
+  expect(() => stream.emit('close')).not.toThrow();
+  expect(socket.terminated).toBe(true);
+});
+
+// Nothing drains inputQueue after teardown, so frames arriving on a socket
+// the client has not yet noticed is closed would accumulate without bound.
+test('frames arriving after teardown are dropped, not queued forever', async () => {
+  const socket = new FakeSocket();
+  bridgeTerminal(deps(Promise.reject(new Error('no shell'))), socket);
+  await flush();
+  await flush();
+
+  expect(() => {
+    socket.emit('message', 'still typing\n', false);
+    socket.emit('message', JSON.stringify({ type: 'resize', cols: 10, rows: 10 }), false);
+  }).not.toThrow();
+  // Nothing was sent back and nothing re-closed the socket.
+  expect(socket.sent).toEqual([]);
 });
 
 test('double teardown (socket close then stream close) does not throw', async () => {

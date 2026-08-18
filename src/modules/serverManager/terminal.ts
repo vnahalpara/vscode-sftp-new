@@ -28,13 +28,16 @@ export interface ShellStream {
 
 // The structural subset of a `ws` WebSocket this bridge drives -- declared
 // here rather than imported from `ws` so a test can drive it with a fake
-// that implements nothing but these three members.
+// that implements nothing but these few members.
 export interface WsLike {
   on(event: 'message', cb: (data: Buffer | string, isBinary: boolean) => void): void;
   on(event: 'close', cb: () => void): void;
   on(event: 'error', cb: (err: Error) => void): void;
   send(data: string | Buffer): void;
   close(code?: number, reason?: string): void;
+  // The ungraceful exit: destroys the underlying socket outright. Needed
+  // because close() can leave a socket in CLOSING forever -- see teardown().
+  terminate(): void;
 }
 
 export interface TerminalDeps {
@@ -51,6 +54,38 @@ export interface TerminalDeps {
 // round trip lets the shell start (and the remote MOTD/prompt start
 // arriving) immediately.
 const DEFAULT_SIZE: TerminalSize = { cols: 80, rows: 24 };
+
+// RFC 6455 close codes. 1000 is "the conversation ended normally" -- which
+// is what typing `exit` is, and what the user closing the tab is. 1011 means
+// the SERVER hit a condition that stopped it fulfilling the request, and is
+// reserved here for exactly that: the shell could not be opened, or the
+// channel failed under us. The UI reads these to decide whether to show
+// "session ended" or an actual error, so reporting 1011 for every close (as
+// this did) makes a clean exit indistinguishable from a broken bridge.
+const CLOSE_NORMAL = 1000;
+const CLOSE_INTERNAL_ERROR = 1011;
+
+// A close frame's payload is at most 125 bytes: 2 for the code, 123 for the
+// reason. `ws` does not truncate -- sender.close() THROWS a RangeError past
+// that, synchronously, after WebSocket.close() has already set the ready
+// state to CLOSING and before it arms the close timer. The result is a
+// socket that sends no close frame, has no timer to destroy it, and is never
+// retried (teardown is one-shot): the browser sits on a spinner and a
+// half-open socket leaks. And the reason is remote-controlled in the case
+// that matters -- it comes from error.message, and ssh2 builds a
+// channel-open failure message out of verbatim text from the remote sshd.
+const MAX_REASON_BYTES = 123;
+
+function truncateReason(reason: string): string {
+  // Every character is at least one byte, so 123 characters is a safe upper
+  // bound to start from -- this avoids walking a pathologically long remote
+  // string one character at a time.
+  let out = reason.slice(0, MAX_REASON_BYTES);
+  while (Buffer.byteLength(out, 'utf8') > MAX_REASON_BYTES) {
+    out = out.slice(0, -1);
+  }
+  return out;
+}
 
 const MIN_DIM = 1;
 const MAX_DIM = 1000;
@@ -108,6 +143,18 @@ function classifyControl(text: string): ControlFrame {
 // The two calls are caught separately on purpose: a throw from end() (an
 // already-dead channel) must not be allowed to skip the close().
 function releaseStream(stream: ShellStream): void {
+  // A stream can error ASYNCHRONOUSLY in response to being ended (the
+  // connection died a moment ago and the write fails), and an 'error' with no
+  // listener is a throw out of the event loop -- an extension host crash.
+  // The bridge's own listeners are attached only once the stream is adopted,
+  // so the mid-open teardown path would otherwise release a stream that has
+  // no listener at all. Attaching one here means every release path is
+  // covered, and a duplicate on the ordinary path is harmless.
+  try {
+    stream.on('error', () => undefined);
+  } catch (error) {
+    // Nothing to do; the calls below are still worth attempting.
+  }
   try {
     stream.end();
   } catch (error) {
@@ -133,7 +180,7 @@ export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
   // other side's own close/error firing a moment later must not throw or
   // double-run the teardown -- this runs against the user's production
   // server, and a leaked shell channel is a real, ongoing cost to them.
-  function teardown(reason?: string): void {
+  function teardown(code?: number, reason?: string): void {
     if (torndown) {
       return;
     }
@@ -142,13 +189,30 @@ export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
       releaseStream(stream);
     }
     try {
-      socket.close(1011, reason);
+      socket.close(code || CLOSE_NORMAL, reason === undefined ? undefined : truncateReason(reason));
     } catch (error) {
-      // Already gone is exactly what we wanted.
+      // close() is not safely retryable: `ws` has already moved the socket to
+      // CLOSING by the time anything in it can throw, so a second close() is
+      // a no-op and the socket would sit half-open with no close frame sent
+      // and no timer armed to destroy it -- a spinner in the browser and a
+      // leaked socket here. terminate() is the one thing that still works.
+      try {
+        socket.terminate();
+      } catch (terminateError) {
+        // Already gone is exactly what we wanted.
+      }
     }
   }
 
   socket.on('message', (data, isBinary) => {
+    // After teardown there is no stream to write to and never will be, so
+    // without this every further frame would pile up in inputQueue with
+    // nothing left to drain it -- an unbounded buffer fed by a socket that
+    // may still be live (the shell failed to open, but the client has not
+    // noticed the close yet and keeps typing).
+    if (torndown) {
+      return;
+    }
     if (!isBinary) {
       const text = Buffer.isBuffer(data) ? data.toString('utf8') : data;
       const control = classifyControl(text);
@@ -199,14 +263,17 @@ export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
           // below (via the stream's own close/error) reaps the rest.
         }
       });
-      openedStream.on('close', () => teardown());
-      openedStream.on('error', () => teardown());
+      // The shell exiting (the user typed `exit`, or the remote host closed
+      // the session) is a NORMAL end to the conversation, not an error. Only
+      // the channel failing under us is 1011.
+      openedStream.on('close', () => teardown(CLOSE_NORMAL));
+      openedStream.on('error', () => teardown(CLOSE_INTERNAL_ERROR, 'shell channel error'));
     },
     error => {
       // No stream was ever assigned, so teardown() only needs to close the
       // socket -- but it must still close it, with a reason, rather than
       // leaving an authenticated socket open with nothing ever driving it.
-      teardown((error && error.message) || 'failed to open shell');
+      teardown(CLOSE_INTERNAL_ERROR, (error && error.message) || 'failed to open shell');
     }
   );
 }
