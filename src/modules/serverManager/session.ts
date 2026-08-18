@@ -72,6 +72,15 @@ export class ManagedSession {
     this._opts = opts;
   }
 
+  // Public on purpose: the ops layer (routes.ts) needs this session's exec
+  // lane to run systemctl/nginx/openssl commands for it. Routing that
+  // through the session -- rather than a second token-keyed map living
+  // alongside byToken in index.ts -- keeps a single owner of the SSH
+  // connection instead of two maps that could drift out of sync.
+  get transport(): MonitorTransport {
+    return this._deps.transport;
+  }
+
   state(): SessionState {
     return {
       id: this.id,

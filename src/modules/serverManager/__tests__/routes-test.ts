@@ -1,4 +1,4 @@
-import { buildRoutes, RouteDeps } from '../routes';
+import { buildRoutes } from '../routes';
 import { matchRoute, Route } from '../router';
 import { Ctx, Handler } from '../httpServer';
 
@@ -6,6 +6,15 @@ import { Ctx, Handler } from '../httpServer';
 // against a leaky implementation, which would make the assertion worthless.
 const SECRET_TOKEN = 'TOKEN-SHOULD-NEVER-APPEAR-8f3a9c2b';
 
+type ExecFn = (cmd: string) => Promise<{ stdout: string; stderr: string; code: number }>;
+
+const noopExec: ExecFn = async () => ({ stdout: '', stderr: '', code: 0 });
+
+// A fake ManagedSession. `transport` backs routes.ts's opsFor(session) via
+// session.transport.exec(cmd) -- the real accessor added to ManagedSession
+// in session.ts -- so a test's `exec` fake is the thing that proves a route
+// actually reached the session's exec channel, not just that it returned a
+// response.
 function fakeSession(overrides: any = {}, token: string = 'tok') {
   const written: string[] = [];
   return {
@@ -14,6 +23,7 @@ function fakeSession(overrides: any = {}, token: string = 'tok') {
       id: 'abc',
       token,
       profile: { id: 'abc', name: 'prod', host: '10.0.0.5', port: 22, username: 'deploy' },
+      transport: { exec: noopExec },
       state: () => ({
         id: 'abc',
         profile: { id: 'abc', name: 'prod', host: '10.0.0.5', port: 22, username: 'deploy' },
@@ -23,7 +33,10 @@ function fakeSession(overrides: any = {}, token: string = 'tok') {
         interval: 2000,
         lastSeen: 99,
       }),
-      activity: { entries: () => [{ at: 1, label: 'restart nginx', command: 'systemctl', code: 0, ms: 12, error: null }] },
+      activity: {
+        entries: () => [{ at: 1, label: 'restart nginx', command: 'systemctl', code: 0, ms: 12, error: null }],
+        push: jest.fn(),
+      },
       refresh: jest.fn(async () => undefined),
       subscribe: jest.fn(() => () => undefined),
       ...overrides,
@@ -85,28 +98,6 @@ function withParams(ctx: Ctx, params: { [k: string]: string }): Ctx {
   return { ...ctx, params };
 }
 
-function fakeActivity() {
-  return { push: jest.fn(), entries: () => [] as any[] };
-}
-
-// Builds the RouteDeps.ops factory. `exec` is command-string-aware so a
-// single fake can back every route under test in one file. The fake
-// activity log is a plain object rather than a real ActivityLog, so the
-// factory's return type is widened to `any` -- ActivityLog has private
-// fields, which makes it effectively nominal, and a fake used purely for
-// its public `push`/`entries` surface can never satisfy that structurally.
-function fakeOps(exec: (cmd: string) => Promise<{ stdout: string; stderr: string; code: number }>) {
-  const activity = fakeActivity();
-  const ops = (session: any): any => ({
-    exec,
-    activity,
-    user: session.profile.username,
-    host: session.profile.host,
-    now: () => 1700000000000,
-  });
-  return { activity, ops };
-}
-
 const SERVICES_OUTPUT = [
   '@@units',
   'nginx.service                loaded active   running A web server',
@@ -159,16 +150,6 @@ describe('buildRoutes', () => {
     });
   });
 
-  function withDeps(overrides: Partial<RouteDeps>): void {
-    routes = buildRoutes({
-      sessions: { get: token => store.get(token) },
-      pingMs: 25000,
-      schedule: () => 1,
-      cancel: () => undefined,
-      ...overrides,
-    });
-  }
-
   it('returns the session state and capability flags', async () => {
     const { session } = fakeSession();
     store.set('tok', session);
@@ -190,19 +171,17 @@ describe('buildRoutes', () => {
   });
 
   it('never exposes the token in any response body', async () => {
-    const { session } = fakeSession({}, SECRET_TOKEN);
+    const exec: ExecFn = async cmd => {
+      if (cmd.indexOf('systemctl list-units') !== -1) {
+        return { stdout: SERVICES_OUTPUT, stderr: '', code: 0 };
+      }
+      if (cmd.indexOf('sites-enabled') !== -1) {
+        return { stdout: VHOSTS_OUTPUT, stderr: '', code: 0 };
+      }
+      return { stdout: DETECT_OUTPUT, stderr: '', code: 0 };
+    };
+    const { session } = fakeSession({ transport: { exec } }, SECRET_TOKEN);
     store.set(SECRET_TOKEN, session);
-    withDeps({
-      ops: fakeOps(async cmd => {
-        if (cmd.indexOf('systemctl list-units') !== -1) {
-          return { stdout: SERVICES_OUTPUT, stderr: '', code: 0 };
-        }
-        if (cmd.indexOf('sites-enabled') !== -1) {
-          return { stdout: VHOSTS_OUTPUT, stderr: '', code: 0 };
-        }
-        return { stdout: DETECT_OUTPUT, stderr: '', code: 0 };
-      }).ops,
-    });
 
     const sessionCtx = fakeCtx(SECRET_TOKEN);
     await find(routes, 'GET', '/api/session')(sessionCtx.ctx);
@@ -224,20 +203,9 @@ describe('buildRoutes', () => {
     await find(routes, 'GET', '/api/webserver')(webserverCtx.ctx);
     expect(webserverCtx.res.body).not.toContain(SECRET_TOKEN);
 
-    const vhostsCtx = withParams(fakeCtx(SECRET_TOKEN).ctx, { kind: 'nginx' });
-    const vhostsRes = fakeCtx(SECRET_TOKEN).res;
-    await find(routes, 'GET', '/api/webserver/:kind/vhosts')({
-      ...vhostsCtx,
-      json: (status, body) => {
-        vhostsRes.status = status;
-        vhostsRes.body = JSON.stringify(body);
-      },
-      text: (status, body) => {
-        vhostsRes.status = status;
-        vhostsRes.body = body;
-      },
-    });
-    expect(vhostsRes.body).not.toContain(SECRET_TOKEN);
+    const vhostsCtx = fakeCtx(SECRET_TOKEN);
+    await find(routes, 'GET', '/api/webserver/:kind/vhosts')(withParams(vhostsCtx.ctx, { kind: 'nginx' }));
+    expect(vhostsCtx.res.body).not.toContain(SECRET_TOKEN);
   });
 
   it('answers 404 when the token maps to no session', async () => {
@@ -365,16 +333,19 @@ describe('buildRoutes', () => {
   });
 
   describe('services', () => {
-    beforeEach(() => {
-      const { session } = fakeSession();
+    it('lists services parsed, merged and sorted, and drives the command through the session transport', async () => {
+      const exec = jest.fn(async (_cmd: string) => ({ stdout: SERVICES_OUTPUT, stderr: '', code: 0 }));
+      const { session } = fakeSession({ transport: { exec } });
       store.set('tok', session);
-    });
-
-    it('lists services parsed, merged and sorted', async () => {
-      withDeps({ ops: fakeOps(async () => ({ stdout: SERVICES_OUTPUT, stderr: '', code: 0 })).ops });
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'GET', '/api/services')(ctx);
+
+      // Proves the route actually reached this session's transport, not just
+      // that it produced a 200 -- a fake transport that was never called
+      // would still let a stub response through.
+      expect(exec).toHaveBeenCalledTimes(1);
+      expect(exec.mock.calls[0][0]).toContain('systemctl list-units');
 
       const body = JSON.parse(res.body);
       expect(res.status).toBe(200);
@@ -383,17 +354,11 @@ describe('buildRoutes', () => {
       expect(body.services[0].enabled).toBe('enabled');
     });
 
-    it('answers 503 when no ops dependency is configured', async () => {
-      // routes built in the outer beforeEach with no `ops` field at all.
-      const { ctx, res } = fakeCtx('tok');
-
-      await find(routes, 'GET', '/api/services')(ctx);
-
-      expect(res.status).toBe(503);
-    });
-
     it('runs a service action and reports ok with output', async () => {
-      withDeps({ ops: fakeOps(async () => ({ stdout: 'Restarting...', stderr: '', code: 0 })).ops });
+      const { session } = fakeSession({
+        transport: { exec: async () => ({ stdout: 'Restarting...', stderr: '', code: 0 }) },
+      });
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'POST', '/api/services/:unit/:action')(
@@ -405,9 +370,10 @@ describe('buildRoutes', () => {
     });
 
     it('reports a failed action inline as ok:false rather than a 500', async () => {
-      withDeps({
-        ops: fakeOps(async () => ({ stdout: '', stderr: 'sudo: a password is required', code: 1 })).ops,
+      const { session } = fakeSession({
+        transport: { exec: async () => ({ stdout: '', stderr: 'sudo: a password is required', code: 1 }) },
       });
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'POST', '/api/services/:unit/:action')(
@@ -422,7 +388,8 @@ describe('buildRoutes', () => {
     });
 
     it('rejects an unknown action with 400, not 500', async () => {
-      withDeps({ ops: fakeOps(async () => ({ stdout: '', stderr: '', code: 0 })).ops });
+      const { session } = fakeSession();
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'POST', '/api/services/:unit/:action')(
@@ -433,7 +400,8 @@ describe('buildRoutes', () => {
     });
 
     it('rejects an unsafe unit name with 400, not 500', async () => {
-      withDeps({ ops: fakeOps(async () => ({ stdout: '', stderr: '', code: 0 })).ops });
+      const { session } = fakeSession();
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'POST', '/api/services/:unit/:action')(
@@ -444,9 +412,16 @@ describe('buildRoutes', () => {
     });
 
     it('returns raw status output regardless of exit code', async () => {
-      withDeps({
-        ops: fakeOps(async () => ({ stdout: '● nginx.service - A web server\n   Active: active (running)', stderr: '', code: 0 })).ops,
+      const { session } = fakeSession({
+        transport: {
+          exec: async () => ({
+            stdout: '● nginx.service - A web server\n   Active: active (running)',
+            stderr: '',
+            code: 0,
+          }),
+        },
       });
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'GET', '/api/services/:unit/status')(withParams(ctx, { unit: 'nginx.service' }));
@@ -456,7 +431,8 @@ describe('buildRoutes', () => {
     });
 
     it('rejects an unsafe unit name on the status route with 400', async () => {
-      withDeps({ ops: fakeOps(async () => ({ stdout: '', stderr: '', code: 0 })).ops });
+      const { session } = fakeSession();
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'GET', '/api/services/:unit/status')(withParams(ctx, { unit: '-Hroot@evil' }));
@@ -466,13 +442,9 @@ describe('buildRoutes', () => {
   });
 
   describe('web server', () => {
-    beforeEach(() => {
-      const { session } = fakeSession();
-      store.set('tok', session);
-    });
-
     it('detects installed web servers', async () => {
-      withDeps({ ops: fakeOps(async () => ({ stdout: DETECT_OUTPUT, stderr: '', code: 0 })).ops });
+      const { session } = fakeSession({ transport: { exec: async () => ({ stdout: DETECT_OUTPUT, stderr: '', code: 0 }) } });
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'GET', '/api/webserver')(ctx);
@@ -484,7 +456,8 @@ describe('buildRoutes', () => {
     });
 
     it('rejects an unknown kind on /webserver/:kind/vhosts with 400', async () => {
-      withDeps({ ops: fakeOps(async () => ({ stdout: '', stderr: '', code: 0 })).ops });
+      const { session } = fakeSession();
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'GET', '/api/webserver/:kind/vhosts')(withParams(ctx, { kind: 'iis' }));
@@ -493,7 +466,8 @@ describe('buildRoutes', () => {
     });
 
     it('rejects an unknown kind on /webserver/:kind/test with 400', async () => {
-      withDeps({ ops: fakeOps(async () => ({ stdout: '', stderr: '', code: 0 })).ops });
+      const { session } = fakeSession();
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'POST', '/api/webserver/:kind/test')(withParams(ctx, { kind: 'iis' }));
@@ -502,7 +476,8 @@ describe('buildRoutes', () => {
     });
 
     it('lists vhosts with no certificates and caches the config path for /api/file', async () => {
-      withDeps({ ops: fakeOps(async () => ({ stdout: VHOSTS_OUTPUT, stderr: '', code: 0 })).ops });
+      const { session } = fakeSession({ transport: { exec: async () => ({ stdout: VHOSTS_OUTPUT, stderr: '', code: 0 }) } });
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'GET', '/api/webserver/:kind/vhosts')(withParams(ctx, { kind: 'nginx' }));
@@ -523,14 +498,14 @@ describe('buildRoutes', () => {
         '\n'
       );
       const certOutput = ['@@/etc/ssl/certs/secure.pem', certBody].join('\n');
-      withDeps({
-        ops: fakeOps(async cmd => {
-          if (cmd.indexOf('openssl') !== -1) {
-            return { stdout: certOutput, stderr: '', code: 0 };
-          }
-          return { stdout: VHOSTS_SSL_OUTPUT, stderr: '', code: 0 };
-        }).ops,
-      });
+      const exec: ExecFn = async cmd => {
+        if (cmd.indexOf('openssl') !== -1) {
+          return { stdout: certOutput, stderr: '', code: 0 };
+        }
+        return { stdout: VHOSTS_SSL_OUTPUT, stderr: '', code: 0 };
+      };
+      const { session } = fakeSession({ transport: { exec } });
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'GET', '/api/webserver/:kind/vhosts')(withParams(ctx, { kind: 'nginx' }));
@@ -556,7 +531,8 @@ describe('buildRoutes', () => {
       ].join('\n');
       const output = [`@@${NGINX_SSL_FILE}`, confWithBadCertPath].join('\n');
       const exec = jest.fn(async () => ({ stdout: output, stderr: '', code: 0 }));
-      withDeps({ ops: fakeOps(exec).ops });
+      const { session } = fakeSession({ transport: { exec } });
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'GET', '/api/webserver/:kind/vhosts')(withParams(ctx, { kind: 'nginx' }));
@@ -572,10 +548,10 @@ describe('buildRoutes', () => {
     });
 
     it('reports config test success with the real output', async () => {
-      withDeps({
-        ops: fakeOps(async () => ({ stdout: 'nginx: configuration file test is successful', stderr: '', code: 0 }))
-          .ops,
+      const { session } = fakeSession({
+        transport: { exec: async () => ({ stdout: 'nginx: configuration file test is successful', stderr: '', code: 0 }) },
       });
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'POST', '/api/webserver/:kind/test')(withParams(ctx, { kind: 'nginx' }));
@@ -593,7 +569,8 @@ describe('buildRoutes', () => {
       // stderr-only error mapping would turn into a useless "command exited
       // with code 1" and lose the diagnostic.
       const diagnostic = 'nginx: [emerg] unexpected "}" in /etc/nginx/nginx.conf:12';
-      withDeps({ ops: fakeOps(async () => ({ stdout: diagnostic, stderr: '', code: 1 })).ops });
+      const { session } = fakeSession({ transport: { exec: async () => ({ stdout: diagnostic, stderr: '', code: 1 }) } });
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'POST', '/api/webserver/:kind/test')(withParams(ctx, { kind: 'nginx' }));
@@ -605,9 +582,10 @@ describe('buildRoutes', () => {
     });
 
     it('maps a sudo failure on config test to the sudo hint', async () => {
-      withDeps({
-        ops: fakeOps(async () => ({ stdout: '', stderr: 'sudo: a password is required', code: 1 })).ops,
+      const { session } = fakeSession({
+        transport: { exec: async () => ({ stdout: '', stderr: 'sudo: a password is required', code: 1 }) },
       });
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok');
 
       await find(routes, 'POST', '/api/webserver/:kind/test')(withParams(ctx, { kind: 'nginx' }));
@@ -619,13 +597,9 @@ describe('buildRoutes', () => {
   });
 
   describe('/api/file', () => {
-    beforeEach(() => {
+    it('rejects a path never returned by a vhost listing for this session', async () => {
       const { session } = fakeSession();
       store.set('tok', session);
-    });
-
-    it('rejects a path never returned by a vhost listing for this session', async () => {
-      withDeps({ ops: fakeOps(async () => ({ stdout: '', stderr: '', code: 0 })).ops });
       const { ctx, res } = fakeCtx('tok', { path: '/etc/passwd' });
 
       await find(routes, 'GET', '/api/file')(ctx);
@@ -634,7 +608,8 @@ describe('buildRoutes', () => {
     });
 
     it('rejects a missing path query', async () => {
-      withDeps({ ops: fakeOps(async () => ({ stdout: '', stderr: '', code: 0 })).ops });
+      const { session } = fakeSession();
+      store.set('tok', session);
       const { ctx, res } = fakeCtx('tok', {});
 
       await find(routes, 'GET', '/api/file')(ctx);
@@ -643,14 +618,14 @@ describe('buildRoutes', () => {
     });
 
     it('serves a path that a prior vhost listing returned for this session, but not for a different session', async () => {
-      withDeps({
-        ops: fakeOps(async cmd => {
-          if (cmd.indexOf('sed -n') !== -1) {
-            return { stdout: NGINX_CONF, stderr: '', code: 0 };
-          }
-          return { stdout: VHOSTS_OUTPUT, stderr: '', code: 0 };
-        }).ops,
-      });
+      const exec: ExecFn = async cmd => {
+        if (cmd.indexOf('sed -n') !== -1) {
+          return { stdout: NGINX_CONF, stderr: '', code: 0 };
+        }
+        return { stdout: VHOSTS_OUTPUT, stderr: '', code: 0 };
+      };
+      const { session } = fakeSession({ transport: { exec } });
+      store.set('tok', session);
 
       const { session: otherSession } = fakeSession({}, 'other-tok');
       store.set('other-tok', otherSession);

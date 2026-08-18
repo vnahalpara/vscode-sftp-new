@@ -27,14 +27,6 @@ export interface RouteDeps {
   pingMs: number;
   schedule(fn: () => void, ms: number): any;
   cancel(handle: any): void;
-  // Builds the privileged-exec dependencies for one session (its SSH exec
-  // channel, its activity log, and the user/host pair sudoHint() needs).
-  // Optional so that a caller which has not wired up a transport lookup yet
-  // still produces a server that type-checks and serves every other route;
-  // any route that actually needs to run a remote command answers 503
-  // rather than crashing when it is absent. See the comment on opsFor()
-  // below for why this could not be sourced from ManagedSession itself.
-  ops?(session: ManagedSession): OpsDeps;
 }
 
 // Everything the later milestones will turn on. The UI reads these to decide
@@ -58,19 +50,18 @@ function resolve(deps: RouteDeps, ctx: Ctx): ManagedSession | null {
   return session;
 }
 
-// ManagedSession (session.ts) deliberately does not expose the SSH transport
-// it drives its Collector with — only id/token/profile/sse/activity are
-// public. Reaching a real remote exec channel for the routes below therefore
-// requires deps.ops(session), supplied by whoever constructs RouteDeps
-// (production wires it to the same transport the session's Collector uses;
-// tests inject a fake). If that wiring is missing, every route that needs to
-// run a command answers 503 instead of throwing past a null.
-function opsFor(deps: RouteDeps, ctx: Ctx, session: ManagedSession): OpsDeps | null {
-  if (!deps.ops) {
-    ctx.text(503, 'Privileged operations are not configured for this server.');
-    return null;
-  }
-  return deps.ops(session);
+// ManagedSession publicly exposes its SSH transport (session.ts's
+// `transport` getter) precisely so this can be built straight from the
+// session routes.ts already has via resolve() — one owner of the exec
+// channel, not a second token-keyed map living alongside index.ts's byToken.
+function opsFor(session: ManagedSession): OpsDeps {
+  return {
+    exec: cmd => session.transport.exec(cmd),
+    activity: session.activity,
+    user: session.profile.username,
+    host: session.profile.host,
+    now: () => Date.now(),
+  };
 }
 
 // A builder in ops/command.ts throws on a bad :action, a bad :unit, or an
@@ -234,10 +225,7 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
         if (!session) {
           return;
         }
-        const ops = opsFor(deps, ctx, session);
-        if (!ops) {
-          return;
-        }
+        const ops = opsFor(session);
         const result = await ops.exec(servicesCommand());
         const sections = splitAt(result.stdout);
         const units = parseUnits(sections.units || '');
@@ -253,10 +241,7 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
         if (!session) {
           return;
         }
-        const ops = opsFor(deps, ctx, session);
-        if (!ops) {
-          return;
-        }
+        const ops = opsFor(session);
         const { unit, action } = ctx.params;
         let command: string;
         try {
@@ -285,10 +270,7 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
         if (!session) {
           return;
         }
-        const ops = opsFor(deps, ctx, session);
-        if (!ops) {
-          return;
-        }
+        const ops = opsFor(session);
         const { unit } = ctx.params;
         let command: string;
         try {
@@ -309,10 +291,7 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
         if (!session) {
           return;
         }
-        const ops = opsFor(deps, ctx, session);
-        if (!ops) {
-          return;
-        }
+        const ops = opsFor(session);
         const result = await ops.exec(detectWebServerCommand());
         ctx.json(200, parseDetect(result.stdout));
       },
@@ -325,10 +304,7 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
         if (!session) {
           return;
         }
-        const ops = opsFor(deps, ctx, session);
-        if (!ops) {
-          return;
-        }
+        const ops = opsFor(session);
         const kind = ctx.params.kind;
         if (!isKind(kind)) {
           ctx.text(400, `Unknown web server kind: ${kind}`);
@@ -377,10 +353,7 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
         if (!session) {
           return;
         }
-        const ops = opsFor(deps, ctx, session);
-        if (!ops) {
-          return;
-        }
+        const ops = opsFor(session);
         const kind = ctx.params.kind;
         if (!isKind(kind)) {
           ctx.text(400, `Unknown web server kind: ${kind}`);
@@ -398,10 +371,6 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
         if (!session) {
           return;
         }
-        const ops = opsFor(deps, ctx, session);
-        if (!ops) {
-          return;
-        }
         const requestedPath = typeof ctx.query.path === 'string' ? ctx.query.path : '';
         const allowed = allowedFiles.get(session.token);
         if (!requestedPath || !allowed || !allowed.has(requestedPath)) {
@@ -409,6 +378,7 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
           return;
         }
 
+        const ops = opsFor(session);
         const linesParam = typeof ctx.query.lines === 'string' ? Number(ctx.query.lines) : NaN;
         let command: string;
         try {
