@@ -171,8 +171,15 @@ export interface WsOpts {
   // (added by later work) that plug in by supplying these; until they do,
   // a successfully-authenticated upgrade to a path with no handler is
   // simply closed rather than left open with nothing driving it.
-  onTerminal?: (ws: WebSocket, req: http.IncomingMessage) => void;
-  onLogs?: (ws: WebSocket, req: http.IncomingMessage) => void;
+  // The token is passed through rather than left for the handler to
+  // re-derive: checkUpgrade has already parsed req.url once to prove this
+  // token valid, and handleUpgradeRequest below parses it again anyway to
+  // build this register's key. A third parse in the handler would be
+  // protected only by the invariant that req.url still parses the same way
+  // it did a moment ago in a different function -- true today, but not a
+  // property "written not to throw" survives editing.
+  onTerminal?: (ws: WebSocket, req: http.IncomingMessage, token: string) => void;
+  onLogs?: (ws: WebSocket, req: http.IncomingMessage, token: string) => void;
 }
 
 // Writes a minimal, bodyless HTTP response directly onto the raw socket and
@@ -318,11 +325,11 @@ export function attachWs(server: http.Server, opts: WsOpts): WsHandle {
       ws.on('error', () => terminate(ws));
       const pathname = parsedForToken ? parsedForToken.pathname : undefined;
       if (pathname === '/ws/terminal' && opts.onTerminal) {
-        opts.onTerminal(ws, req);
+        opts.onTerminal(ws, req, token);
         return;
       }
       if (pathname === '/ws/logs' && opts.onLogs) {
-        opts.onLogs(ws, req);
+        opts.onLogs(ws, req, token);
         return;
       }
       // Authenticated and structurally valid, but nothing is wired up to

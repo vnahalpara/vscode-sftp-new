@@ -1,7 +1,6 @@
 import * as http from 'http';
 import * as crypto from 'crypto';
 import * as path from 'path';
-import * as url from 'url';
 import { spawn } from 'child_process';
 import * as vscode from 'vscode';
 import { WebSocket } from 'ws';
@@ -14,7 +13,7 @@ import { HostFacts } from '../monitor/types';
 import { profileId, redactProfile } from './registry';
 import { targetOption, hasRootCreds } from './privilege';
 import { ManagedSession } from './session';
-import { closeServer, closeSessionSockets, createServer, listen, tokenFrom } from './httpServer';
+import { closeServer, closeSessionSockets, createServer, listen } from './httpServer';
 import { bootstrapHtml } from './bootstrap';
 import { buildRoutes } from './routes';
 import { browserCommand, BrowserKind } from './browser';
@@ -250,10 +249,9 @@ const registry = createSessionRegistry({
 });
 
 // The upgrade already passed checkUpgrade's token check (wsServer.ts) before
-// this ever runs, but that check only proved the token is VALID -- it does
-// not hand this callback the token or the session, so both are pulled off
-// the request the same way the plain HTTP path does (tokenFrom, same as
-// httpServer.ts's own request handler uses for /api/*).
+// this ever runs, and attachWs hands the same token it validated straight to
+// this callback -- there is no need (and, importantly, no THIRD parse of
+// req.url) to re-derive it here.
 //
 // session.transport is used here, deliberately never
 // session.privilegedTransport: the Terminal tab runs as the profile's
@@ -261,8 +259,7 @@ const registry = createSessionRegistry({
 // prompt -- just because the dashboard happened to hold root credentials for
 // systemctl/nginx/openssl -- would be a serious, silent privilege escalation
 // dressed up as a terminal.
-function onTerminal(ws: WebSocket, req: http.IncomingMessage): void {
-  const token = tokenFrom(url.parse(req.url || '', true).query, req.headers);
+function onTerminal(ws: WebSocket, req: http.IncomingMessage, token: string): void {
   const session = registry.lookupSession(token);
   const hasShell = session && session.transport.shell;
   if (!hasShell) {
