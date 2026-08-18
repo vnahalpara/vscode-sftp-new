@@ -3,6 +3,7 @@ import { useSession } from './useSession';
 import { Badge, Section } from './components/ui.jsx';
 import Overview from './components/Overview.jsx';
 import Services from './components/Services.jsx';
+import WebServer from './components/WebServer.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Activity from './pages/Activity.jsx';
 import Settings from './pages/Settings.jsx';
@@ -154,14 +155,18 @@ export default function App() {
   } else {
     // 'overview', 'services' and 'web' (plus 'database', which is
     // unreachable while disabled) land here: the tab bar plus whichever tab
-    // is active. 'web' has no tab content yet (a later milestone task), so
-    // it falls back to Overview same as any other unrecognised tab key —
+    // is active. Any other/unrecognised tab key falls back to Overview —
     // the nav item itself is still enabled/disabled correctly from
     // `capabilities`.
     const tabPage = TABS.some(([key]) => key === page) ? page : 'overview';
-    const tabContent = tabPage === 'services' ? <Services /> : (
-      <Overview snapshot={snapshot} slow={slow} series={series} facts={facts} />
-    );
+    let tabContent;
+    if (tabPage === 'services') {
+      tabContent = <Services />;
+    } else if (tabPage === 'web') {
+      tabContent = <WebServer />;
+    } else {
+      tabContent = <Overview snapshot={snapshot} slow={slow} series={series} facts={facts} />;
+    }
     content = (
       <>
         <div className="row" style={{ gap: 2, marginBottom: 18, paddingBottom: 10, borderBottom: '1px solid var(--border)' }}>
