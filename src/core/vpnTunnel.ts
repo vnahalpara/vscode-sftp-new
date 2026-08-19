@@ -42,6 +42,10 @@ interface TunnelMarker {
   port: number;
   pid: number;
   startedAt: number;
+  // os.uptime() as it read at the moment startedAt was taken, which pins the
+  // boot instant this marker was written against. -1 once read back means the
+  // marker carries no uptime at all. See markerIsFromThisBoot().
+  uptimeAtWrite: number;
 }
 
 const DEFAULT_HEALTHCHECK_MS = 15000;
@@ -390,6 +394,14 @@ function readMarker(key: string): TunnelMarker | undefined {
     port: parsed.port,
     pid: parsed.pid,
     startedAt: typeof parsed.startedAt === 'number' ? parsed.startedAt : 0,
+    // -1 rather than 0 for a missing one: a marker written in the first second
+    // after boot legitimately records an uptime of 0, and "written at boot"
+    // has to stay distinguishable from "written by a build that recorded no
+    // uptime", which markerIsFromThisBoot() refuses outright.
+    uptimeAtWrite:
+      typeof parsed.uptimeAtWrite === 'number' && parsed.uptimeAtWrite >= 0
+        ? parsed.uptimeAtWrite
+        : -1,
   };
 }
 
@@ -478,6 +490,14 @@ async function classifyOwnedPort(key: string, port: number): Promise<OwnedPortOu
   return { kind: 'hung', marker };
 }
 
+// os.uptime() has whole-second granularity on some platforms and the wall
+// clock is slewed continuously by NTP, so two estimates of the same boot
+// instant taken minutes apart will never agree to the millisecond. This is how
+// much disagreement is ordinary. It is not slack on the "is this marker from
+// the current boot" question -- gate 1 below stays exact -- and the clock
+// jumps gate 2 exists to catch are minutes to days, never seconds.
+const BOOT_ESTIMATE_SLACK_MS = 5000;
+
 /**
  * Was this marker written during the current boot?
  *
@@ -490,14 +510,49 @@ async function classifyOwnedPort(key: string, port: number): Promise<OwnedPortOu
  * find it, find *a* live pid, find a listener that does not answer SOCKS5,
  * and SIGTERM a stranger.
  *
- * The comparison is deliberately not padded with slack in the permissive
- * direction. Slack there buys nothing except a wider window in which a
+ * Only half of that arithmetic is monotonic, though. os.uptime() counts from
+ * boot and cannot be moved; Date.now() can be, and the two directions are not
+ * equally dangerous:
+ *
+ *   Forward. The clock jumps ahead, the estimated boot instant moves ahead
+ *   with it, and a marker written before the jump now reads as pre-boot. It
+ *   is disqualified: no adopt, no kill, at worst one leaked wireproxy.
+ *
+ *   Backward. The clock is corrected backwards -- a dead RTC battery, a
+ *   dual-boot machine writing local time where UTC was expected, a first NTP
+ *   sync after either -- and the estimated boot instant moves back with it.
+ *   Correct it by more than the current uptime and a genuinely pre-boot
+ *   marker lands *after* the estimate and passes gate 1. Add a pid recycled
+ *   onto a live process that stays silent through all four probes and this
+ *   function has authorised a SIGTERM to a stranger.
+ *
+ * So the marker also records os.uptime() as it read when the timestamp was
+ * taken, which pins the boot instant the writer measured against. Within one
+ * boot the writer's estimate and ours agree; a backwards jump in between moves
+ * ours *earlier* than the writer's, by the size of the jump, and gate 2
+ * refuses on that alone -- no comparison against a wall-clock timestamp
+ * involved. A marker carrying no uptime (every build before this one) cannot
+ * be checked that way and is refused outright, which costs the same leaked
+ * wireproxy as the forward case.
+ *
+ * Neither gate is padded in the permissive direction beyond what clock
+ * granularity forces. Slack buys nothing except a wider window in which a
  * pre-boot marker passes for a current one, and the cost of the two mistakes
  * is not symmetric: judging a real marker stale leaks one wireproxy, while
  * judging a stale marker real signals a process we know nothing about.
  */
 function markerIsFromThisBoot(marker: TunnelMarker): boolean {
-  return marker.startedAt >= Date.now() - os.uptime() * 1000;
+  const bootNow = Date.now() - os.uptime() * 1000;
+  // 1. The marker must not predate the boot we are running under.
+  if (marker.startedAt < bootNow) {
+    return false;
+  }
+  // 2. ...and the estimate that answered (1) has to be worth believing.
+  if (marker.uptimeAtWrite < 0) {
+    return false;
+  }
+  const bootAtWrite = marker.startedAt - marker.uptimeAtWrite * 1000;
+  return bootNow >= bootAtWrite - BOOT_ESTIMATE_SLACK_MS;
 }
 
 /**
@@ -674,7 +729,10 @@ async function startTunnel(vpn: VpnOption, key: string, port: number): Promise<T
 
   // Stake our claim on the port before anyone waits on it, so a reload that
   // happens seconds from now can tell this listener apart from a stranger's.
-  writeMarker(key, { port, pid: child.pid, startedAt: Date.now() });
+  // The two clock readings are taken together on purpose: markerIsFromThisBoot
+  // subtracts one from the other to recover the boot instant they were written
+  // against, and any gap between them is error in that estimate.
+  writeMarker(key, { port, pid: child.pid, startedAt: Date.now(), uptimeAtWrite: os.uptime() });
 
   logger.info(`VPN tunnel up (SOCKS5 127.0.0.1:${port}) for ${vpn.configFile}`);
   started = { key, port, pid: child.pid, process: child, mergedConfPath };

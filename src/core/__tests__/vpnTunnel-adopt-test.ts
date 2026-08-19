@@ -142,6 +142,16 @@ function plantMarker(h: Harness, marker: any): void {
   fs.writeFileSync(markerPath, typeof marker === 'string' ? marker : JSON.stringify(marker));
 }
 
+/**
+ * A marker exactly as a running tunnel of ours would have left it: every field
+ * present and current-boot. Tests about one particular gate override just the
+ * field that gate reads, so the marker fails for the reason under test rather
+ * than incidentally for some other one.
+ */
+function ourMarker(port: number, pid: number, overrides: any = {}): any {
+  return { port, pid, startedAt: Date.now(), uptimeAtWrite: os.uptime(), ...overrides };
+}
+
 // release() finishes on a promise chain; let it drain before asserting.
 function settle(): Promise<void> {
   return new Promise(resolve => setImmediate(resolve));
@@ -164,7 +174,7 @@ describe('tunnel adoption', () => {
   test('adopts when marker matches, pid is alive and the port speaks SOCKS5', async () => {
     const h = await harness({ isPidAlive: () => true, speaksSocks5: async () => true });
     await occupy(h.derivedPort);
-    plantMarker(h, { port: h.derivedPort, pid: FAKE_PID, startedAt: Date.now() });
+    plantMarker(h, ourMarker(h.derivedPort, FAKE_PID));
 
     await expect(h.mod.acquire(h.vpn)).resolves.toBe(h.derivedPort);
     // The whole point: no second wireproxy.
@@ -185,7 +195,7 @@ describe('tunnel adoption', () => {
   test('does NOT adopt when the marker names a different port', async () => {
     const h = await harness({ isPidAlive: () => true, speaksSocks5: async () => true });
     await occupy(h.derivedPort);
-    plantMarker(h, { port: h.derivedPort + 1, pid: FAKE_PID, startedAt: Date.now() });
+    plantMarker(h, ourMarker(h.derivedPort + 1, FAKE_PID));
 
     const port = await h.mod.acquire(h.vpn);
     expect(port).not.toBe(h.derivedPort);
@@ -195,7 +205,7 @@ describe('tunnel adoption', () => {
   test('does NOT adopt when the marker pid is dead', async () => {
     const h = await harness({ isPidAlive: () => false, speaksSocks5: async () => true });
     await occupy(h.derivedPort);
-    plantMarker(h, { port: h.derivedPort, pid: FAKE_PID, startedAt: Date.now() });
+    plantMarker(h, ourMarker(h.derivedPort, FAKE_PID));
 
     const port = await h.mod.acquire(h.vpn);
     expect(port).not.toBe(h.derivedPort);
@@ -207,7 +217,7 @@ describe('tunnel adoption', () => {
     // marker checks all pass, the protocol check is what catches it.
     const h = await harness({ isPidAlive: () => true, speaksSocks5: async () => false });
     await occupy(h.derivedPort);
-    plantMarker(h, { port: h.derivedPort, pid: FAKE_PID, startedAt: Date.now() });
+    plantMarker(h, ourMarker(h.derivedPort, FAKE_PID));
 
     const port = await h.mod.acquire(h.vpn);
     expect(port).not.toBe(h.derivedPort);
@@ -301,7 +311,7 @@ describe('marker shape validation', () => {
     // that matches: without it they would be rejected for the wrong reason.
     const marker =
       shape && !Array.isArray(shape) && shape.pid !== undefined && shape.port === undefined
-        ? { ...shape, port: h.derivedPort, startedAt: Date.now() }
+        ? { ...ourMarker(h.derivedPort, shape.pid), ...shape, port: h.derivedPort }
         : shape;
     plantMarker(h, marker);
 
@@ -336,7 +346,7 @@ describe('ownership marker', () => {
       },
     });
     await occupy(h.derivedPort);
-    plantMarker(h, { port: h.derivedPort, pid: FAKE_PID, startedAt: Date.now() });
+    plantMarker(h, ourMarker(h.derivedPort, FAKE_PID));
 
     await h.mod.acquire(h.vpn);
     h.mod.release(h.vpn);
@@ -358,10 +368,10 @@ describe('ownership marker', () => {
       killPid: pid => killed.push(pid),
     });
     await occupy(h.derivedPort);
-    plantMarker(h, { port: h.derivedPort, pid: FAKE_PID, startedAt: Date.now() });
+    plantMarker(h, ourMarker(h.derivedPort, FAKE_PID));
 
     await h.mod.acquire(h.vpn);
-    plantMarker(h, { port: h.derivedPort, pid: FAKE_PID + 1, startedAt: Date.now() });
+    plantMarker(h, ourMarker(h.derivedPort, FAKE_PID + 1));
 
     h.mod.release(h.vpn);
     await settle();
@@ -377,7 +387,7 @@ describe('ownership marker', () => {
       killPid: pid => killed.push(pid),
     });
     await occupy(h.derivedPort);
-    plantMarker(h, { port: h.derivedPort, pid: FAKE_PID, startedAt: Date.now() });
+    plantMarker(h, ourMarker(h.derivedPort, FAKE_PID));
 
     await h.mod.acquire(h.vpn);
     fs.unlinkSync(h.mod.markerPathFor(h.vpn));

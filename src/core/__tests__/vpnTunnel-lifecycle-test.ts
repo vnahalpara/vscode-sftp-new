@@ -139,7 +139,7 @@ function plantMarker(h: Harness, marker: any): void {
  * incidentally for some other one.
  */
 function ourMarker(port: number, pid: number, overrides: any = {}): any {
-  return { port, pid, startedAt: Date.now(), ...overrides };
+  return { port, pid, startedAt: Date.now(), uptimeAtWrite: os.uptime(), ...overrides };
 }
 
 // release() and disposeAll() both finish on a promise chain; let it drain
@@ -584,6 +584,52 @@ describe('reaping a hung tunnel', () => {
     const h = await harness({ isPidAlive: () => true, speaksSocks5: async () => true });
     await occupy(h.derivedPort);
     plantMarker(h, ourMarker(h.derivedPort, OLD_PID, { startedAt: undefined }));
+
+    const port = await h.mod.acquire(h.vpn);
+
+    expect(port).not.toBe(h.derivedPort);
+    expect(h.state.spawns).toBe(1);
+  });
+
+  // Date.now() minus os.uptime() only estimates the boot instant, because
+  // only the uptime half of it is monotonic. A marker records the uptime it
+  // was written at so the estimate the writer measured can be compared with
+  // ours; these two rows are what that comparison is for.
+  const ONE_HOUR_MS = 60 * 60 * 1000;
+  const clockCases: Array<[string, any]> = [
+    // A marker from a build that recorded no uptime. Its timestamp cannot be
+    // checked against anything, so it cannot be trusted to name this boot.
+    ['no recorded uptime', { uptimeAtWrite: undefined }],
+    // The wall clock has been set back an hour since this marker was written
+    // -- dead RTC battery, a dual-boot machine writing local time, the first
+    // NTP sync after either -- so the marker's own timestamp is now an hour
+    // in the future and our estimated boot instant has moved an hour earlier
+    // than the one the writer measured. Left unchecked, a *genuinely*
+    // pre-boot marker slides back over the boundary and passes.
+    ['a wall clock corrected backwards', { startedAt: Date.now() + ONE_HOUR_MS }],
+  ];
+
+  test.each(clockCases)('a marker with %s is never reaped', async (_name, overrides) => {
+    const killed: number[] = [];
+    const h = await harness({
+      isPidAlive: () => true,
+      speaksSocks5: async () => false,
+      killPid: pid => killed.push(pid),
+    });
+    await occupy(h.derivedPort);
+    plantMarker(h, ourMarker(h.derivedPort, OLD_PID, overrides));
+
+    const port = await h.mod.acquire(h.vpn);
+
+    expect(killed).toEqual([]);
+    expect(port).not.toBe(h.derivedPort);
+    expect(h.state.spawns).toBe(1);
+  });
+
+  test.each(clockCases)('a marker with %s is not adopted either', async (_name, overrides) => {
+    const h = await harness({ isPidAlive: () => true, speaksSocks5: async () => true });
+    await occupy(h.derivedPort);
+    plantMarker(h, ourMarker(h.derivedPort, OLD_PID, overrides));
 
     const port = await h.mod.acquire(h.vpn);
 

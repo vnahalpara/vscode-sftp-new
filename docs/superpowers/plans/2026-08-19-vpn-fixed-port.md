@@ -26,7 +26,7 @@ The spec says: *"If the derived port is occupied and answers a SOCKS5 handshake,
 
 So adoption requires **proof of ownership**, not just protocol agreement:
 
-1. A marker file, written by us when we start a tunnel, living in the extension's own storage directory (the `init(dir)` path), named from the same `tunnelKey(vpn)` the tunnel map uses. It records `{ port, pid, startedAt }`.
+1. A marker file, written by us when we start a tunnel, living in the extension's own storage directory (the `init(dir)` path), named from the same `tunnelKey(vpn)` the tunnel map uses. It records `{ port, pid, startedAt, uptimeAtWrite }` — the last two together, so the boot instant it was written against can be recovered from it.
 2. On adoption we require **all** of: the marker exists, its `port` matches the port we are about to adopt, its `pid` is still alive, and the port answers a SOCKS5 handshake.
 3. Any one of those failing means **do not adopt** — fall back to starting our own tunnel on a free port.
 
@@ -44,6 +44,8 @@ The SOCKS5 probe stays: it catches a stale marker whose PID was recycled onto an
 
 1. **Re-probe before escalating.** Three attempts at a 2s timeout, on top of the 300ms adopt probe, and a listener that answers any of them is adopted rather than killed. A single missed loopback round trip — a saturated CPU, a swapping machine, a laptop a second out of sleep — is not evidence of death. Adopting wrongly costs one extra wireproxy; killing wrongly can take down another window's tunnel mid-transfer, and asymmetric cost buys asymmetric confidence.
 2. **`marker.startedAt` against `os.uptime()`.** A marker written before the current boot describes a process that cannot still exist, because pids are handed out afresh every boot — so whatever is alive under that pid now is, with certainty, unrelated. Such a marker is disqualified outright: not reaped, and not adopted either, since a marker that cannot vouch for a pid cannot vouch for a listener. Force-quitting VS Code leaves exactly this marker behind.
+
+   Only the `os.uptime()` half of that arithmetic is monotonic, and the two directions the wall clock can move are not equally dangerous. A **forward** jump pushes the estimated boot instant ahead, so a genuine marker reads as pre-boot and is disqualified — a leaked wireproxy, nothing worse. A **backward** correction larger than the current uptime (dead RTC battery, a dual-boot machine writing local time, the first NTP sync after either) pushes the estimate back far enough that a genuinely pre-boot marker lands *after* it and passes; with a recycled live pid holding the port and staying silent through all four probes, that is a `SIGTERM` to a stranger. So the marker also records `os.uptime()` as read when its timestamp was taken, pinning the boot instant the writer measured; a backward jump between write and read moves our estimate earlier than the writer's and is refused on that alone, with no wall-clock timestamp involved. A marker carrying no recorded uptime — every build before this one — cannot be checked that way and is refused outright.
 
 **What is deliberately *not* claimed.** The reap is best effort. If the signal does not free the port (EPERM, or a process ignoring `SIGTERM`), the marker stays on disk — it is the only handle a future run has on that process — and we fall back to a free port, or fail outright when `vpn.socksPort` pins the port. Both gates are covered by tests, including that a pre-boot marker is never killed.
 
