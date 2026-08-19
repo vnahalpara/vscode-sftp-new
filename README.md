@@ -577,7 +577,7 @@ The rest of your machine is untouched and no root/admin is required. **SFTP only
     "type": "wireguard",
     "configFile": "~/surfshark/us-nyc-st004.conf",
     "wireproxyPath": "wireproxy", // optional; defaults to PATH lookup
-    "socksPort": 0,               // optional; 0 = pick a free port
+    "socksPort": 0,               // optional; 0 = an explicit port always wins when set
     "healthCheckTimeout": 15000   // optional; ms to wait for the tunnel
   }
 }
@@ -590,6 +590,80 @@ Notes:
   clear error in the SFTP output channel.
 - Composable with `hop`: the VPN carries the first outbound connection, then hops proceed inside it.
 - Connections sharing the same `configFile` reuse a single `wireproxy` process.
+
+#### The SOCKS port is now stable per config file
+
+Without an explicit `vpn.socksPort`, the extension no longer picks a random free port on
+every restart. It derives a port deterministically from the WireGuard config file's path,
+inside a configurable range, so the same `.conf` always lands on the same port across
+window reloads — anything that hard-codes it (a `ProxyCommand`, a note in `sftp.json`)
+keeps working instead of going stale.
+
+- **`sftp.vpn.portRange`** (string, default `"21000-21999"`) — the range the deterministic
+  port is chosen from. Accepts `"low-high"`; anything else (missing dash, reversed bounds,
+  out of the 1024–65535 range) silently falls back to the default rather than breaking
+  connections.
+- **`sftp.vpn.keepAlive`** (boolean, default `true`) — leave the tunnel running when the
+  last SFTP/terminal session using it disconnects, so the next connection reuses it instead
+  of paying wireproxy's startup and health-check cost again. Set to `false` to kill the
+  tunnel as soon as its last user releases it, as before. Either way, closing VS Code (or
+  disabling the extension) always tears down every tunnel it started.
+
+An explicit `vpn.socksPort` in a profile still always wins over the derived port — it is
+never silently moved.
+
+#### Why a running tunnel is only ever adopted, not just reused
+
+When the derived (or pinned) port is already occupied, the extension does not simply assume
+it can use whatever is listening there. A port that answers a SOCKS5 handshake only proves
+that *something* speaks SOCKS5 on it — not that it is this extension's tunnel, and not that
+it goes where you expect. Any other process on the machine can bind a port in the same range
+and speak SOCKS5 back. Trusting that alone would route your SSH session — password or key
+included — through a proxy chosen by whichever process won the race to that port; on a
+shared or already-compromised machine that is a straightforward man-in-the-middle.
+
+So the extension only reuses ("adopts") an already-running listener when **all** of the
+following hold:
+1. A marker file it wrote itself, in its own extension storage directory, exists for that
+   config file.
+2. The marker's recorded port matches the port in question.
+3. The marker's recorded process ID is still alive.
+4. The marker was written since the machine last booted (a marker surviving a reboot names a
+   process ID that has, with certainty, been recycled onto something unrelated).
+5. The port still answers a SOCKS5 handshake.
+
+If any single one of those fails, the extension does not adopt — it either starts its own
+tunnel on a free port, or, when `vpn.socksPort` pins an exact port, fails the connection
+outright rather than silently sharing that port with an unknown process.
+
+**A tunnel of ours that stops responding may be terminated.** If everything above says a
+listener is our own previous tunnel except the live SOCKS5 answer — it is ours, its process
+is alive, but it has stopped talking — the extension re-probes it a few more times (to rule
+out a slow machine rather than a dead one) and, only if it still never answers, sends it
+`SIGTERM` before starting its replacement. This never happens to a process the extension did
+not itself record in a marker it trusts; a listener that fails any of the five adoption
+checks above is left alone, not signalled.
+
+#### Upgrading from before 1.26.0
+
+The marker file format changed in 1.26.0 to support the boot check above, so **a marker
+written by an older build is refused for both adoption and reaping** — the new code cannot
+tell an old marker apart from a foreign one, so it treats it the same way: not proof of
+anything. In practice, on the first connection after upgrading:
+
+- If a tunnel from the old build is still running for a given VPN config, it is **not**
+  adopted and **not** reaped. It keeps running and holding its port, orphaned, until the
+  machine restarts or you kill it yourself. This happens at most once per VPN config file.
+- **If you have `vpn.socksPort` pinned** to a port that old tunnel still holds, the new
+  build will **refuse to start**, with an error naming the port — it no longer silently
+  proceeds and shares the port with a process it can't verify (that silent sharing was the
+  security gap this release closes). You'll see something like *"VPN SOCKS port … is
+  already in use by something this extension did not start"*.
+
+**To recover:** find and stop the leftover `wireproxy` process (e.g. `pgrep wireproxy` /
+`ps aux | grep wireproxy`, then stop the one holding the port named in the error), or
+restart the machine. Either clears the stale listener and the next connection starts (or
+re-derives) a tunnel normally.
 
 ### Database (MySQL over SSH)
 
