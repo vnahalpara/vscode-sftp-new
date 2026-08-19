@@ -132,7 +132,24 @@ function foldedSkeleton(text: string): string {
   // throw first. `toLowerCase` (not `toLocaleLowerCase`) is deliberate --
   // what is left after the strip is ASCII alphanumerics, so the fold must
   // not vary with the host's locale.
-  return typeof text === 'string' ? text.replace(NON_ALPHANUMERIC_RE, '').toLowerCase() : '';
+  //
+  // NFKC first: it maps fullwidth forms and compatibility singletons (the
+  // long s, the Kelvin sign) onto their ASCII equivalents, and is the
+  // identity on ASCII -- so it closes those echo shapes for free, with no
+  // false-positive cost on a normal message. It does NOT fold homoglyphs
+  // from other scripts; see candidateContainsToken for what that leaves open.
+  if (typeof text !== 'string') {
+    return '';
+  }
+  let normalised = text;
+  try {
+    normalised = text.normalize('NFKC');
+  } catch (error) {
+    // normalize() throws only on an invalid form argument, never on content,
+    // but this helper's contract is that it cannot throw at all.
+    normalised = text;
+  }
+  return normalised.replace(NON_ALPHANUMERIC_RE, '').toLowerCase();
 }
 
 // Tokens whose skeleton falls under this floor are DELIBERATELY left
@@ -145,6 +162,21 @@ function foldedSkeleton(text: string): string {
 // half-typed config) land there, and those are not secrets worth the
 // blackout. Layer 2's shape-based scrub still applies to them.
 const MIN_TOKEN_SKELETON_LENGTH = 12;
+// KNOWN GAP, stated precisely because an understated version of this comment
+// is what let three earlier fixes ship as complete. Layer 1 compares skeletons
+// after NFKC + case folding, which does NOT fold homoglyphs from other scripts:
+// a token echoed with ASCII letters swapped for their Cyrillic twins
+// (a -> U+0430, K -> U+041A, x -> U+0445 ...) produces a skeleton that does not
+// match, so Layer 1 misses it entirely.
+//
+// Sparsely homoglyphed, Layer 2's shape scrub still redacts the surviving
+// ASCII runs. DENSELY homoglyphed -- no run of 20 reaching charset characters
+// left -- NOTHING is redacted and the whole token is emitted. That case is
+// judged theoretical rather than realistic: it needs an upstream that
+// transliterates the token into another script, which is not reformatting but
+// participation. Closing it would need a Unicode confusable fold, whose
+// false-positive cost on ordinary error text is not worth a vector no
+// reformatting proxy produces.
 function candidateContainsToken(candidateText: string, token: string): boolean {
   const tokenSkeleton = foldedSkeleton(token);
   if (tokenSkeleton.length < MIN_TOKEN_SKELETON_LENGTH) {
