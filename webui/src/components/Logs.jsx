@@ -291,6 +291,20 @@ export default function Logs() {
     };
   }, []);
 
+  // Guards the exact race a fast reviewer click exposes: GET /api/file (a
+  // `sed -n` over SSH) can easily take longer to resolve than a follow
+  // socket takes to open. Without this, clicking Follow while that request
+  // is still in flight lets its `.then()` land AFTER live lines have
+  // already started appending, and buffer.setSnapshot() -- which REPLACES
+  // the whole buffer -- would silently erase everything Follow had already
+  // streamed. Set the instant Follow starts (startFollow()), for the
+  // CURRENT `selected` only -- selectTarget() resets it on every new
+  // selection. Deliberately NEVER flips back to false on stop/error: once
+  // Follow has touched this buffer, a stale snapshot must never be allowed
+  // to stomp it, even if the user stops Follow again before the snapshot
+  // request resolves.
+  const followStartedRef = useRef(false);
+
   const loadDiscovery = useCallback(async () => {
     setDiscoveryLoading(true);
     setDiscoveryError(null);
@@ -323,6 +337,7 @@ export default function Logs() {
   // tab (see logFollow.ts's module comment). Follow is Step 2, always
   // explicit.
   function selectTarget(target) {
+    followStartedRef.current = false;
     setFollowTarget(null);
     setFollowStatus('idle');
     setFollowReason('');
@@ -352,6 +367,13 @@ export default function Logs() {
         if (cancelled || !mountedRef.current) {
           return;
         }
+        // Follow started (for this same selection) while this request was
+        // still in flight -- see followStartedRef's own comment. The
+        // buffer already holds live output; a snapshot that is now stale
+        // must not replace it.
+        if (followStartedRef.current) {
+          return;
+        }
         buffer.setSnapshot((res && res.content) || '');
       })
       .catch(err => {
@@ -377,6 +399,7 @@ export default function Logs() {
     if (!selected) {
       return;
     }
+    followStartedRef.current = true;
     setFollowReason('');
     setFollowStatus('connecting');
     setFollowTarget(selected);
@@ -559,6 +582,14 @@ export default function Logs() {
                     )}
                   </div>
                 </div>
+
+                {selected.kind === 'file' && !tailError && (
+                  <div className="muted" style={{ fontSize: 11.5, marginBottom: 8 }}>
+                    Showing the start of the file (the first {TAIL_LINES.toLocaleString()} lines, oldest
+                    first) — for an actively growing log this is old content; start Follow for what's
+                    happening now.
+                  </div>
+                )}
 
                 {tailError && (
                   <div className="row" style={{ marginBottom: 8 }}>
