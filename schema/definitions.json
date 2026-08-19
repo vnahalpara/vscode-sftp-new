@@ -335,7 +335,7 @@
           },
           "socksPort": {
             "type": "number",
-            "description": "Local SOCKS5 port for the tunnel. 0 (default) picks a free port at runtime.",
+            "description": "Local SOCKS5 port for the tunnel. 0 (default) derives a stable port from this VPN config file's path, inside the sftp.vpn.portRange range, so the same .conf lands on the same port across restarts. Set a number to pin an exact port.",
             "default": 0
           },
           "healthCheckTimeout": {

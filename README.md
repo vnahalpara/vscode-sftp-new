@@ -577,7 +577,7 @@ The rest of your machine is untouched and no root/admin is required. **SFTP only
     "type": "wireguard",
     "configFile": "~/surfshark/us-nyc-st004.conf",
     "wireproxyPath": "wireproxy", // optional; defaults to PATH lookup
-    "socksPort": 0,               // optional; 0 = an explicit port always wins when set
+    "socksPort": 0,               // optional; 0 (default) = derive a stable port, see below
     "healthCheckTimeout": 15000   // optional; ms to wait for the tunnel
   }
 }

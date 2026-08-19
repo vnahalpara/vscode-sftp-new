@@ -35,7 +35,14 @@ const configScheme = {
     type: Joi.string().valid('wireguard'),
     configFile: Joi.string().required(),
     wireproxyPath: Joi.string(),
-    socksPort: Joi.number().integer().min(1).max(65535),
+    // 0 is legal and is the documented default: it means "no explicit port,
+    // derive one from the config path" (see vpnTunnel.isUsablePort), and both
+    // README.md and schema/definitions.json document it, so VS Code's own
+    // completion inside sftp.json offers it. A min of 1 here rejected the
+    // whole profile -- not just its vpn block -- and with it plain SFTP
+    // transfers and the database features for anyone who had taken the
+    // editor's suggestion.
+    socksPort: Joi.number().integer().min(0).max(65535),
     healthCheckTimeout: Joi.number().integer(),
   },
   ssh_prefix: Joi.string(),
