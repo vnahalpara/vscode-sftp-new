@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useSession } from './useSession';
 import { Badge, Section } from './components/ui.jsx';
 import Overview from './components/Overview.jsx';
@@ -23,6 +23,14 @@ const TABS = [
   ['logs', 'Logs', 'logs'],
   ['terminal', 'Terminal', 'terminal'],
 ];
+
+// Terminal and Logs both hold a live server-side connection (an SSH shell, a
+// `tail -F`/journalctl follow) that switching tabs must not kill -- see the
+// "terminal tab is reset" bug this was built to fix. Overview/Services/Web
+// server hold no connection and re-fetch cheaply, so they stay mount-on-
+// demand: only these two get the render-once-then-hide-with-CSS treatment
+// in ServerTabs below.
+const PERSISTENT_TABS = new Set(['terminal', 'logs']);
 
 const STATUS_TONE = { online: 'ok', connecting: 'warn', idle: 'warn', offline: 'bad', unsupported: 'bad' };
 const STATUS_LABEL = {
@@ -86,6 +94,72 @@ function Sidebar({ profile, statusTone, page, onNavigate, capabilities }) {
         )}
       </Section>
     </aside>
+  );
+}
+
+// The tab bar plus whichever tab is active. Lives as its own component
+// (rather than inline in App's `content` branch) so its `opened` state
+// resets for free the moment the user navigates to Dashboard/Activity/
+// Settings and this whole subtree unmounts — see the PERSISTENT_TABS
+// comment above: that unmount is what guarantees a persistent tab is not an
+// immortal one, per the "no leaked sockets" requirement.
+function ServerTabs({ page, profile, snapshot, slow, series, facts, capabilities, onNavigate }) {
+  // 'overview', 'services' and 'web' (plus 'database', which is unreachable
+  // while disabled) land here too: any other/unrecognised tab key falls
+  // back to Overview — the nav item itself is still enabled/disabled
+  // correctly from `capabilities`.
+  const tabPage = TABS.some(([key]) => key === page) ? page : 'overview';
+
+  // Which persistent tabs (Terminal, Logs) have ever been opened this
+  // mount. Once a key is added it is never removed — that is what keeps
+  // the tab's live connection running while some OTHER tab is active; see
+  // the render below, which keeps every opened persistent tab in the tree
+  // and merely hides the inactive ones with `display: none` instead of
+  // switching between them with if/else the way the non-persistent tabs
+  // still do.
+  const [opened, setOpened] = useState(() => (PERSISTENT_TABS.has(tabPage) ? new Set([tabPage]) : new Set()));
+  useEffect(() => {
+    if (!PERSISTENT_TABS.has(tabPage)) {
+      return;
+    }
+    setOpened(prev => (prev.has(tabPage) ? prev : new Set(prev).add(tabPage)));
+  }, [tabPage]);
+
+  return (
+    <>
+      <div className="row" style={{ gap: 2, marginBottom: 18, paddingBottom: 10, borderBottom: '1px solid var(--border)' }}>
+        {TABS.map(([key, label, capKey]) => {
+          const enabled = key === 'overview' || Boolean(capabilities && capabilities[capKey]);
+          return (
+            <NavItem
+              key={key}
+              label={label}
+              active={key === tabPage}
+              disabled={!enabled}
+              onClick={() => onNavigate(key)}
+            />
+          );
+        })}
+      </div>
+      {tabPage === 'services' && <Services />}
+      {tabPage === 'web' && <WebServer />}
+      {tabPage === 'overview' && <Overview snapshot={snapshot} slow={slow} series={series} facts={facts} />}
+      {/* Terminal and Logs: mounted once, on first visit, then kept mounted
+          and merely hidden — never re-mounted on every tab switch — so the
+          shell session / log follow they own survives switching away and
+          back. See Terminal.jsx's own comment on why xterm additionally
+          needs an explicit re-fit when it becomes visible again. */}
+      {opened.has('terminal') && (
+        <div style={{ display: tabPage === 'terminal' ? 'block' : 'none' }}>
+          <Terminal profile={profile} active={tabPage === 'terminal'} />
+        </div>
+      )}
+      {opened.has('logs') && (
+        <div style={{ display: tabPage === 'logs' ? 'block' : 'none' }}>
+          <Logs />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -156,42 +230,20 @@ export default function App() {
   } else if (page === 'settings') {
     content = <Settings profile={profile} session={session} />;
   } else {
-    // 'overview', 'services' and 'web' (plus 'database', which is
-    // unreachable while disabled) land here: the tab bar plus whichever tab
-    // is active. Any other/unrecognised tab key falls back to Overview —
-    // the nav item itself is still enabled/disabled correctly from
-    // `capabilities`.
-    const tabPage = TABS.some(([key]) => key === page) ? page : 'overview';
-    let tabContent;
-    if (tabPage === 'services') {
-      tabContent = <Services />;
-    } else if (tabPage === 'web') {
-      tabContent = <WebServer />;
-    } else if (tabPage === 'terminal') {
-      tabContent = <Terminal profile={profile} />;
-    } else if (tabPage === 'logs') {
-      tabContent = <Logs />;
-    } else {
-      tabContent = <Overview snapshot={snapshot} slow={slow} series={series} facts={facts} />;
-    }
+    // 'overview', 'services', 'web', 'logs' and 'terminal' (plus 'database',
+    // which is unreachable while disabled) land here — see ServerTabs for
+    // the tab bar and the persistent-mount handling Terminal/Logs need.
     content = (
-      <>
-        <div className="row" style={{ gap: 2, marginBottom: 18, paddingBottom: 10, borderBottom: '1px solid var(--border)' }}>
-          {TABS.map(([key, label, capKey]) => {
-            const enabled = key === 'overview' || Boolean(capabilities && capabilities[capKey]);
-            return (
-              <NavItem
-                key={key}
-                label={label}
-                active={key === tabPage}
-                disabled={!enabled}
-                onClick={() => setPage(key)}
-              />
-            );
-          })}
-        </div>
-        {tabContent}
-      </>
+      <ServerTabs
+        page={page}
+        profile={profile}
+        snapshot={snapshot}
+        slow={slow}
+        series={series}
+        facts={facts}
+        capabilities={capabilities}
+        onNavigate={setPage}
+      />
     );
   }
 

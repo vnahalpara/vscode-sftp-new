@@ -38,7 +38,7 @@ function statusLabel(status) {
 // instance via a `key` bump instead of rewiring a socket in place -- that
 // gets this component's own cleanup (this effect's return) as the teardown
 // path for free, rather than a second hand-rolled one.
-function TerminalSession({ profile, onReconnect }) {
+function TerminalSession({ profile, active, onReconnect }) {
   const hostRef = useRef(null);
   const [status, setStatus] = useState('connecting'); // connecting | open | closed-clean | closed-error
   const [reason, setReason] = useState('');
@@ -54,6 +54,15 @@ function TerminalSession({ profile, onReconnect }) {
       mountedRef.current = false;
     };
   }, []);
+
+  // Set by the mount effect below, to that same effect's own fitAddon/socket
+  // closure — so the "this tab became active again" effect further down can
+  // re-fit and re-sync the PTY size without a second fitAddon/socket of its
+  // own. App.jsx now keeps this component mounted while its tab is hidden
+  // (`display: none`) rather than unmounting it on every tab switch, which
+  // is what makes this necessary: the mount effect only ever fits once, on
+  // first open.
+  const fitIfVisibleRef = useRef(null);
 
   useEffect(() => {
     const term = new XTerm({
@@ -88,6 +97,14 @@ function TerminalSession({ profile, onReconnect }) {
         return;
       }
       const { cols, rows } = term;
+      // xterm reports 0x0 while its container has no box at all (this tab
+      // hidden behind `display: none`, or a ResizeObserver callback firing
+      // mid-transition) — the server clamps to 1-1000 and would ignore this
+      // anyway, but never sending it is what keeps a stray 0-size frame from
+      // ever reaching term.resize() by way of a round trip through the PTY.
+      if (cols < 1 || rows < 1) {
+        return;
+      }
       if (lastSize && lastSize.cols === cols && lastSize.rows === rows) {
         return;
       }
@@ -98,9 +115,23 @@ function TerminalSession({ profile, onReconnect }) {
       socket.send(JSON.stringify({ type: 'resize', cols, rows }));
     }
 
-    const resizeObserver = new ResizeObserver(() => {
+    // xterm cannot measure itself while its container is `display: none`
+    // (the tab is hidden but this component stays mounted — see App.jsx):
+    // fit() would compute a collapsed/zero grid and corrupt xterm's own
+    // layout state, not just skip a resize frame. Only fit while the host
+    // element actually has a box.
+    function fitIfVisible() {
+      const host = hostRef.current;
+      if (!host || host.clientWidth === 0 || host.clientHeight === 0) {
+        return;
+      }
       fitAddon.fit();
       sendResize();
+    }
+    fitIfVisibleRef.current = fitIfVisible;
+
+    const resizeObserver = new ResizeObserver(() => {
+      fitIfVisible();
     });
     resizeObserver.observe(hostRef.current);
 
@@ -163,6 +194,7 @@ function TerminalSession({ profile, onReconnect }) {
     socket.addEventListener('error', () => {});
 
     return () => {
+      fitIfVisibleRef.current = null;
       resizeObserver.disconnect();
       // Safe to call regardless of readyState — CONNECTING simply aborts,
       // OPEN sends a close frame, and a socket already CLOSING/CLOSED is a
@@ -172,6 +204,18 @@ function TerminalSession({ profile, onReconnect }) {
       term.dispose();
     };
   }, []);
+
+  // Re-fit and re-sync the PTY's size whenever this session's tab becomes
+  // the active one again. The mount effect above only ever fits once, at
+  // first open; while this component sits hidden behind a tab switch its
+  // container has no box to measure at all (see fitIfVisible above), so
+  // xterm's grid would otherwise stay stuck at whatever size it last had
+  // the moment the tab is shown again.
+  useEffect(() => {
+    if (active && fitIfVisibleRef.current) {
+      fitIfVisibleRef.current();
+    }
+  }, [active]);
 
   return (
     <Card
@@ -203,10 +247,23 @@ function TerminalSession({ profile, onReconnect }) {
 // openShell() to session.transport, not session.privilegedTransport (see its
 // TerminalDeps comment): this tab never has a root shell, so nothing here
 // should ever suggest it does.
-export default function Terminal({ profile }) {
+// `active` says whether THIS tab is currently the visible one — App.jsx now
+// keeps Terminal mounted (hidden via CSS) while another tab is showing,
+// rather than unmounting it, so the shell session survives switching away
+// and back. Defaults to true so nothing else that renders <Terminal /> (or
+// a future test) has to know about tab visibility to get the old
+// always-visible behaviour.
+export default function Terminal({ profile, active = true }) {
   // Bumping this key fully unmounts and remounts TerminalSession, which is
   // what actually gets a fresh socket and a fresh xterm instance — see that
   // component's own comment on why a remount, not an in-place rewire.
   const [attempt, setAttempt] = useState(0);
-  return <TerminalSession key={attempt} profile={profile} onReconnect={() => setAttempt(a => a + 1)} />;
+  return (
+    <TerminalSession
+      key={attempt}
+      profile={profile}
+      active={active}
+      onReconnect={() => setAttempt(a => a + 1)}
+    />
+  );
 }
