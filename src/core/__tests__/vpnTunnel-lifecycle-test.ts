@@ -261,6 +261,42 @@ describe('keepAlive', () => {
     expect(second).not.toBe(h.derivedPort);
   });
 
+  test('two acquires racing on a dead tunnel start exactly one replacement', async () => {
+    // An SFTP session and a terminal starting together. Both read the same
+    // dead entry out of the map, and awaiting it suspends them, so both wake
+    // up past the liveness check and both try to replace it. The second
+    // tunnels.set() then overwrites the first, orphaning a wireproxy that no
+    // map entry names, no exit handler can reach and whose marker has already
+    // been overwritten by its twin.
+    // OLD_PID is the tunnel adopted below; every other pid is a replacement
+    // this run spawned, and those stay alive. Killing only the adopted one is
+    // what puts a dead entry in the map with both callers already past
+    // tunnels.get().
+    let oldPidAlive = true;
+    const h = await harness(
+      {
+        isPidAlive: pid => (pid === OLD_PID ? oldPidAlive : true),
+        speaksSocks5: async () => true,
+        killPid: () => undefined,
+      },
+      { keepAlive: true }
+    );
+    await occupy(h.derivedPort);
+    plantMarker(h, ourMarker(h.derivedPort, OLD_PID));
+
+    expect(await h.mod.acquire(h.vpn)).toBe(h.derivedPort);
+    expect(h.state.spawns).toBe(0); // adopted
+
+    // The adopted wireproxy dies with nothing telling us -- it is not our
+    // child, so no exit event exists to clear the entry.
+    oldPidAlive = false;
+
+    const [first, second] = await Promise.all([h.mod.acquire(h.vpn), h.mod.acquire(h.vpn)]);
+
+    expect(first).toBe(second);
+    expect(h.state.spawns).toBe(1); // one replacement, not two
+  });
+
   test('disposeAll() kills the tunnel even when keepAlive is true', async () => {
     const h = await harness({}, { keepAlive: true });
 

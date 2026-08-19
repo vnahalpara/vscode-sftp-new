@@ -789,8 +789,18 @@ function killTunnel(tunnel: Tunnel) {
  */
 export async function acquire(vpn: VpnOption): Promise<number> {
   const key = tunnelKey(vpn);
-  const existing = tunnels.get(key);
-  if (existing) {
+  // A loop, not a single `if`, because awaiting the tracked entry suspends us:
+  // a second acquire() for the same key can run to completion in that gap and
+  // leave a replacement behind. Falling straight through would then have both
+  // callers start a wireproxy, the later tunnels.set() overwriting the earlier
+  // -- orphaning a process no map entry names, no exit handler can reach and
+  // whose marker its twin has already overwritten. Re-reading the map after
+  // every await is what makes the loser take the winner's tunnel instead.
+  for (;;) {
+    const existing = tunnels.get(key);
+    if (!existing) {
+      break;
+    }
     const tunnel = await existing;
     // A tracked entry is not proof of a running tunnel. With keepAlive on it
     // survives every release() for the life of the window, and an adopted one
@@ -802,11 +812,19 @@ export async function acquire(vpn: VpnOption): Promise<number> {
       tunnel.refCount += 1;
       return tunnel.port;
     }
-    if (tunnels.get(key) === tunnel) {
-      tunnels.delete(key);
+    if (tunnels.get(key) !== tunnel) {
+      // Someone replaced this dead entry while we were suspended. Go round
+      // again and take theirs rather than starting a second one. Terminates:
+      // an entry is only ever replaced by another acquire() call, of which
+      // there are finitely many, and each pass reads a strictly newer one.
+      continue;
     }
+    tunnels.delete(key);
+    break;
   }
 
+  // Nothing may await between the delete above and the set below, or the gap
+  // reopens the race this loop exists to close.
   const startPromise = openTunnel(vpn, key);
   tunnels.set(key, startPromise);
   try {
