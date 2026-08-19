@@ -364,6 +364,13 @@ export function bridgeLogFollow(deps: LogFollowDeps, socket: WsLike, target: Log
       // no reader left on the other end, so do not leave `tail -F`/
       // `journalctl -f` running with nobody attached to it.
       if (torndown) {
+        // Same reasoning as attachStderr's own 'error' listener: this is the
+        // one release path that runs before attachStderr ever gets a chance
+        // to attach one, so without this a stderr readable can still throw
+        // out of the event loop on a channel this bridge is about to
+        // release anyway. The append callback is a no-op -- there is no
+        // closeReason() left to feed, since teardown() already ran.
+        attachStderr(openedStream, () => undefined);
         releaseStream(openedStream);
         return;
       }
