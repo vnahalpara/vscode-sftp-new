@@ -1,6 +1,8 @@
 import { buildRoutes } from '../routes';
 import { matchRoute, Route } from '../router';
 import { Ctx, Handler } from '../httpServer';
+import { logDiscoveryCommand } from '../ops/command';
+import { LOG_DISCOVERY_TEXT, LOG_DISCOVERY_INJECTED_PATH_TEXT } from '../__fixtures__/ops';
 
 // Distinctive on purpose: a three-letter needle like 'tok' could pass even
 // against a leaky implementation, which would make the assertion worthless.
@@ -697,6 +699,167 @@ describe('buildRoutes', () => {
       const body = JSON.parse(res.body);
       expect(body.ok).toBe(false);
       expect(body.output).toContain('NOPASSWD');
+    });
+  });
+
+  describe('/api/logs', () => {
+    it('returns discovered files and units, over the privileged lane (logDiscoveryCommand carries sudo)', async () => {
+      const exec = jest.fn(noopExec);
+      const privilegedExec = jest.fn(async (_cmd: string) => ({ stdout: LOG_DISCOVERY_TEXT, stderr: '', code: 0 }));
+      const { session } = fakeSession({ transport: { exec }, privilegedTransport: { exec: privilegedExec } });
+      store.set('tok', session);
+      const { ctx, res } = fakeCtx('tok');
+
+      await find(routes, 'GET', '/api/logs')(ctx);
+
+      expect(res.status).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.files).toEqual([
+        { path: '/var/log/syslog', bytes: 8832 },
+        { path: '/var/log/wtmp', bytes: 0 },
+        { path: '/var/log/private/protected.log', bytes: null },
+        { path: '/var/log/app 2/access log', bytes: 4096 },
+      ]);
+      expect(body.units).toEqual(['nginx.service', 'sshd.service', 'cron.service']);
+      expect(privilegedExec).toHaveBeenCalledTimes(1);
+      expect(privilegedExec.mock.calls[0][0]).toBe(logDiscoveryCommand());
+      expect(exec).not.toHaveBeenCalled();
+    });
+
+    it('discovery seeds the session allowlist -- a discovered file becomes readable via /api/file', async () => {
+      const { session } = fakeSession({
+        privilegedTransport: { exec: async () => ({ stdout: LOG_DISCOVERY_TEXT, stderr: '', code: 0 }) },
+      });
+      store.set('tok', session);
+      const { ctx } = fakeCtx('tok');
+
+      await find(routes, 'GET', '/api/logs')(ctx);
+
+      const fileCtx = fakeCtx('tok', { path: '/var/log/syslog' });
+      await find(routes, 'GET', '/api/file')(fileCtx.ctx);
+      expect(fileCtx.res.status).toBe(200);
+    });
+
+    it('a path NOT surfaced by discovery is refused, even one that is genuinely under /var/log', async () => {
+      const { session } = fakeSession({
+        privilegedTransport: { exec: async () => ({ stdout: LOG_DISCOVERY_TEXT, stderr: '', code: 0 }) },
+      });
+      store.set('tok', session);
+      const { ctx } = fakeCtx('tok');
+
+      await find(routes, 'GET', '/api/logs')(ctx);
+
+      // /var/log/auth.log is a perfectly plausible log path, but this
+      // discovery scan never reported it -- the allowlist must not treat
+      // "looks like a log path" as good enough on its own.
+      const fileCtx = fakeCtx('tok', { path: '/var/log/auth.log' });
+      await find(routes, 'GET', '/api/file')(fileCtx.ctx);
+      expect(fileCtx.res.status).toBe(403);
+    });
+
+    // Mirrors the /api/webserver/:kind/vhosts fixture proving a forged
+    // /etc/shadow entry never surfaces as a vhost row: LOG_DISCOVERY_INJECTED_PATH_TEXT
+    // simulates the newline-in-filename hazard documented on
+    // logDiscoveryCommand, where a single discovered path can forge a
+    // second, well-formed-looking @@files line naming a path outside
+    // /var/log entirely.
+    it('a forged path outside /var/log in the discovery output never becomes readable', async () => {
+      const { session } = fakeSession({
+        privilegedTransport: { exec: async () => ({ stdout: LOG_DISCOVERY_INJECTED_PATH_TEXT, stderr: '', code: 0 }) },
+      });
+      store.set('tok', session);
+      const { ctx, res } = fakeCtx('tok');
+
+      await find(routes, 'GET', '/api/logs')(ctx);
+
+      expect(res.status).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.files.map((f: any) => f.path)).not.toContain('/etc/shadow');
+      // The legitimate entry alongside the forged one is still reported.
+      expect(body.files.map((f: any) => f.path)).toContain('/var/log/nginx/access.log');
+
+      const forgedCtx = fakeCtx('tok', { path: '/etc/shadow' });
+      await find(routes, 'GET', '/api/file')(forgedCtx.ctx);
+      expect(forgedCtx.res.status).toBe(403);
+    });
+
+    // The previous milestone's defect: /api/file's allowlist could be
+    // seeded from a config file's own CONTENT, because configFilesCommand
+    // `cat`s each file into the same stream its `@@` markers travel in.
+    // logDiscoveryCommand never `cat`s anything -- it only `find`s names and
+    // `stat`s sizes -- so there is no remote stream a log file's own bytes
+    // could ever share with the `@@files`/`@@units` markers in the first
+    // place. Prove both halves: the command this route actually sends never
+    // contains `cat`, and even an adversarial discovery response (the same
+    // fixture used above) cannot forge a readable entry.
+    it("cannot be forged by a log file's own CONTENT -- discovery lists filenames only, never cats a file's bytes", async () => {
+      const commands: string[] = [];
+      const exec = jest.fn(async (cmd: string) => {
+        commands.push(cmd);
+        return { stdout: LOG_DISCOVERY_INJECTED_PATH_TEXT, stderr: '', code: 0 };
+      });
+      const { session } = fakeSession({ privilegedTransport: { exec } });
+      store.set('tok', session);
+      const { ctx } = fakeCtx('tok');
+
+      await find(routes, 'GET', '/api/logs')(ctx);
+
+      expect(commands[0]).toBe(logDiscoveryCommand());
+      expect(commands[0]).not.toContain('cat ');
+
+      const forgedCtx = fakeCtx('tok', { path: '/etc/shadow' });
+      await find(routes, 'GET', '/api/file')(forgedCtx.ctx);
+      expect(forgedCtx.res.status).toBe(403);
+    });
+
+    it('is per-session -- a path surfaced for session A is not readable by session B', async () => {
+      const { session } = fakeSession({
+        privilegedTransport: { exec: async () => ({ stdout: LOG_DISCOVERY_TEXT, stderr: '', code: 0 }) },
+      });
+      store.set('tok', session);
+
+      const { session: otherSession } = fakeSession({}, 'other-tok');
+      store.set('other-tok', otherSession);
+
+      const { ctx } = fakeCtx('tok');
+      await find(routes, 'GET', '/api/logs')(ctx);
+
+      const okCtx = fakeCtx('tok', { path: '/var/log/syslog' });
+      await find(routes, 'GET', '/api/file')(okCtx.ctx);
+      expect(okCtx.res.status).toBe(200);
+
+      const otherCtx = fakeCtx('other-tok', { path: '/var/log/syslog' });
+      await find(routes, 'GET', '/api/file')(otherCtx.ctx);
+      expect(otherCtx.res.status).toBe(403);
+    });
+
+    it('refuses an unsafe journald unit name rather than surfacing it to the client', async () => {
+      const output = [
+        '@@files',
+        '',
+        '@@units',
+        'nginx.service',
+        // Not a real journalctl _SYSTEMD_UNIT value -- simulates a forged
+        // or corrupted entry reaching this process. isSafeUnitName is the
+        // same validator serviceActionCommand/journalCommand rely on, not
+        // a second, parallel one.
+        'evil; rm -rf /',
+        '-Hattacker@evil',
+        '',
+      ].join('\n');
+      const { session } = fakeSession({
+        privilegedTransport: { exec: async () => ({ stdout: output, stderr: '', code: 0 }) },
+      });
+      store.set('tok', session);
+      const { ctx, res } = fakeCtx('tok');
+
+      await find(routes, 'GET', '/api/logs')(ctx);
+
+      expect(res.status).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.units).toEqual(['nginx.service']);
+      expect(body.units).not.toContain('evil; rm -rf /');
+      expect(body.units).not.toContain('-Hattacker@evil');
     });
   });
 

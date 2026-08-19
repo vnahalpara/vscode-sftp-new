@@ -14,10 +14,14 @@ import {
   certInfoCommand,
   readFileCommand,
   isConfigFilePath,
+  logDiscoveryCommand,
+  isLogFilePath,
+  isSafeUnitName,
   splitAt,
 } from './ops/command';
 import { parseUnits, parseUnitFiles, mergeServices, sortServices } from './ops/services';
 import { parseDetect, parseNginxVhosts, parseApacheVhosts, parseCertInfo, CertInfo } from './ops/webserver';
+import { parseLogDiscovery } from './ops/logs';
 
 export interface SessionLookup {
   get(token: string): ManagedSession | undefined;
@@ -156,21 +160,30 @@ async function runConfigTest(
 }
 
 export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
-  // Paths a vhost listing has actually returned to this session, keyed by
-  // token. GET /api/file is the vhost "View" button's config-file reader,
-  // not a general file browser — the token authenticates the page, it does
-  // not authorise arbitrary filesystem reads, and this endpoint runs sudo.
-  // Restricting reads to exactly what a vhost listing surfaced for that
-  // session (populated in the /api/webserver/:kind/vhosts handler below) is
-  // what keeps an authenticated browser tab from being able to ask for any
+  // Paths a vhost listing OR a log discovery scan has actually returned to
+  // this session, keyed by token. GET /api/file is the vhost "View"
+  // button's config-file reader (and, since Task 4, the log tab's static
+  // file reader) — not a general file browser. The token authenticates the
+  // page, it does not authorise arbitrary filesystem reads, and this
+  // endpoint runs sudo. Restricting reads to exactly what a vhost listing
+  // or a log discovery scan surfaced for that session (populated in the
+  // /api/webserver/:kind/vhosts and /api/logs handlers below) is what keeps
+  // an authenticated browser tab from being able to ask for any
   // root-readable file on the host.
   //
-  // The listing's own section keys are not enough on their own to make that
-  // invariant hold: they are parsed out of a stream that also carries the
-  // config files' raw bytes, so file CONTENT can forge one. Every path is
-  // therefore intersected against the hard-coded globs configFilesCommand
-  // expanded (isConfigFilePath) before it lands here — the set below can
-  // only ever contain paths under those directories.
+  // Neither source's own listing is trusted as authoritative on its own:
+  // the vhost listing's section keys are parsed out of a stream that also
+  // carries the config files' raw bytes, so file CONTENT can forge one —
+  // every path from it is intersected against the hard-coded globs
+  // configFilesCommand expanded (isConfigFilePath) before it lands here.
+  // Log discovery lists filenames only (find + stat), never a file's
+  // content, but a filename can still forge a *second* discovery line via
+  // an embedded newline+tab (see the "Newline-in-filename hazard" comment
+  // on logDiscoveryCommand in ops/command.ts) — every path from it is
+  // therefore independently re-checked against isLogFilePath here too,
+  // rather than trusting that parseLogDiscovery already did so. The set
+  // below can only ever contain paths that are either a real config file
+  // under those globs, or a real file under /var/log.
   const allowedFiles = new Map<string, Set<string>>();
 
   function allowFiles(token: string, paths: string[]): void {
@@ -424,6 +437,39 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
     },
     {
       method: 'GET',
+      path: '/api/logs',
+      handler: async ctx => {
+        const session = resolve(deps, ctx);
+        if (!session) {
+          return;
+        }
+        // logDiscoveryCommand carries `sudo -n` (it stats files an
+        // unprivileged user may not be able to), so this is opsFor, the
+        // privileged lane, not readOpsFor.
+        const ops = opsFor(session);
+        const result = await runPrivileged(ops, 'discover logs', logDiscoveryCommand());
+        const { files, units } = parseLogDiscovery(result.stdout);
+
+        // parseLogDiscovery (ops/logs.ts) already applies isLogFilePath to
+        // every candidate path, but that parser's own filtering is not
+        // trusted as authoritative here -- the same discipline
+        // /api/webserver/:kind/vhosts applies to isConfigFilePath. Re-check
+        // at the point this feeds the allowlist a privileged read is gated
+        // on, so a future change to the parser can't silently widen it.
+        const safeFiles = files.filter(file => isLogFilePath(file.path));
+        // journalctl's own output is not caller-supplied, but it is
+        // remote-reported text this process did not generate -- validated
+        // with the existing isSafeUnitName (see ops/command.ts), never a
+        // new validator, before it is surfaced to the client at all.
+        const safeUnits = units.filter(isSafeUnitName);
+
+        allowFiles(session.token, safeFiles.map(file => file.path));
+
+        ctx.json(200, { files: safeFiles, units: safeUnits });
+      },
+    },
+    {
+      method: 'GET',
       path: '/api/file',
       handler: async ctx => {
         const session = resolve(deps, ctx);
@@ -433,7 +479,7 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
         const requestedPath = typeof ctx.query.path === 'string' ? ctx.query.path : '';
         const allowed = allowedFiles.get(session.token);
         if (!requestedPath || !allowed || !allowed.has(requestedPath)) {
-          ctx.text(403, 'That file was not returned by a vhost listing for this session.');
+          ctx.text(403, 'That file was not returned by a vhost listing or a log discovery scan for this session.');
           return;
         }
 
