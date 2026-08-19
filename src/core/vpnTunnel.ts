@@ -57,6 +57,51 @@ function tunnelKey(vpn: VpnOption): string {
   return path.resolve(expandHome(vpn.configFile));
 }
 
+const DEFAULT_PORT_RANGE: [number, number] = [21000, 21999];
+const MIN_PORT = 1024;
+const MAX_PORT = 65535;
+
+/**
+ * Parse the user-editable "vpn.socksPortRange" setting ("low-high") into a
+ * bounded tuple. This runs on the connection path every time a tunnel is
+ * acquired, so a typo (missing dash, swapped bounds, an out-of-range number)
+ * must never throw -- that would break every SFTP connection on the machine,
+ * not just the VPN ones. Any input that isn't a clean "low-high" pair inside
+ * 1024-65535 with low <= high silently falls back to the default range.
+ */
+export function parsePortRange(value: string | undefined): [number, number] {
+  if (!value) {
+    return DEFAULT_PORT_RANGE;
+  }
+  const match = /^(\d+)-(\d+)$/.exec(value.trim());
+  if (!match) {
+    return DEFAULT_PORT_RANGE;
+  }
+  const low = Number(match[1]);
+  const high = Number(match[2]);
+  if (
+    !Number.isInteger(low) ||
+    !Number.isInteger(high) ||
+    low < MIN_PORT ||
+    high > MAX_PORT ||
+    low > high
+  ) {
+    return DEFAULT_PORT_RANGE;
+  }
+  return [low, high];
+}
+
+/**
+ * Map a stable key (the resolved WireGuard config path) onto a port inside
+ * the given range. Deterministic so the same config always lands on the same
+ * SOCKS port across restarts -- anything that recorded the old random port
+ * (a ProxyCommand, a note in sftp.json) keeps working instead of going stale.
+ */
+export function derivePort(key: string, range: [number, number]): number {
+  const h = crypto.createHash('sha256').update(key).digest();
+  return range[0] + (h.readUInt16BE(0) % (range[1] - range[0] + 1));
+}
+
 /**
  * Append the `[Socks5]` section wireproxy needs onto a user's WireGuard conf,
  * binding the proxy to the given localhost port. Pure (no I/O) so it is unit-testable.
