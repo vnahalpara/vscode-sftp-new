@@ -131,4 +131,49 @@ describe('sudoHint', () => {
     expect(hint).not.toContain('NOPASSWD');
     expect(hint).toContain('sudo');
   });
+
+  // /ws/logs' commands (logFollow.ts) exec `sudo -n tail`/`sudo -n
+  // journalctl` directly, not the systemctl/sh/sed the default 'ops'
+  // context above is written for -- a user following that advice verbatim
+  // for a log-follow failure still could not follow a log.
+  describe('logs context', () => {
+    it('names tail and journalctl, not systemctl/sh/sed', () => {
+      const hint = sudoHint('sudo: a password is required', 'deploy', 'web1', 'logs') as string;
+      expect(hint).toContain('tail');
+      expect(hint).toContain('journalctl');
+      expect(hint).not.toContain('/bin/systemctl');
+      expect(hint).not.toContain('/bin/sed');
+    });
+
+    it('still names the account, the host and NOPASSWD', () => {
+      const hint = sudoHint('sudo: a password is required', 'deploy', 'web1', 'logs') as string;
+      expect(hint).toContain('deploy');
+      expect(hint).toContain('web1');
+      expect(hint).toContain('NOPASSWD');
+    });
+
+    // A close frame's reason is capped at 123 bytes (wsBridge.ts's
+    // truncateReason) -- the account, the problem and the tail/journalctl
+    // mention must all survive being cut to that length, not just be
+    // present somewhere in the untruncated string.
+    it('front-loads the actionable part within a close frame\'s 123-byte budget', () => {
+      const hint = sudoHint('sudo: a password is required', 'deploy', 'web1', 'logs') as string;
+      const truncated = hint.slice(0, 123);
+      expect(truncated).toContain('deploy@web1');
+      expect(truncated).toContain('tail');
+      expect(truncated).toContain('journalctl');
+      expect(truncated).toContain('NOPASSWD');
+    });
+
+    it('defaults to the ops (Services/Web server) hint when no context is given', () => {
+      const hint = sudoHint('sudo: a password is required', 'deploy', 'web1') as string;
+      expect(hint).toContain('/bin/systemctl');
+    });
+
+    it('still gives the root-specific advice when the lane is already root', () => {
+      const hint = sudoHint('sudo: a password is required', 'root', 'web1', 'logs') as string;
+      expect(hint).not.toContain('NOPASSWD');
+      expect(hint).toContain('root');
+    });
+  });
 });

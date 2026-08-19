@@ -724,6 +724,35 @@ describe('stderr', () => {
     expect(socket.closeReason).not.toBe('log stream closed');
   });
 
+  // sudoHint was written for the Services/Web server tabs and used to name
+  // /bin/systemctl, /bin/sh and /bin/sed regardless of caller -- advice a
+  // /ws/logs failure can't act on, since followCommand/journalFollowCommand
+  // (ops/command.ts) exec `sudo -n tail`/`sudo -n journalctl` directly. A
+  // close frame's reason is capped at 123 bytes, so this also checks the
+  // truncated prefix -- what the client actually receives -- carries the
+  // account and the binaries, not a fragment about a different tab.
+  test('names tail/journalctl, not the Services/Web server tabs advice, and front-loads it', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    const { deps: d } = deps({ stream: Promise.resolve(stream), user: 'deploy', host: 'web1' });
+
+    bridgeLogFollow(d, socket, fileTarget());
+    await flush();
+
+    stream.stderr.emit('data', Buffer.from('sudo: a password is required\n'));
+    stream.emit('close');
+
+    expect(socket.closeReason).toContain('tail');
+    expect(socket.closeReason).toContain('journalctl');
+    expect(socket.closeReason).not.toContain('systemctl');
+    expect(socket.closeReason).not.toContain('Web server tab');
+
+    const truncated = socket.closeReason || '';
+    expect(truncated).toContain('deploy@web1');
+    expect(truncated).toContain('NOPASSWD');
+    expect(Buffer.byteLength(truncated, 'utf8')).toBeLessThanOrEqual(123);
+  });
+
   test('surfaces a non-sudo stderr message verbatim rather than a generic close', async () => {
     const stream = new FakeStream();
     const socket = new FakeSocket();

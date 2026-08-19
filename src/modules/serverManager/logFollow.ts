@@ -275,7 +275,7 @@ export function bridgeLogFollow(deps: LogFollowDeps, socket: WsLike, target: Log
     if (!text) {
       return fallback;
     }
-    return sudoHint(text, deps.user, deps.host) || text;
+    return sudoHint(text, deps.user, deps.host, 'logs') || text;
   }
 
   // Both directions end here, guarded by `torndown` so it does not matter

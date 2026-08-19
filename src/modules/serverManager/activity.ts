@@ -38,9 +38,19 @@ const SUDO_PATTERNS = [
   /is not in the sudoers file/i,
 ];
 
+// Which feature the failing command belongs to, so the advice below can name
+// the binaries that feature's commands actually exec rather than defaulting
+// to the Services/Web server tabs' systemctl/sh/sed. 'ops' (the default) is
+// every caller routes.ts and ops/exec.ts have -- the two tabs whose commands
+// all go through runPrivileged/OpsDeps. 'logs' is logFollow.ts's /ws/logs
+// bridge, whose commands (ops/command.ts's followCommand/
+// journalFollowCommand) exec `sudo -n tail`/`sudo -n journalctl` directly,
+// neither of which the 'ops' hint below ever mentions.
+export type SudoHintContext = 'ops' | 'logs';
+
 // An empty panel is the worst possible answer to a sudo failure: it looks like
 // the host has no services. Name the host, the user, and the fix instead.
-export function sudoHint(stderr: string, user: string, host: string): string | null {
+export function sudoHint(stderr: string, user: string, host: string, context: SudoHintContext = 'ops'): string | null {
   if (!stderr) {
     return null;
   }
@@ -60,6 +70,22 @@ export function sudoHint(stderr: string, user: string, host: string): string | n
       `${user}@${host} is already authenticated as root, so a sudoers rule will not help. ` +
       `This usually means sudo is missing or not on PATH, or /etc/sudoers on ${host} has a ` +
       `requiretty/secure_path restriction that blocks a non-interactive session.`
+    );
+  }
+  // /ws/logs' commands (followCommand/journalFollowCommand, ops/command.ts)
+  // exec `sudo -n tail`/`sudo -n journalctl` directly -- neither of which the
+  // 'ops' hint below ever names, since it was written for the Services/Web
+  // server tabs' systemctl/sh/sed. A close frame's reason is capped at 123
+  // bytes (wsBridge.ts's truncateReason), so `tail`/`journalctl` are named
+  // FIRST, right after the account and the problem, well inside that budget
+  // -- rather than a long preamble (as the 'ops' hint below has) pushing the
+  // binaries themselves past whatever the truncation point turns out to be.
+  if (context === 'logs') {
+    return (
+      `${user}@${host} needs NOPASSWD sudo for tail/journalctl -- add to ${host}'s sudoers: ` +
+      `${user} ALL=(ALL) NOPASSWD: /bin/tail, /bin/journalctl. Both run directly, with no shell ` +
+      `wrapper, so the rule can name them exactly (unlike the Services/Web server hint, part of ` +
+      `which routes through sudo -n sh).`
     );
   }
   // Name what sudo ACTUALLY execs, not what the command is conceptually
