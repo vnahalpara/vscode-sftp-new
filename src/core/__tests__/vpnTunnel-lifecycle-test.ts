@@ -384,6 +384,51 @@ describe('keepAlive', () => {
   });
 });
 
+describe('losing the bind race', () => {
+  test('a wireproxy that dies just after the health check passes is not marked as ours', async () => {
+    // isPortFree() said yes, and something took the port in the gap before
+    // wireproxy could bind it. wireproxy then fails to bind and exits -- but
+    // the health check is a bare TCP connect, which the squatter answers on
+    // its behalf, so nothing about the connection itself gives the loss away.
+    //
+    // Getting this wrong is not a failed connection, it is a silent one: we
+    // would log "VPN tunnel up", write an ownership marker for a port we never
+    // bound (forging exactly the proof adoption trusts) and hand the SSH
+    // session, credentials included, to whoever holds the port.
+    //
+    // The squatter below stands in for that process. It emits the child's exit
+    // 20ms after answering the health check -- an ordering that no single
+    // macrotask yield can observe, which is why the settle in startTunnel()
+    // has to be a bounded wait rather than a setImmediate().
+    let child: any;
+    const h = await harness({
+      spawnProcess: ((_bin: string, args: string[]) => {
+        const conf = fs.readFileSync(args[args.length - 1], 'utf8');
+        const port = Number(/BindAddress = 127\.0\.0\.1:(\d+)/.exec(conf)![1]);
+
+        const squatter = net.createServer(socket => {
+          socket.resume();
+          setTimeout(() => child.emit('exit', 1), 20);
+        });
+        servers.push(squatter);
+        squatter.listen(port, '127.0.0.1');
+
+        child = new EventEmitter();
+        child.pid = FAKE_PID;
+        child.stdout = null;
+        child.stderr = null;
+        // Never binds anything: that is the whole point.
+        child.kill = () => undefined;
+        return child;
+      }) as any,
+    });
+
+    await expect(h.mod.acquire(h.vpn)).rejects.toThrow(/exited before the SOCKS port was ready/);
+    expect(fs.existsSync(h.mod.markerPathFor(h.vpn))).toBe(false);
+    expect(h.mod.portFor(h.vpn)).toBeUndefined();
+  });
+});
+
 describe('storage directory', () => {
   test('refuses to work at all until init() supplies one', async () => {
     // The marker directory is the root of trust for adoption: a marker there

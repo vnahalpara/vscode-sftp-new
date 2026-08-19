@@ -50,6 +50,13 @@ interface TunnelMarker {
 
 const DEFAULT_HEALTHCHECK_MS = 15000;
 
+// How long startTunnel() waits after the health check passes before deciding
+// wireproxy is still alive and the port is therefore ours. See the comment at
+// the call site for why the wait exists and what it does and does not buy.
+// Paid once per tunnel start, against a startup that already budgets seconds
+// for the health check itself.
+const STARTUP_SETTLE_MS = 200;
+
 /**
  * The writable directory init() gave us, for merged configs and markers.
  * Undefined until then, and deliberately *not* defaulted to os.tmpdir(): this
@@ -559,9 +566,11 @@ function markerIsFromThisBoot(marker: TunnelMarker): boolean {
  * Can we have this exact port? Answered by binding rather than connecting: a
  * refused connection could just be a server that dislikes us, while a
  * successful bind is proof nothing else holds the port. It is a check with an
- * inherent race -- something can take the port in the gap before wireproxy
- * binds it -- but losing that race surfaces as wireproxy failing its health
- * check, never as traffic silently going somewhere else.
+ * inherent race, though: something can take the port in the gap before
+ * wireproxy binds it, and the health check does not notice, because a bare TCP
+ * connect is answered by whoever holds the port rather than by whoever we
+ * meant. What catches that is the settle in startTunnel() -- see the comment
+ * there, including what it does not catch.
  */
 function isPortFree(port: number): Promise<boolean> {
   if (!isUsablePort(port)) {
@@ -693,14 +702,31 @@ async function startTunnel(vpn: VpnOption, key: string, port: number): Promise<T
   try {
     await waitForPort(port, timeout, () => exited);
     // waitForPort's only evidence is that *something* accepted a TCP
-    // connection on the port: it makes no ownership or protocol check, and its
-    // first attempt runs synchronously after spawn, before any 'error' or
-    // 'exit' has had a chance to fire. So a process that was already squatting
-    // the port answers it instantly, and without the check below we would go
-    // on to log "VPN tunnel up" and -- far worse -- write an ownership marker
-    // for a port we never bound, forging the very proof adoption depends on.
-    // Yielding first lets an already-queued exit land before we ask.
-    await new Promise(resolve => setImmediate(resolve));
+    // connection on the port: it makes no ownership or protocol check. So a
+    // process that beat wireproxy to the port answers the health check on its
+    // behalf, and without the check below we would go on to log "VPN tunnel
+    // up" and -- far worse -- write an ownership marker for a port we never
+    // bound, forging the very proof adoption depends on.
+    //
+    // Waiting first is what gives that check anything to see. wireproxy's own
+    // failure is asynchronous: it has to start, parse the config, attempt
+    // bind(), fail and exit, and none of that can happen inside the single
+    // macrotask a setImmediate() yields -- which is what used to be here, and
+    // which caught nothing. A pinned port is now checked for a squatter
+    // up-front in openTunnel() and never reaches here, so what remains is the
+    // narrower race on the derived and getFreePort() paths: the port was free
+    // when we looked and something took it in the gap before wireproxy bound
+    // it.
+    //
+    // Be clear about what this is: a bounded grace, not a proof. It closes the
+    // window for a wireproxy that dies at the speed a failed bind() actually
+    // dies at, and it does not close it for one that takes longer than
+    // STARTUP_SETTLE_MS to notice -- a machine under heavy load, a very large
+    // config. Nothing available here can settle it outright: the check we
+    // would want is "is *our pid* the one holding this port", and there is no
+    // portable way to ask that. A SOCKS5 probe would not answer it either, as
+    // the squatter this exists to catch may well speak SOCKS5.
+    await delay(STARTUP_SETTLE_MS);
     if (exited) {
       throw new Error('wireproxy exited before the SOCKS port was ready');
     }
