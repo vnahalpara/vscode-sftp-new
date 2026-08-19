@@ -54,6 +54,12 @@ const PROFILE = {
   workspace: '/dev/workspace',
   hasVpn: false,
   hasDatabase: true,
+  // Gates the Task 3 Cloudflare card the same way RedactedProfile.hasCloudflare
+  // gates it for real (registry.ts) -- both CLOUDFLARE_ZONE_ID and
+  // CLOUDFLARE_API_TOKEN present on the profile, never surfaced as anything
+  // but this boolean. Toggle to `false` only to screenshot the card's absence,
+  // then revert -- see this file's own fake-identity discipline above.
+  hasCloudflare: true,
 };
 
 const FACTS = {
@@ -322,6 +328,24 @@ const WEBSERVER_DETECT = {
     'LISTEN 0 511 127.0.0.1:8080 0.0.0.0:* users:(("apache2",pid=1032,fd=4))',
   ],
 };
+
+/* ------------------------------------------------------------ cloudflare -- */
+// Shaped like GET /api/cloudflare/zone's 200 body -- `{ id, name }`, the
+// return type of ops/cloudflare.ts's zoneInfo(). `zone123` and the
+// `.invalid` hostname keep this fixture inside the same reserved-namespace
+// discipline as the rest of this file (see the header comment): a zone id
+// is never a secret the way CLOUDFLARE_API_TOKEN is, but it is still real
+// infrastructure identity, so it stays fake here too.
+const CF_ZONE = { id: 'zone123', name: 'mock-fixture-host.invalid' };
+
+// The `?fail=cf` text for both Cloudflare routes -- shaped like
+// cloudflareError()'s own fixed-vocabulary output (ops/cloudflare.ts), never
+// anything resembling a raw Cloudflare response body or a token. Distinct
+// per route only so a screenshot of either failure state is recognisably
+// about the request that produced it.
+const CF_ZONE_FAILURE = 'Cloudflare zone not found -- check CLOUDFLARE_ZONE_ID. [Cloudflare error 1001]';
+const CF_PURGE_FAILURE =
+  'Cloudflare rejected the request: the CLOUDFLARE_API_TOKEN is invalid or lacks the Zone.Cache Purge permission. [Cloudflare error 10000]';
 
 // `daysFromNow` is computed against wall-clock time at request time (plus a
 // half-day buffer so a slow request never rounds down a day), not a fixed
@@ -1070,6 +1094,28 @@ http
       const n = Number.isFinite(linesParam) && linesParam > 0 ? Math.floor(linesParam) : 400;
       const sliced = content ? content.split('\n').slice(0, n).join('\n') : content;
       sendJson(200, { content: sliced });
+      return;
+    }
+
+    // GET /api/cloudflare/zone
+    if (req.method === 'GET' && pathname === '/api/cloudflare/zone') {
+      if (fail === 'cf') {
+        res.writeHead(502, { 'content-type': 'text/plain' });
+        res.end(CF_ZONE_FAILURE);
+        return;
+      }
+      sendJson(200, CF_ZONE);
+      return;
+    }
+
+    // POST /api/cloudflare/purge
+    if (req.method === 'POST' && pathname === '/api/cloudflare/purge') {
+      if (fail === 'cf') {
+        res.writeHead(502, { 'content-type': 'text/plain' });
+        res.end(CF_PURGE_FAILURE);
+        return;
+      }
+      sendJson(200, { purged: true });
       return;
     }
 

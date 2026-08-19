@@ -142,7 +142,7 @@ function ServerTabs({ page, profile, snapshot, slow, series, facts, capabilities
         })}
       </div>
       {tabPage === 'services' && <Services />}
-      {tabPage === 'web' && <WebServer />}
+      {tabPage === 'web' && <WebServer profile={profile} />}
       {tabPage === 'overview' && <Overview snapshot={snapshot} slow={slow} series={series} facts={facts} />}
       {/* Terminal and Logs: mounted once, on first visit, then kept mounted
           and merely hidden — never re-mounted on every tab switch — so the

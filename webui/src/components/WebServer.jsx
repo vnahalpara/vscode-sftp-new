@@ -85,7 +85,17 @@ function fmtExpiry(iso) {
 // ported verbatim (same shape, same debounce-on-submit guard) from
 // Services.jsx's ConfirmDialog, since these commands run over SSH against
 // the same live host.
-function ConfirmDialog({ unit, action, onCancel, onConfirm }) {
+//
+// Generalised (Task 3, Cloudflare card) to also serve a non-systemctl
+// confirmation: `title`/`message`/`confirmLabel`/`danger` let a caller
+// override the default systemctl-shaped copy and button styling entirely,
+// while every existing `unit`/`action` caller in this file is untouched --
+// none of them pass the new props, so `title`/`message`/`confirmLabel`
+// default back to exactly the strings this dialog always rendered, and
+// `danger` defaults to the original `action === 'stop'` check. The
+// submitting/no-double-submit behaviour (the whole reason a caller reuses
+// this component instead of writing its own) is unchanged for everyone.
+function ConfirmDialog({ unit, action, onCancel, onConfirm, title, message, confirmLabel, danger }) {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -105,6 +115,10 @@ function ConfirmDialog({ unit, action, onCancel, onConfirm }) {
     setSubmitting(true);
     onConfirm();
   }
+
+  const isDanger = danger != null ? danger : action === 'stop';
+  const readyLabel = confirmLabel || `${action} ${unit}`;
+  const busyLabel = confirmLabel ? `${confirmLabel}…` : `${action}…`;
 
   return (
     <div
@@ -127,22 +141,26 @@ function ConfirmDialog({ unit, action, onCancel, onConfirm }) {
         style={{ maxWidth: 440, width: '90%' }}
         onClick={e => e.stopPropagation()}
       >
-        <h3 style={{ marginTop: 0 }}>Confirm action</h3>
+        <h3 style={{ marginTop: 0 }}>{title || 'Confirm action'}</h3>
         <p style={{ color: 'var(--text-secondary)' }}>
-          Run <strong className="mono">systemctl {action}</strong> on{' '}
-          <span className="mono">{unit}</span>? This runs on the live host over SSH.
+          {message || (
+            <>
+              Run <strong className="mono">systemctl {action}</strong> on{' '}
+              <span className="mono">{unit}</span>? This runs on the live host over SSH.
+            </>
+          )}
         </p>
         <div className="row" style={{ justifyContent: 'flex-end', marginTop: 16 }}>
           <button className="btn" onClick={onCancel}>
             Cancel
           </button>
           <button
-            className={action === 'stop' ? 'btn danger' : 'btn primary'}
+            className={isDanger ? 'btn danger' : 'btn primary'}
             onClick={handleConfirm}
             disabled={submitting}
             autoFocus
           >
-            {submitting ? `${action}…` : `${action} ${unit}`}
+            {submitting ? busyLabel : readyLabel}
           </button>
         </div>
       </div>
@@ -277,6 +295,157 @@ function ResultBanner({ label, result, onDismiss }) {
       </div>
       {result.output && <pre className="output" style={{ margin: 0 }}>{result.output}</pre>}
     </div>
+  );
+}
+
+// The Cloudflare cache-purge card. Rendered by WebServer only when
+// `profile.hasCloudflare` is true (the per-profile gate -- see routes.ts's
+// hasCloudflare(session.cloudflareConfig) 404 guard on both routes this
+// talks to) -- never on CAPABILITIES.cloudflare, which only says the build
+// carries this feature at all, not that THIS connection has the two
+// CLOUDFLARE_* fields configured. A profile with the capability but no
+// config would otherwise render a card whose every request 404s.
+//
+// The zone name is fetched lazily (not bundled with /api/webserver) so a
+// user purging cache sees which domain -- not a bare 32-character zone id
+// -- is about to be evicted; see GET /api/cloudflare/zone in routes.ts.
+function CloudflareCard({ profile }) {
+  const [zone, setZone] = useState(null); // { id, name } once loaded
+  const [zoneLoading, setZoneLoading] = useState(true);
+  const [zoneError, setZoneError] = useState(null);
+
+  const [confirming, setConfirming] = useState(false);
+  const [purging, setPurging] = useState(false);
+  const [purgeResult, setPurgeResult] = useState(null); // { ok, output } | null
+
+  // Guards every post-await setState below, same discipline as the rest of
+  // this file / Services.jsx: switching tabs away from Web server while the
+  // zone fetch or a purge is in flight must not setState on an unmounted
+  // component.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setZoneLoading(true);
+    setZoneError(null);
+    apiGet('/api/cloudflare/zone')
+      .then(res => {
+        if (cancelled || !mountedRef.current) {
+          return;
+        }
+        setZone(res);
+      })
+      .catch(err => {
+        if (cancelled || !mountedRef.current) {
+          return;
+        }
+        // err.message is GET /api/cloudflare/zone's 502 body -- already the
+        // mapped, token-safe text cloudflareError produced server-side.
+        // Rendered verbatim; never combined with any other field.
+        setZoneError(err.message);
+      })
+      .finally(() => {
+        if (cancelled || !mountedRef.current) {
+          return;
+        }
+        setZoneLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profile && profile.id]);
+
+  // The confirm dialog stays open for the duration of the request (unlike
+  // runAction/runTest above, which close their dialog immediately and track
+  // "in flight" only via the card's own busy state) -- purging is
+  // destructive enough that the dialog's own button should visibly stay
+  // disabled ("Purging…") until the request actually settles, not just
+  // until the click handler returns.
+  async function runPurge() {
+    if (purging) {
+      return;
+    }
+    setPurging(true);
+    try {
+      await apiPost('/api/cloudflare/purge');
+      if (!mountedRef.current) {
+        return;
+      }
+      setPurgeResult({ ok: true, output: '' });
+      setConfirming(false);
+    } catch (err) {
+      if (!mountedRef.current) {
+        return;
+      }
+      // Same guarantee as the zone fetch above: err.message is
+      // POST /api/cloudflare/purge's mapped 502 text, never raw Cloudflare
+      // response text.
+      setPurgeResult({ ok: false, output: err.message });
+      setConfirming(false);
+    } finally {
+      if (mountedRef.current) {
+        setPurging(false);
+      }
+    }
+  }
+
+  function dismissPurge() {
+    setPurgeResult(null);
+  }
+
+  const zoneReady = !zoneLoading && !zoneError && zone;
+
+  return (
+    <Card title="Cloudflare" sub="Purge the CDN cache for this profile's zone">
+      {purgeResult && <ResultBanner label="Purge cache" result={purgeResult} onDismiss={dismissPurge} />}
+
+      {zoneLoading && <div className="muted" style={{ padding: '8px 0' }}>Loading zone…</div>}
+
+      {!zoneLoading && zoneError && (
+        <div className="row">
+          <span className="mono" style={{ color: 'var(--critical)', fontSize: 12.5 }}>
+            {zoneError}
+          </span>
+        </div>
+      )}
+
+      {zoneReady && (
+        <div className="row" style={{ justifyContent: 'space-between' }}>
+          <div>
+            <div className="muted" style={{ fontSize: 12 }}>
+              Zone
+            </div>
+            <div className="mono">{zone.name}</div>
+          </div>
+          <button className="btn sm danger" disabled={purging} onClick={() => setConfirming(true)}>
+            Purge everything
+          </button>
+        </div>
+      )}
+
+      {confirming && (
+        <ConfirmDialog
+          title="Purge Cloudflare cache"
+          message={
+            <>
+              Purge everything on <strong className="mono">{zone ? zone.name : 'this zone'}</strong>? This
+              evicts the <strong>entire zone cache</strong> -- every subsequent request falls through to
+              your origin until the cache refills, which on a busy site is a real load spike.
+            </>
+          }
+          confirmLabel="Purge everything"
+          danger
+          onCancel={() => setConfirming(false)}
+          onConfirm={runPurge}
+        />
+      )}
+    </Card>
   );
 }
 
@@ -486,7 +655,7 @@ function ServerCard({
   );
 }
 
-export default function WebServer() {
+export default function WebServer({ profile }) {
   const [servers, setServers] = useState(null); // null until the first load resolves
   const [listening, setListening] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -674,6 +843,12 @@ export default function WebServer() {
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
+      {/* Gated on the per-profile flag, never on capabilities.cloudflare --
+          see CloudflareCard's own comment. Independent of nginx/apache
+          detection below: a profile can have Cloudflare configured with no
+          web server detected on the host at all. */}
+      {profile && profile.hasCloudflare && <CloudflareCard profile={profile} />}
+
       {(loadError || (loading && servers === null) || (servers !== null && servers.length === 0)) && (
         <Card
           title="Web server"
