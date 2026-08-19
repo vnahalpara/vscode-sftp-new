@@ -190,7 +190,7 @@ describe('buildRoutes', () => {
       services: true,
       webserver: true,
       logs: false,
-      terminal: false,
+      terminal: true,
       database: false,
     });
   });

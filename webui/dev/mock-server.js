@@ -16,6 +16,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { URL } = require('url');
+const { WebSocketServer } = require('ws');
 
 const ROOT = path.join(__dirname, '..', '..', 'media', 'webui');
 const PORT = Number(process.env.PORT || 5199);
@@ -70,7 +71,7 @@ const FACTS = {
 // Mirrors routes.ts's CAPABILITIES now that Tasks 1-5 have wired the seven
 // routes up for real — a mock that still greyed these out would make Tasks 7
 // and 8 unbuildable against it.
-const CAPABILITIES = { services: true, webserver: true, logs: false, terminal: false, database: false };
+const CAPABILITIES = { services: true, webserver: true, logs: false, terminal: true, database: false };
 
 function wave(i, amp, base) {
   return base + Math.sin((tick + i * 7) / 6) * amp + Math.random() * 3;
@@ -641,6 +642,67 @@ function testConfigFailureOutput(kind) {
     : 'AH00526: Syntax error on line 12 of /etc/apache2/sites-enabled/broken.conf:\nInvalid command \'ProxyPas\', perhaps misspelled or defined by a module not included in the server configuration\nAction \'configtest\' failed.';
 }
 
+// A dev-only twin of terminal.ts's bridge, just enough of one to exercise
+// Terminal.jsx without a real host: echoes every keystroke back (a real pty
+// in canonical mode does its own local echo; nothing here does that for us),
+// acknowledges a resize with a visible line so a screenshot can show it took
+// effect, and closes with 1000 when the mock "shell" sees `exit` typed —
+// exactly the two close codes terminal.ts documents (1000 clean, 1011
+// failure). `?fail=1` on the socket URL mirrors this file's existing
+// `?fail=` convention on the mutating HTTP routes: it skips straight to the
+// 1011 failure path with no prompt, so the failure state is reachable
+// without touching this file's source.
+const TERM_PROMPT = `${PROFILE.username}@${PROFILE.name}:~$ `;
+
+function handleTerminalSocket(ws, req) {
+  const query = new URL(req.url, 'http://127.0.0.1').searchParams;
+  if (query.get('fail')) {
+    ws.close(1011, 'mock: failed to open shell (ssh channel error)');
+    return;
+  }
+
+  ws.send(`Welcome to ${PROFILE.name} (mock shell)\r\n${TERM_PROMPT}`);
+
+  let line = '';
+  ws.on('message', (data, isBinary) => {
+    // Mirrors terminal.ts's own dispatch: binary frames are input, text
+    // frames are control (here, only a resize) — see that file's
+    // wire-protocol comment for why the two must never be conflated.
+    if (!isBinary) {
+      let msg;
+      try {
+        msg = JSON.parse(data.toString('utf8'));
+      } catch (error) {
+        return;
+      }
+      if (msg && msg.type === 'resize' && Number.isInteger(msg.cols) && Number.isInteger(msg.rows)) {
+        ws.send(`\r\n\x1b[2m[resized to ${msg.cols}x${msg.rows}]\x1b[0m\r\n${TERM_PROMPT}${line}`);
+      }
+      return;
+    }
+    const text = data.toString('utf8');
+    ws.send(data); // local echo
+    for (const ch of text) {
+      if (ch === '\r' || ch === '\n') {
+        const trimmed = line.trim();
+        line = '';
+        if (trimmed === 'exit') {
+          ws.send('\r\nlogout\r\n');
+          ws.close(1000);
+          return;
+        }
+        ws.send(`\r\n${TERM_PROMPT}`);
+      } else if (ch === '' || ch === '') {
+        line = line.slice(0, -1);
+      } else {
+        line += ch;
+      }
+    }
+  });
+}
+
+const wss = new WebSocketServer({ noServer: true });
+
 http
   .createServer((req, res) => {
     const parsed = new URL(req.url, 'http://127.0.0.1');
@@ -794,6 +856,14 @@ http
     }
     res.writeHead(404);
     res.end('not found');
+  })
+  .on('upgrade', (req, socket, head) => {
+    const { pathname } = new URL(req.url, 'http://127.0.0.1');
+    if (pathname !== '/ws/terminal') {
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, ws => handleTerminalSocket(ws, req));
   })
   .listen(PORT, '127.0.0.1', () => {
     console.log(`mock UI server on http://127.0.0.1:${PORT}/?t=dev`);
