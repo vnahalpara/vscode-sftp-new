@@ -659,19 +659,23 @@ still cleans it up.
 
 #### Upgrading from before 1.26.0
 
-The marker file format changed in 1.26.0 to support the boot check above, so **a marker
-written by an older build is refused for both adoption and reaping** — the new code cannot
-tell an old marker apart from a foreign one, so it treats it the same way: not proof of
-anything. In practice, on the first connection after upgrading:
+**A tunnel left running by 1.25.0 or earlier can never be adopted**, because those builds
+left nothing behind to identify it by. The ownership marker is new in 1.26.0 — no earlier
+build wrote one — and without a marker a listener cannot clear any of the five checks above.
+In practice, on the first connection after upgrading:
 
-- If a tunnel from the old build is still running for a given VPN config, it is **not**
-  adopted and **not** reaped. It keeps running and holding its port, orphaned, until the
-  machine restarts or you kill it yourself. This happens at most once per VPN config file.
-- **If you have `vpn.socksPort` pinned** to a port that old tunnel still holds, the new
-  build will **refuse to start**, with an error naming the port — it no longer silently
-  proceeds and shares the port with a process it can't verify (that silent sharing was the
-  security gap this release closes). You'll see something like *"VPN SOCKS port … is
-  already in use by something this extension did not start"*.
+- Without a pinned `vpn.socksPort`, the old build put its tunnel on a *random* free port and
+  recorded it nowhere. The new build derives a fixed port instead, and never looks at the
+  random one, so an old tunnel still running is simply never found: it keeps running and
+  holding its port, orphaned, until the machine restarts or you stop it yourself. Your
+  connection itself is unaffected — a fresh tunnel starts on the derived port. This costs one
+  leftover `wireproxy` per VPN config file, at most once.
+- **If you have `vpn.socksPort` pinned**, the old tunnel is sitting on exactly the port the
+  new build wants. With no marker to prove that listener is ours, the new build **refuses to
+  start**, with an error naming the port — it no longer silently proceeds and shares the port
+  with a process it can't verify (that silent sharing was the security gap this release
+  closes). You'll see something like *"VPN SOCKS port … is already in use by something this
+  extension did not start"*.
 
 **To recover:** find and stop the leftover `wireproxy` process (e.g. `pgrep wireproxy` /
 `ps aux | grep wireproxy`, then stop the one holding the port named in the error), or
