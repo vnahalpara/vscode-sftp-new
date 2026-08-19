@@ -11,9 +11,10 @@ import Activity from './pages/Activity.jsx';
 import Settings from './pages/Settings.jsx';
 
 // Overview is always on; the rest come from the `capabilities` object
-// `/api/session` returns (all false today — see routes.ts's CAPABILITIES
-// const). Reading that object here, rather than hardcoding which tabs are
-// disabled, is what lets a later milestone turn one on with a server-side
+// `/api/session` returns — see routes.ts's CAPABILITIES const for which are
+// live (services, webserver, terminal and logs are; database is not yet
+// implemented). Reading that object here, rather than hardcoding which tabs
+// are disabled, is what lets a later milestone turn one on with a server-side
 // flag flip instead of an edit to this file.
 const TABS = [
   ['overview', 'Overview', null],

@@ -94,8 +94,9 @@ tab: five stat cards (CPU, Memory, Disk, Load (1m), Uptime), charts for CPU usag
 memory usage, load average and network throughput, plus tables for filesystems, top processes by
 CPU, disk I/O (IOPS and latency) and network interfaces. A range selector switches the charts
 between the last 5, 15 and 60 minutes of in-memory history. **Services**, **Web server**,
-**Terminal** and **Logs** are also live tabs — see below. **Database** is enabled only for
-profiles with database settings configured.
+**Terminal** and **Logs** are also live tabs — see below. **Database** is not yet implemented:
+it appears as a visibly disabled tab for every profile, including profiles that have `database`
+configured (that configuration drives the separate **Databases** sidebar view, not this tab).
 
 The Terminal and Logs tabs each open their own token-authenticated WebSocket (`/ws/terminal`,
 `/ws/logs`) alongside the dashboard's existing HTTP/SSE traffic, gated the same way the rest of the
@@ -280,8 +281,9 @@ Closing the tab (or the browser) ends the shell; there is no persistent session 
 ### Logs tab
 
 Discovers log files under `/var/log` (up to three directories deep) and journald units that have
-ever logged (`GET /api/logs`), shows a read-only snapshot of a selected source (its last 500
-lines), and can switch to a live **Follow** — `tail -F` for a file, `journalctl -f` for a unit —
+ever logged (`GET /api/logs`), shows a read-only snapshot of a selected source (its first 500
+lines — the *start* of the file, which for an actively growing log is old content; use Follow for
+recent activity), and can switch to a live **Follow** — `tail -F` for a file, `journalctl -f` for a unit —
 over a dedicated `/ws/logs` WebSocket.
 
 **Only paths a discovery scan actually returned for this session can be read or followed.** There
@@ -319,8 +321,10 @@ outright rather than queued. Every open follow holds an SSH exec channel for as 
 the same pooled SSH connection shared with SFTP transfers, the metrics sampler and the Terminal
 tab. OpenSSH's default `MaxSessions` is 10 channels per connection, and running past it doesn't
 just refuse the extra follow — every other channel on that connection starts failing too, including
-file transfers, with `administratively prohibited`. The cap keeps four channels of headroom under
-that limit for everything else the dashboard and your file transfers need.
+file transfers, with `administratively prohibited`. The cap keeps six channels of headroom under
+that limit for everything else the dashboard and your file transfers need. Note the Terminal is
+not capped: each browser tab left on the Terminal tab holds one more channel, so opening the
+dashboard in several tabs at once can still reach the limit.
 
 ### Install the .vsix (both platforms)
 - **UI:** Extensions panel → `…` menu → **Install from VSIX…** → pick `vaibhav-sftp-plus-<version>.vsix` → reload.
