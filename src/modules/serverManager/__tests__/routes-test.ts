@@ -172,7 +172,7 @@ describe('buildRoutes', () => {
       pingMs: 25000,
       schedule: () => 1,
       cancel: () => undefined,
-    });
+    }).routes;
   });
 
   it('returns the session state and capability flags', async () => {
@@ -311,7 +311,7 @@ describe('buildRoutes', () => {
       pingMs: 25000,
       schedule: () => 7,
       cancel,
-    });
+    }).routes;
 
     let closeHandler = () => undefined;
     const { ctx } = fakeCtx('tok');
@@ -339,7 +339,7 @@ describe('buildRoutes', () => {
       pingMs: 25000,
       schedule: () => 7,
       cancel,
-    });
+    }).routes;
 
     let closeHandler = () => undefined;
     const { ctx } = fakeCtx('tok');
@@ -918,7 +918,7 @@ describe('buildRoutes', () => {
         schedule: () => 1,
         cancel: () => undefined,
         onTokenDisposed: listener => listeners.push(listener),
-      });
+      }).routes;
 
       const { session } = fakeSession({
         privilegedTransport: { exec: async () => ({ stdout: LOG_DISCOVERY_TEXT, stderr: '', code: 0 }) },

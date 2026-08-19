@@ -169,7 +169,28 @@ async function runConfigTest(
   return { ok, output };
 }
 
-export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
+// What buildRoutes hands back: the handlers, plus read-only access to the
+// one allowlist those handlers seed.
+//
+// The predicate is exported rather than duplicated because /ws/logs
+// (logFollow.ts, wired in index.ts) gates a privileged read -- `sudo -n tail
+// -F <path>` -- on exactly the same question GET /api/file gates its own
+// privileged read on: "did a discovery scan for THIS session actually return
+// this path?". That question must have exactly one answer, from exactly one
+// structure, seeded and pruned in exactly one place. It previously had two
+// (a token-keyed map here, an unseeded Set on ManagedSession), and the
+// second one -- the one the socket actually consulted -- was never written
+// to by anything, so every file follow was refused. Two sources of truth for
+// an authorization decision is how the next hole gets made; there is now one.
+export interface BuiltRoutes {
+  routes: Route<Handler>[];
+  // True when `path` is in the allowlist THIS routes instance seeded for
+  // THIS token -- never a global "is this path known to anyone" answer, or
+  // session A's discovery would authorize session B's read.
+  isLogPathAllowed(token: string, path: string): boolean;
+}
+
+export function buildRoutes(deps: RouteDeps): BuiltRoutes {
   // Paths a vhost listing OR a log discovery scan has actually returned to
   // this session, keyed by token. GET /api/file is the vhost "View"
   // button's config-file reader (and, since Task 4, the log tab's static
@@ -218,7 +239,19 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
     allowedFiles.delete(token);
   });
 
-  return [
+  // The /ws/logs half of the same gate GET /api/file applies below. Same
+  // map, same token key, same lifetime -- the only difference is the extra
+  // isLogFilePath intersection: allowedFiles also holds the /etc config
+  // paths a vhost listing seeded, and a `tail -F /etc/nginx/nginx.conf` is
+  // not something a log follow may ever open just because the Web server tab
+  // was visited first. logFollow.ts re-checks isLogFilePath itself as well;
+  // both checks are deliberate, and neither is the other's excuse.
+  function isLogPathAllowed(token: string, path: string): boolean {
+    const allowed = allowedFiles.get(token);
+    return Boolean(path) && Boolean(allowed) && allowed!.has(path) && isLogFilePath(path);
+  }
+
+  const routes: Route<Handler>[] = [
     {
       method: 'GET',
       path: '/api/session',
@@ -521,4 +554,6 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
       },
     },
   ];
+
+  return { routes, isLogPathAllowed };
 }

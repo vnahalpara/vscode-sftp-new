@@ -328,12 +328,21 @@ function logTargetFromRequest(req: http.IncomingMessage): LogTarget | null {
 // `sudo -n` (see ops/command.ts), the same reason /api/logs and /api/file
 // (routes.ts) run over the privileged lane rather than the session's own.
 //
-// The authorization check (isPathAllowed) is answered from THIS session's
-// own allowlist (session.isLogPathAllowed -- see session.ts), never a global
-// one, so that a path session A's own GET /api/logs discovered can never be
-// followed through session B's socket even if both happen to name the same
-// path.
-function onLogs(ws: WebSocket, req: http.IncomingMessage, token: string): void {
+// The authorization check (isPathAllowed) is answered from the allowlist GET
+// /api/logs itself seeded -- buildRoutes hands its own
+// isLogPathAllowed(token, path) back for exactly this (see routes.ts's
+// BuiltRoutes), keyed by THIS socket's token, so a path session A's
+// discovery surfaced can never be followed through session B's socket even
+// if both happen to name the same path. Threaded in as a parameter rather
+// than read off some module-level variable so there is no way to wire this
+// callback up without also deciding where its authorization answer comes
+// from.
+function onLogs(
+  ws: WebSocket,
+  req: http.IncomingMessage,
+  token: string,
+  isLogPathAllowed: (token: string, path: string) => boolean
+): void {
   const session = registry.lookupSession(token);
   const canFollow = session && session.privilegedTransport.execStream;
   const target = logTargetFromRequest(req);
@@ -349,7 +358,7 @@ function onLogs(ws: WebSocket, req: http.IncomingMessage, token: string): void {
   }
   bridgeLogFollow(
     {
-      isPathAllowed: path => session!.isLogPathAllowed(path),
+      isPathAllowed: path => isLogPathAllowed(token, path),
       execStream: cmd => session!.privilegedTransport.execStream!(cmd),
     },
     ws,
@@ -390,19 +399,24 @@ async function ensureServer(): Promise<Running> {
     // Drop any listener registered by a previous server's routes before the
     // new buildRoutes below registers its own -- see tokenDisposedListeners.
     tokenDisposedListeners = [];
+    const built = buildRoutes({
+      sessions: { get: token => registry.lookupSession(token) },
+      pingMs: PING_MS,
+      schedule: (fn, ms) => setInterval(fn, ms),
+      cancel: handle => clearInterval(handle),
+      onTokenDisposed: listener => tokenDisposedListeners.push(listener),
+    });
     const server = createServer({
       root,
-      routes: buildRoutes({
-        sessions: { get: token => registry.lookupSession(token) },
-        pingMs: PING_MS,
-        schedule: (fn, ms) => setInterval(fn, ms),
-        cancel: handle => clearInterval(handle),
-        onTokenDisposed: listener => tokenDisposedListeners.push(listener),
-      }),
+      routes: built.routes,
       hasToken: token => registry.lookupSession(token) !== undefined,
       fallbackHtml: bootstrapHtml,
       onTerminal,
-      onLogs,
+      // The /ws/logs bridge authorizes against the allowlist THESE routes
+      // seed -- the same instance, for the lifetime of this server. A
+      // restart builds new routes and a new server together, so a socket can
+      // never end up consulting a previous instance's allowlist.
+      onLogs: (ws, req, token) => onLogs(ws, req, token, built.isLogPathAllowed),
     });
     const port = await listen(server);
     if (startedAt !== generation) {
