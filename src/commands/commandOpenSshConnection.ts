@@ -130,10 +130,12 @@ export default checkCommand({
     // its default of true, release() never kills anything, so disposeAll() is
     // the *only* teardown in the normal path -- and it is best effort. VS Code
     // skips deactivate() entirely if the extension host crashes or is force
-    // quit, in which case wireproxy is left running (it is spawned
-    // non-detached, so it dies with the host, but nothing tears down its
-    // marker). That leak is bounded: the next run recognises the marker and
-    // reaps or adopts the tunnel rather than accumulating another.
+    // quit, and wireproxy survives that: spawn() without `detached` only keeps
+    // the child in our process group, which on macOS and Linux kills nothing
+    // -- the process is reparented to init and goes on holding its port. The
+    // leak is bounded anyway, and for the better reason that its marker
+    // survives with it: the next run recognises that marker and adopts or
+    // reaps the tunnel rather than accumulating another beside it.
     if (remoteConfig.vpn) {
       const sub = vscode.window.onDidCloseTerminal(closed => {
         if (closed === terminal) {
