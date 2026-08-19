@@ -5,11 +5,25 @@
   half-finished edit can never leave the button live. The card fetches the zone's name first, so
   the confirmation names the domain rather than a bare zone id, and states plainly that purging
   evicts the whole zone cache and sends every subsequent request to your origin until it refills.
+  If that name lookup fails (a rate limit, a network blip, or a token without zone-read), the card
+  shows the error with a **Retry** button and keeps the purge button live, naming `zone <id>` in
+  the confirmation -- the destructive action you came for is never gated on a different call
+  succeeding.
 * Note : the purge call is made from your own machine over HTTPS directly to Cloudflare's API --
-  never from the managed server, so the token never touches that host's process table. The token
-  needs only the **Zone.Cache Purge** permission; scope it to a single zone. Like every other
-  credential this extension reads, `CLOUDFLARE_ZONE_ID`/`CLOUDFLARE_API_TOKEN` are stored in
-  cleartext in `sftp.json` -- keep that file out of a shared repository.
+  never from the managed server, so the token never touches that host's process table. Scope the
+  token to a single zone and grant it **Zone > Cache Purge** (the purge) plus **Zone > Zone >
+  Read** (the zone name shown in the confirmation). Cloudflare's ready-made "Purge cache" template
+  grants only the first; purging works with just that, you simply see the zone id rather than the
+  domain. Like every other credential this extension reads,
+  `CLOUDFLARE_ZONE_ID`/`CLOUDFLARE_API_TOKEN` are stored in cleartext in `sftp.json` -- keep that
+  file out of a shared repository.
+* Security : the "sftp" output channel no longer prints credentials in cleartext. The config dump
+  written there on every activation and every reload of `sftp.json` masked only
+  `username`/`password`/`passphrase`/`interactiveAuth` and passed every other key through
+  verbatim, so `root_password`, `database[].password`, `ssh_prefix` and the new
+  `CLOUDFLARE_API_TOKEN` were all written in full to a panel users routinely paste into bug
+  reports. It is now an allowlist: unknown keys are masked by default, including inside nested
+  blocks, profiles and hops.
 
 ## 1.26.1 - 2026-08-19
 * Fix : the **Terminal** tab no longer resets when you switch to another tab and back. Switching tabs unmounted the tab's component, which disposed the terminal and closed its connection, so the remote shell exited -- taking the working directory, any running command and the scrollback with it. The Terminal and **Logs** tabs now stay mounted once opened, so a shell session and a live log Follow both survive tab switching. Leaving the server view entirely still closes them, as before.

@@ -162,9 +162,20 @@ destructive button live by accident.
 }
 ```
 
-The token needs the **Zone.Cache Purge** permission. Scope it to exactly that permission on
-exactly the one zone this profile purges — a token that can do nothing else and reach nothing else
-caps the damage if it ever leaks.
+The token needs **two** permissions, both scoped to exactly the one zone this profile purges:
+
+| Permission | Why |
+| --- | --- |
+| **Zone → Cache Purge** | The purge itself. |
+| **Zone → Zone → Read** | Reading the zone's name, so the confirmation dialog can say `example.com` instead of a bare zone id. |
+
+Cloudflare's ready-made **Purge cache** token template grants only the first of the two, so a token
+created from it shows the zone as its raw id and reports a permission error above the card until
+you add Zone → Zone → Read. **Purging still works either way** — the button is never gated on the
+zone lookup, and the confirmation falls back to naming `zone <id>`. If you would rather keep the
+token as narrow as possible, granting Cache Purge alone is a perfectly valid choice; you just get
+the id instead of the domain. Beyond those two, grant nothing: a token that can do nothing else and
+reach nothing else caps the damage if it ever leaks.
 
 The purge call is made **from your own machine over HTTPS directly to Cloudflare's API — never
 from the managed server.** Running the equivalent `curl -H "Authorization: Bearer …"` on the
@@ -172,8 +183,11 @@ server would put the token in that host's process table, readable by any other u
 `ps`; your own machine's extension process is not shared with anyone else.
 
 The card fetches the zone's name first (so the confirmation dialog names the domain you're about
-to purge instead of showing you a bare zone id) and asks for confirmation before purging. **Purging
-is not cheap on a busy site:** it evicts the *entire* zone cache, and every request behind
+to purge instead of showing you a bare zone id) and asks for confirmation before purging. That
+lookup is a nicety, not a prerequisite: if it fails — a rate limit, a network blip, or a token
+without Zone → Zone → Read — the card shows the error with a **Retry** button and keeps the
+**Purge everything** button live, with the confirmation naming `zone <id>` instead of the domain.
+**Purging is not cheap on a busy site:** it evicts the *entire* zone cache, and every request behind
 Cloudflare falls through to your origin until the cache refills — a real load spike, not a
 formality the confirmation dialog is exaggerating.
 

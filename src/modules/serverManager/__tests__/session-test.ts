@@ -16,6 +16,7 @@ const PROFILE: RedactedProfile = {
   hasVpn: false,
   hasDatabase: false,
   hasCloudflare: false,
+  cloudflareZoneId: '',
 };
 
 const FACTS: HostFacts = {

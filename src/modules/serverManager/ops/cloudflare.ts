@@ -232,8 +232,17 @@ export function cloudflareError(status: number, body: string, token?: string): s
   // the whole output -- there is nothing downstream of it to slip past.
   const assemble = (codeSuffix: string, detail: string): string => {
     if (status === 401 || status === 403) {
-      return `Cloudflare rejected the request: the CLOUDFLARE_API_TOKEN is invalid or lacks the ` +
-        `Zone.Cache Purge permission.${codeSuffix}${detail}`;
+      // Names BOTH permissions, because this branch fires for two different
+      // calls that need two different ones and the message cannot tell which
+      // it is: reading the zone name is Zone Details (Zone > Zone > Read),
+      // purging is Zone > Cache Purge. A token scoped to Cloudflare's own
+      // "Purge cache" template -- which grants Cache Purge alone -- gets a
+      // 403 on the zone lookup, and the earlier wording sent that user off to
+      // add the one permission they already had while never naming the one
+      // they lacked.
+      return `Cloudflare rejected the request: the CLOUDFLARE_API_TOKEN is invalid or lacks a ` +
+        `required permission. Reading the zone name needs Zone > Zone > Read; purging needs ` +
+        `Zone > Cache Purge.${codeSuffix}${detail}`;
     }
     if (status === 404) {
       return `Cloudflare zone not found -- check CLOUDFLARE_ZONE_ID.${codeSuffix}${detail}`;

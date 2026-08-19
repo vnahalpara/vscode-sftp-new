@@ -12,6 +12,13 @@
 // `?fail=1` escape hatch on the mutating endpoints so the sudo-hint path is
 // something a human can actually look at in a browser, not just pin in a
 // unit test.
+//
+// Cloudflare card fail modes: `?fail=cf` fails BOTH Cloudflare routes (the
+// zone lookup errors, so the card renders its zone-error banner with Retry,
+// and the purge falls back to the zone id in its confirmation);
+// `?fail=cfpurge` lets the zone read succeed and fails only the purge, which
+// is the far more common real failure and the only way to see the purge
+// result banner's error state.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -60,6 +67,12 @@ const PROFILE = {
   // but this boolean. Toggle to `false` only to screenshot the card's absence,
   // then revert -- see this file's own fake-identity discipline above.
   hasCloudflare: true,
+  // Matches CF_ZONE.id below. The card falls back to this for its
+  // confirmation copy whenever the zone-name lookup failed, so `?fail=cf`
+  // must have something to render here -- that is the point of the field
+  // (registry.ts). A zone id is identity, not a credential, but this one is
+  // still fake; see the fixture discipline above.
+  cloudflareZoneId: 'zone123',
 };
 
 const FACTS = {
@@ -345,7 +358,21 @@ const CF_ZONE = { id: 'zone123', name: 'mock-fixture-host.invalid' };
 // about the request that produced it.
 const CF_ZONE_FAILURE = 'Cloudflare zone not found -- check CLOUDFLARE_ZONE_ID. [Cloudflare error 1001]';
 const CF_PURGE_FAILURE =
-  'Cloudflare rejected the request: the CLOUDFLARE_API_TOKEN is invalid or lacks the Zone.Cache Purge permission. [Cloudflare error 10000]';
+  'Cloudflare rejected the request: the CLOUDFLARE_API_TOKEN is invalid or lacks a required ' +
+  'permission. Reading the zone name needs Zone > Zone > Read; purging needs Zone > Cache Purge. ' +
+  '[Cloudflare error 10000]';
+
+// `?fail=cfpurge` -- the zone reads fine, the PURGE fails. This is the
+// combination a real user hits most: Cloudflare rate-limits purge_everything
+// far harder than it rate-limits a zone read, so a 429 on purge with a
+// perfectly healthy zone lookup is the ordinary failure, not an exotic one.
+// `?fail=cf` cannot reach it -- it fails both routes, and with the zone
+// erroring the purge-failure banner is a state you have to get to another
+// way. Kept as its own mode rather than folded into `?fail=cf` so both
+// states stay screenshot-able.
+const CF_PURGE_RATE_LIMIT_FAILURE =
+  'Cloudflare rate limited this request. Cloudflare limits purge_everything far more tightly than ' +
+  'targeted purges, so this can happen even under light use. [Cloudflare error 10000]';
 
 // `daysFromNow` is computed against wall-clock time at request time (plus a
 // half-day buffer so a slow request never rounds down a day), not a fixed
@@ -1110,9 +1137,9 @@ http
 
     // POST /api/cloudflare/purge
     if (req.method === 'POST' && pathname === '/api/cloudflare/purge') {
-      if (fail === 'cf') {
+      if (fail === 'cf' || fail === 'cfpurge') {
         res.writeHead(502, { 'content-type': 'text/plain' });
-        res.end(CF_PURGE_FAILURE);
+        res.end(fail === 'cfpurge' ? CF_PURGE_RATE_LIMIT_FAILURE : CF_PURGE_FAILURE);
         return;
       }
       sendJson(200, { purged: true });

@@ -15,6 +15,7 @@ export interface RedactedProfile {
   hasVpn: boolean;
   hasDatabase: boolean;
   hasCloudflare: boolean;
+  cloudflareZoneId: string;
 }
 
 // Two workspace folders can each hold a profile called "prod", so the folder
@@ -81,5 +82,16 @@ export function redactProfile(workspace: string, config: any): RedactedProfile {
     // function's return value (this is an allowlist that builds a fresh
     // object from named fields, not a denylist of secret keys to strip).
     hasCloudflare: hasCloudflare(config),
+    // The zone ID, never the token. A zone id is infrastructure identity, not
+    // a credential: Cloudflare shows it in the dashboard sidebar and puts it
+    // in the path of every API call, and it ALREADY reaches this browser
+    // through the activity log, where routes.ts records `zone <id>` as the
+    // command for each Cloudflare call. It is here so the purge confirmation
+    // can name the zone honestly ("zone <id>") when the zone-name lookup
+    // failed, instead of the card having to gate the purge button on that
+    // lookup succeeding. Empty string when Cloudflare is not configured --
+    // gated on hasCloudflare so a half-finished edit (a zone id with no
+    // token) reports nothing, matching every other Cloudflare gate.
+    cloudflareZoneId: hasCloudflare(config) ? String(config.CLOUDFLARE_ZONE_ID) : '',
   };
 }

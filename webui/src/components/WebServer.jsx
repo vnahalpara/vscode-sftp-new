@@ -348,6 +348,18 @@ function ResultBanner({ label, result, onDismiss }) {
 // The zone name is fetched lazily (not bundled with /api/webserver) so a
 // user purging cache sees which domain -- not a bare 32-character zone id
 // -- is about to be evicted; see GET /api/cloudflare/zone in routes.ts.
+//
+// That fetch is a NICETY, and the purge button is deliberately NOT gated on
+// it. It used to be: `zoneReady = !zoneLoading && !zoneError && zone` wrapped
+// the button, so ANY failure of GET /api/cloudflare/zone -- a 429, a
+// transient network blip, a proxy, or a token scoped to cache-purge only
+// (Zone Details needs Zone > Zone > Read, a different permission) -- left a
+// card that was permanently an error string with no button and no retry, and
+// the only way back was an undiscoverable tab-switch remount. The destructive
+// action the user came for must not depend on a DIFFERENT endpoint
+// succeeding. When the name is unknown the confirmation says "zone <id>",
+// using profile.cloudflareZoneId (registry.ts) -- honest about what we know
+// rather than implying we resolved the domain.
 function CloudflareCard({ profile }) {
   const [zone, setZone] = useState(null); // { id, name } once loaded
   const [zoneLoading, setZoneLoading] = useState(true);
@@ -369,36 +381,43 @@ function CloudflareCard({ profile }) {
     };
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
+  // Each load claims a sequence number and only applies its result if no
+  // later load has started since. This replaces the per-effect `cancelled`
+  // flag: the fetch is now also reachable from the Retry/Reload buttons, so
+  // "is this response still the current one" can no longer be answered by a
+  // variable scoped to one effect run.
+  const zoneRequestRef = useRef(0);
+
+  const loadZone = useCallback(() => {
+    const seq = ++zoneRequestRef.current;
+    const isCurrent = () => mountedRef.current && zoneRequestRef.current === seq;
     setZoneLoading(true);
     setZoneError(null);
     apiGet('/api/cloudflare/zone')
       .then(res => {
-        if (cancelled || !mountedRef.current) {
-          return;
+        if (isCurrent()) {
+          setZone(res);
         }
-        setZone(res);
       })
       .catch(err => {
-        if (cancelled || !mountedRef.current) {
-          return;
+        if (isCurrent()) {
+          // err.message is GET /api/cloudflare/zone's 502 body -- already the
+          // mapped, token-safe text cloudflareError produced server-side.
+          // Rendered verbatim; never combined with any other field.
+          setZone(null);
+          setZoneError(err.message);
         }
-        // err.message is GET /api/cloudflare/zone's 502 body -- already the
-        // mapped, token-safe text cloudflareError produced server-side.
-        // Rendered verbatim; never combined with any other field.
-        setZoneError(err.message);
       })
       .finally(() => {
-        if (cancelled || !mountedRef.current) {
-          return;
+        if (isCurrent()) {
+          setZoneLoading(false);
         }
-        setZoneLoading(false);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [profile && profile.id]);
+  }, []);
+
+  useEffect(() => {
+    loadZone();
+  }, [loadZone, profile && profile.id]);
 
   // The confirm dialog stays open for the duration of the request (unlike
   // runAction/runTest above, which close their dialog immediately and track
@@ -438,42 +457,58 @@ function CloudflareCard({ profile }) {
     setPurgeResult(null);
   }
 
-  const zoneReady = !zoneLoading && !zoneError && zone;
+  // What we can honestly call the zone. The name when the lookup resolved it;
+  // otherwise the id, which the profile carries independently of that lookup
+  // (registry.ts's cloudflareZoneId) so it is available on every failure path.
+  const zoneId = (zone && zone.id) || (profile && profile.cloudflareZoneId) || '';
+  const zoneLabel = zone ? zone.name : zoneId ? `zone ${zoneId}` : 'this zone';
 
   return (
-    <Card title="Cloudflare" sub="Purge the CDN cache for this profile's zone">
+    <Card
+      title="Cloudflare"
+      sub="Purge the CDN cache for this profile's zone"
+      actions={
+        <button className="btn sm" onClick={loadZone} disabled={zoneLoading}>
+          {zoneLoading ? 'Loading…' : 'Reload'}
+        </button>
+      }
+    >
       {purgeResult && <ResultBanner label="Purge cache" result={purgeResult} onDismiss={dismissPurge} />}
 
-      {zoneLoading && <div className="muted" style={{ padding: '8px 0' }}>Loading zone…</div>}
-
-      {!zoneLoading && zoneError && (
+      {zoneError && (
         <div className="row">
           <span className="mono" style={{ color: 'var(--critical)', fontSize: 12.5 }}>
             {zoneError}
           </span>
-        </div>
-      )}
-
-      {zoneReady && (
-        <div className="row" style={{ justifyContent: 'space-between' }}>
-          <div>
-            <div className="muted" style={{ fontSize: 12 }}>
-              Zone
-            </div>
-            <div className="mono">{zone.name}</div>
-          </div>
-          <button className="btn sm danger" disabled={purging} onClick={() => setConfirming(true)}>
-            Purge everything
+          <button className="btn sm" onClick={loadZone} disabled={zoneLoading}>
+            Retry
           </button>
         </div>
       )}
+
+      {/* Always rendered -- never gated on the zone lookup. See the card's
+          own comment above for why the purge button must not depend on a
+          different endpoint having succeeded. */}
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <div>
+          <div className="muted" style={{ fontSize: 12 }}>
+            Zone
+          </div>
+          <div className="mono">
+            {zone ? zone.name : zoneLoading ? 'Loading…' : zoneId || 'unknown'}
+          </div>
+        </div>
+        <button className="btn sm danger" disabled={purging} onClick={() => setConfirming(true)}>
+          Purge everything
+        </button>
+      </div>
 
       {confirming && (
         <ConfirmDialog
           title="Purge Cloudflare cache"
           message={
             <>
-              Purge everything on <strong className="mono">{zone ? zone.name : 'this zone'}</strong>? This
+              Purge everything on <strong className="mono">{zoneLabel}</strong>? This
               evicts the <strong>entire zone cache</strong> -- every subsequent request falls through to
               your origin until the cache refills, which on a busy site is a real load spike.
             </>

@@ -32,12 +32,24 @@ test('purgeEverything posts purge_everything', async () => {
   expect(JSON.parse(d.seen[0].body)).toEqual({ purge_everything: true });
 });
 
-test('a 403 becomes an actionable permission message', () => {
+// Both permissions, not just one. The card makes two calls needing two
+// different permissions -- Zone Details needs Zone > Zone > Read, purge needs
+// Zone > Cache Purge -- and a 403 does not say which call failed. Naming only
+// Cache Purge told a user whose token was scoped to Cloudflare's "Purge
+// cache" template to add the permission they already had.
+test('a 403 names both permissions, so it is actionable whichever is missing', () => {
   const msg = cloudflareError(403, JSON.stringify({
     success: false, errors: [{ code: 10000, message: 'Authentication error' }],
   }));
   expect(msg).toMatch(/token/i);
-  expect(msg).toMatch(/Zone.Cache Purge/);
+  expect(msg).toMatch(/Zone > Zone > Read/);
+  expect(msg).toMatch(/Zone > Cache Purge/);
+});
+
+test('a 401 gets the same both-permissions message as a 403', () => {
+  const msg = cloudflareError(401, '{}');
+  expect(msg).toMatch(/Zone > Zone > Read/);
+  expect(msg).toMatch(/Zone > Cache Purge/);
 });
 
 test('a 404 points at the zone id, not the token', () => {
@@ -197,9 +209,10 @@ test('a token echoed back case-folded AND delimiter-substituted is still caught'
     expect(foldedSkeleton(msg)).not.toContain(foldedSkeleton(casedToken));
     // The message still has to be useful -- dropping the detail is the whole
     // response, not blanking the message.
-    expect(msg).toMatch(/Zone.Cache Purge/);
+    expect(msg).toMatch(/Zone > Zone > Read/);
+    expect(msg).toMatch(/Zone > Cache Purge/);
     const d = deps(403, body);
-    await expect(purgeEverything(d, 'z1', casedToken)).rejects.toThrow(/Zone.Cache Purge/);
+    await expect(purgeEverything(d, 'z1', casedToken)).rejects.toThrow(/Zone > Cache Purge/);
     await expect(purgeEverything(d, 'z1', casedToken)).rejects.toThrow(
       expect.not.stringContaining(echo) as any
     );
@@ -225,7 +238,8 @@ test('a message that scrub() REWRITES into the token skeleton is caught', () => 
   });
   const msg = cloudflareError(403, body, token);
   expect(foldedSkeleton(msg)).not.toContain(foldedSkeleton(token));
-  expect(msg).toMatch(/Zone.Cache Purge/);
+  expect(msg).toMatch(/Zone > Zone > Read/);
+  expect(msg).toMatch(/Zone > Cache Purge/);
 });
 
 test('a token skeleton straddling the error-code suffix and the detail is caught', () => {
@@ -238,7 +252,8 @@ test('a token skeleton straddling the error-code suffix and the detail is caught
   });
   const msg = cloudflareError(403, body, token);
   expect(foldedSkeleton(msg)).not.toContain(foldedSkeleton(token));
-  expect(msg).toMatch(/Zone.Cache Purge/);
+  expect(msg).toMatch(/Zone > Zone > Read/);
+  expect(msg).toMatch(/Zone > Cache Purge/);
 });
 
 // The ladder's last rung. If a (degenerate) token's skeleton occurs inside

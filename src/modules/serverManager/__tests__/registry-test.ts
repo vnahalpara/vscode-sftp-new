@@ -84,6 +84,7 @@ describe('redactProfile', () => {
       hasVpn: true,
       hasDatabase: true,
       hasCloudflare: false,
+      cloudflareZoneId: '',
     });
   });
 
@@ -184,6 +185,10 @@ describe('redactProfile', () => {
     } as any);
 
     expect(redacted.hasCloudflare).toBe(true);
+    // The zone id IS exposed -- it is an identifier, not a credential, and the
+    // purge confirmation needs it to name the zone when the zone-name lookup
+    // failed. The token is not.
+    expect(redacted.cloudflareZoneId).toBe('zone123');
 
     const json = JSON.stringify(redacted);
     expect(json).not.toContain(TOKEN);
@@ -193,5 +198,12 @@ describe('redactProfile', () => {
   it('hasCloudflare is false when only one field is set', () => {
     expect(redactProfile('/ws', { ...CONFIG, CLOUDFLARE_ZONE_ID: 'z' } as any).hasCloudflare).toBe(false);
     expect(redactProfile('/ws', { ...CONFIG, CLOUDFLARE_API_TOKEN: 't' } as any).hasCloudflare).toBe(false);
+  });
+
+  it('reports no zone id when Cloudflare is not fully configured', () => {
+    expect(redactProfile('/ws', CONFIG).cloudflareZoneId).toBe('');
+    // A zone id with no token is a half-finished edit, and every other
+    // Cloudflare gate treats it as not configured -- so does this one.
+    expect(redactProfile('/ws', { ...CONFIG, CLOUDFLARE_ZONE_ID: 'z' } as any).cloudflareZoneId).toBe('');
   });
 });
