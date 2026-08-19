@@ -357,8 +357,11 @@ SOCKS5 proxy, fall back to `getFreePort()` rather than failing.
 it instead of starting a second wireproxy. This is what makes the port survive an extension reload
 with a tunnel already up.
 
-**3. Export `portFor(vpn): number | undefined`,** so the server manager UI, the terminal's
-`ProxyCommand`, and any future status-bar item all read one number.
+**3. Export `portFor(vpn): number | undefined`,** as a read-only view of tunnel state.
+*(Correction, post-implementation: it has no production caller. The terminal's `ProxyCommand` takes
+the port from its own `acquire()` return, which is authoritative and cannot be undefined; the server
+manager UI and the status-bar item were never built. The export is kept for the lifecycle tests,
+which have no other way to observe whether a tunnel is tracked.)*
 
 New settings:
 

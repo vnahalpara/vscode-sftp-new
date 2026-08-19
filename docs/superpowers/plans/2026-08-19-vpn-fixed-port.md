@@ -4,7 +4,7 @@
 
 **Goal:** Make the VPN SOCKS proxy listen on the same port every time for a given WireGuard config, and reuse a tunnel that is already running, so the port survives an extension reload.
 
-**Architecture:** `vpnTunnel.acquire()` currently calls `getFreePort()`, which returns a random port unless `vpn.socksPort` is set — so the proxy moves on every restart and anything that hard-codes the port goes stale. This derives the port deterministically from the config path, adopts an already-running tunnel when one is provably ours, and exports `portFor(vpn)` so every consumer reads one number.
+**Architecture:** `vpnTunnel.acquire()` currently calls `getFreePort()`, which returns a random port unless `vpn.socksPort` is set — so the proxy moves on every restart and anything that hard-codes the port goes stale. This derives the port deterministically from the config path, adopts an already-running tunnel when one is provably ours, and exports `portFor(vpn)` as a read-only view of tunnel state. (Correction, post-implementation: `portFor()` has no production caller. Every consumer takes the port from its own `acquire()`, which is authoritative; the server-manager UI and status-bar item this export was justified by were never built. It is kept as the only way to observe whether a tunnel is tracked, which is what the lifecycle tests assert on.)
 
 **Tech Stack:** TypeScript 3.9 (`lib: ["es6"]`, no DOM, `strictNullChecks`, `noUnusedLocals`), Node `net`/`crypto`/`fs`, Jest.
 

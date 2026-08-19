@@ -19,7 +19,9 @@ export interface VpnOption {
   type?: 'wireguard';
   configFile: string;
   wireproxyPath?: string;
-  // 0 / undefined => pick a free localhost port at runtime
+  // An exact localhost port to pin the SOCKS proxy to. 0 or undefined (the
+  // documented default) means "no explicit choice": derive a stable port from
+  // the config path instead. See openTunnel().
   socksPort?: number;
   healthCheckTimeout?: number;
 }
@@ -36,7 +38,7 @@ interface Tunnel {
 
 /**
  * What a running tunnel leaves behind so the next extension run can recognise
- * it as ours. See canAdopt() for why recognising it matters.
+ * it as ours. See classifyOwnedPort() for why recognising it matters.
  */
 interface TunnelMarker {
   port: number;
@@ -138,7 +140,7 @@ const MIN_PORT = 1024;
 const MAX_PORT = 65535;
 
 /**
- * Parse the user-editable "vpn.socksPortRange" setting ("low-high") into a
+ * Parse the user-editable "sftp.vpn.portRange" setting ("low-high") into a
  * bounded tuple. This runs on the connection path every time a tunnel is
  * acquired, so a typo (missing dash, swapped bounds, an out-of-range number)
  * must never throw -- that would break every SFTP connection on the machine,
@@ -597,7 +599,7 @@ async function waitForPortFree(port: number, attempts = 5, delayMs = 20): Promis
       return true;
     }
     if (i < attempts - 1) {
-      await new Promise(resolve => setTimeout(resolve, delayMs));
+      await delay(delayMs);
     }
   }
   return false;
@@ -817,11 +819,22 @@ async function openTunnel(vpn: VpnOption, key: string): Promise<Tunnel> {
       // as avoiding a "relocation" -- waiting relocates nothing.)
       if (!(await waitForPortFree(port))) {
         // The signal did not free the port: ignored, still shutting down, or
-        // never deliverable at all (EPERM -- not our process after all). The
-        // marker deliberately stays. It is the only handle any future run has
-        // on this process, and dropping it while the process still holds the
-        // port would strand that port anonymously for the rest of the
-        // machine's uptime -- precisely the leak this branch exists to stop.
+        // never deliverable at all (EPERM -- not our process after all).
+        //
+        // Nothing calls removeMarker() here, so on the pinned-port path below
+        // the marker survives the throw, which is what we want: it is the only
+        // handle any future run has on that process, and dropping it while the
+        // process still holds the port would strand the port anonymously for
+        // the rest of the machine's uptime -- precisely the leak this branch
+        // exists to stop.
+        //
+        // The step-aside path is not so lucky. There is one marker slot per
+        // config key, and startTunnel() overwrites it with the replacement's
+        // port and pid the moment the replacement is up, so the unkillable
+        // process's claim is lost anyway. That is the accepted cost: one
+        // permanently orphaned wireproxy per wireproxy we could not kill, and
+        // the alternative -- refusing to connect at all over a port we were
+        // only ever using as a convenience -- is worse.
         if (explicit !== undefined) {
           throw new Error(
             `VPN SOCKS port ${port} is still held after signalling pid ` +
@@ -958,6 +971,15 @@ export async function acquire(vpn: VpnOption): Promise<number> {
 /**
  * The SOCKS port of this VPN's running tunnel, or undefined when none is up.
  * A tunnel still starting counts as not running: it has no port to report yet.
+ *
+ * This is the module's read-only view of its own state, and today only the
+ * tests read it -- every production consumer (sshClient, the SSH terminal's
+ * ProxyCommand) takes the port from its own acquire(), which is authoritative
+ * and cannot be undefined. The plan and design spec justified this export by a
+ * server-manager UI and a status-bar item that read "one number"; neither was
+ * built, and both of those docs have been corrected. It stays because it is
+ * the only way to observe whether a tunnel is tracked, which is what most of
+ * the lifecycle assertions are about.
  */
 export function portFor(vpn: VpnOption): number | undefined {
   const entry = tunnels.get(tunnelKey(vpn));
