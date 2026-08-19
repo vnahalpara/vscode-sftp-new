@@ -671,6 +671,53 @@ describe('reaping a hung tunnel', () => {
     expect(h.state.spawns).toBe(1);
   });
 
+  // The "no recorded uptime" row above is refused twice over: once by the
+  // explicit `uptimeAtWrite < 0` gate, and once, incidentally, by the
+  // arithmetic that follows it -- a missing uptime reads back as -1, which
+  // puts the writer's estimated boot instant 1s *after* its own timestamp, far
+  // later than ours on any machine that has been up for more than a few
+  // seconds. So deleting the explicit gate leaves that row green, and these
+  // two pin what it is actually for. A startedAt within the slack window of boot
+  // is the only place the two disagree, and it is reachable: an old-format
+  // marker plus a reconnect in the first seconds after a reboot.
+  function justAfterBoot(): number {
+    return Date.now() - os.uptime() * 1000 + 1000;
+  }
+
+  test('a marker with no uptime written just after boot is still never reaped', async () => {
+    const killed: number[] = [];
+    const h = await harness({
+      isPidAlive: () => true,
+      speaksSocks5: async () => false,
+      killPid: pid => killed.push(pid),
+    });
+    await occupy(h.derivedPort);
+    plantMarker(
+      h,
+      ourMarker(h.derivedPort, OLD_PID, { uptimeAtWrite: undefined, startedAt: justAfterBoot() })
+    );
+
+    const port = await h.mod.acquire(h.vpn);
+
+    expect(killed).toEqual([]);
+    expect(port).not.toBe(h.derivedPort);
+    expect(h.state.spawns).toBe(1);
+  });
+
+  test('a marker with no uptime written just after boot is not adopted either', async () => {
+    const h = await harness({ isPidAlive: () => true, speaksSocks5: async () => true });
+    await occupy(h.derivedPort);
+    plantMarker(
+      h,
+      ourMarker(h.derivedPort, OLD_PID, { uptimeAtWrite: undefined, startedAt: justAfterBoot() })
+    );
+
+    const port = await h.mod.acquire(h.vpn);
+
+    expect(port).not.toBe(h.derivedPort);
+    expect(h.state.spawns).toBe(1);
+  });
+
   test.each(clockCases)('a marker with %s is not adopted either', async (_name, overrides) => {
     const h = await harness({ isPidAlive: () => true, speaksSocks5: async () => true });
     await occupy(h.derivedPort);
