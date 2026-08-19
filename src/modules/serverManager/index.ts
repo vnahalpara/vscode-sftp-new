@@ -242,10 +242,32 @@ export function createSessionRegistry(hooks: SessionRegistryHooks = {}) {
   };
 }
 
+// buildRoutes keeps a per-session allowlist of the files discovery surfaced,
+// and has to drop a session's entry when its token goes away -- /api/logs
+// seeds every regular file under /var/log per scan, so without this the set
+// grows for the extension host's whole lifetime. The registry takes a single
+// onTokenDisposed hook at construction, but routes are built later and rebuilt
+// on every start, so the one hook fans out to a list of listeners. The list is
+// reset each time a server is built; otherwise a restart would leave the
+// previous routes instance's listener attached to a map nobody reads again.
+let tokenDisposedListeners: Array<(token: string) => void> = [];
+
 const registry = createSessionRegistry({
   onTokenDisposed: token => {
     if (running) {
       closeSessionSockets(running.server, token);
+    }
+    // A listener that throws must not stop the others, and must not stop the
+    // socket teardown above from having happened.
+    for (const listener of tokenDisposedListeners) {
+      try {
+        listener(token);
+      } catch (error) {
+        logger.error(
+          `serverManager: token-disposed listener failed: ${(error as Error).message}`,
+          'serverManager'
+        );
+      }
     }
   },
 });
@@ -365,6 +387,9 @@ async function ensureServer(): Promise<Running> {
     const root = extensionRoot
       ? path.join(extensionRoot, 'media', 'webui')
       : path.join(__filename, 'media', 'webui');
+    // Drop any listener registered by a previous server's routes before the
+    // new buildRoutes below registers its own -- see tokenDisposedListeners.
+    tokenDisposedListeners = [];
     const server = createServer({
       root,
       routes: buildRoutes({
@@ -372,6 +397,7 @@ async function ensureServer(): Promise<Running> {
         pingMs: PING_MS,
         schedule: (fn, ms) => setInterval(fn, ms),
         cancel: handle => clearInterval(handle),
+        onTokenDisposed: listener => tokenDisposedListeners.push(listener),
       }),
       hasToken: token => registry.lookupSession(token) !== undefined,
       fallbackHtml: bootstrapHtml,
