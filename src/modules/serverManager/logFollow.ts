@@ -373,9 +373,13 @@ export function bridgeLogFollow(deps: LogFollowDeps, socket: WsLike, target: Log
       // hazard as a flooding shell, not a different one, so it gets the same
       // code rather than a second implementation of it.
       forwardOutput(openedStream, socket, () => torndown);
+      // Sliced on every append rather than "stop appending once over the
+      // limit": a single ssh2 chunk can be tens of KB, so the looser form
+      // would keep MAX_STDERR_CHARS plus one whole chunk, which is not the
+      // bound this constant claims.
       attachStderr(openedStream, text => {
         if (stderrText.length < MAX_STDERR_CHARS) {
-          stderrText += text;
+          stderrText = (stderrText + text).slice(0, MAX_STDERR_CHARS);
         }
       });
       // Unlike an interactive shell, `tail -F`/`journalctl -f` have no

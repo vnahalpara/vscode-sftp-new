@@ -1038,16 +1038,38 @@ http
       return;
     }
 
-    // GET /api/file?path=...
-    if (req.method === 'GET' && pathname === '/api/file') {
-      const requestedPath = query.get('path') || '';
-      const content = Object.prototype.hasOwnProperty.call(FILE_CONTENTS, requestedPath) ? FILE_CONTENTS[requestedPath] : null;
-      if (content === null) {
-        res.writeHead(403, { 'content-type': 'text/plain' });
-        res.end('That file was not returned by a vhost listing for this session.');
+    // GET /api/logs
+    if (req.method === 'GET' && pathname === '/api/logs') {
+      if (fail) {
+        res.writeHead(500, { 'content-type': 'text/plain' });
+        res.end('mock: log discovery failed (ssh exec error)');
         return;
       }
-      sendJson(200, { content });
+      sendJson(200, { files: LOG_FILES, units: LOG_UNITS });
+      return;
+    }
+
+    // GET /api/file?path=...&lines=...
+    if (req.method === 'GET' && pathname === '/api/file') {
+      const requestedPath = query.get('path') || '';
+      const content = Object.prototype.hasOwnProperty.call(FILE_CONTENTS, requestedPath)
+        ? FILE_CONTENTS[requestedPath]
+        : Object.prototype.hasOwnProperty.call(LOG_FILE_CONTENTS, requestedPath)
+        ? LOG_FILE_CONTENTS[requestedPath]
+        : null;
+      if (content === null) {
+        res.writeHead(403, { 'content-type': 'text/plain' });
+        res.end('That file was not returned by a vhost listing or a log discovery scan for this session.');
+        return;
+      }
+      // Mirrors readFileCommand's real `sed -n '1,Np'` shape: the FIRST N
+      // lines of the file, not an arbitrary slice -- see that builder's own
+      // comment in ops/command.ts for why this route is head-first, not
+      // tail-first, despite Logs.jsx presenting it as a "snapshot" view.
+      const linesParam = Number(query.get('lines'));
+      const n = Number.isFinite(linesParam) && linesParam > 0 ? Math.floor(linesParam) : 400;
+      const sliced = content ? content.split('\n').slice(0, n).join('\n') : content;
+      sendJson(200, { content: sliced });
       return;
     }
 
@@ -1062,11 +1084,15 @@ http
   })
   .on('upgrade', (req, socket, head) => {
     const { pathname } = new URL(req.url, 'http://127.0.0.1');
-    if (pathname !== '/ws/terminal') {
-      socket.destroy();
+    if (pathname === '/ws/terminal') {
+      wss.handleUpgrade(req, socket, head, ws => handleTerminalSocket(ws, req));
       return;
     }
-    wss.handleUpgrade(req, socket, head, ws => handleTerminalSocket(ws, req));
+    if (pathname === '/ws/logs') {
+      wss.handleUpgrade(req, socket, head, ws => handleLogsSocket(ws, req));
+      return;
+    }
+    socket.destroy();
   })
   .listen(PORT, '127.0.0.1', () => {
     console.log(`mock UI server on http://127.0.0.1:${PORT}/?t=dev`);
