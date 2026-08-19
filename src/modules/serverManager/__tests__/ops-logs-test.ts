@@ -4,6 +4,8 @@ import {
   LOG_DISCOVERY_EMPTY_TEXT,
   LOG_DISCOVERY_GUARDED_NO_FINAL_NEWLINE_TEXT,
   LOG_DISCOVERY_UNGUARDED_NO_FINAL_NEWLINE_TEXT,
+  LOG_DISCOVERY_HUGE_SIZE_TEXT,
+  LOG_DISCOVERY_INJECTED_PATH_TEXT,
 } from '../__fixtures__/ops';
 
 describe('parseLogDiscovery', () => {
@@ -50,6 +52,23 @@ describe('parseLogDiscovery', () => {
     const text = '@@files\nnot-a-number\t/var/log/weird.log\n@@units\n';
     const { files } = parseLogDiscovery(text);
     expect(files).toEqual([{ path: '/var/log/weird.log', bytes: null }]);
+  });
+
+  it('treats a size field too large to represent exactly (> Number.MAX_SAFE_INTEGER) as bytes: null, ' +
+     'not a rounded/approximate number', () => {
+    const { files } = parseLogDiscovery(LOG_DISCOVERY_HUGE_SIZE_TEXT);
+    expect(files).toEqual([{ path: '/var/log/huge.log', bytes: null }]);
+  });
+
+  it('drops a discovered path outside /var/log entirely, keeping every legitimate entry alongside it', () => {
+    // The load-bearing fix for the newline-in-filename hazard documented
+    // on logDiscoveryCommand: a forged @@files line naming a path like
+    // /etc/shadow must never survive parseLogDiscovery, regardless of how
+    // it got into the stream, and a single bad entry must not take down
+    // the legitimate ones next to it.
+    const { files } = parseLogDiscovery(LOG_DISCOVERY_INJECTED_PATH_TEXT);
+    expect(files).toEqual([{ path: '/var/log/nginx/access.log', bytes: 4096 }]);
+    expect(files.some(f => f.path === '/etc/shadow')).toBe(false);
   });
 
   describe('framing a section whose last line lacks a final newline', () => {

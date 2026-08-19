@@ -6,7 +6,7 @@
 // below. Tail/follow output (Task 5) is streamed, not framed with `@@`
 // markers, so it has no parser here.
 
-import { splitAt } from './command';
+import { splitAt, isLogFilePath } from './command';
 
 export interface LogFile {
   path: string;
@@ -37,6 +37,18 @@ function parseBytes(raw: string): number | null {
 // itself contain spaces, and taking everything after the first tab as the
 // path -- rather than word-splitting the whole line -- keeps such a path
 // intact.
+//
+// `isLogFilePath` is applied to every candidate path before it is kept.
+// This is not incidental hardening -- see the "Newline-in-filename hazard"
+// comment on `logDiscoveryCommand` in `ops/command.ts`: a directory name
+// under /var/log can legally embed both a newline and a tab, which forges
+// what looks like an entire second, well-formed `<size>\t<path>` line once
+// this function's own `text.split('\n')` re-splits the stream -- a forged
+// line that, by shape alone, is indistinguishable from a real discovery. A
+// path is only ever kept here if it is one `isLogFilePath` actually
+// vouches for as rooted at /var/log; anything else is dropped silently,
+// the same way a malformed line with no tab is dropped, not surfaced as a
+// (fake) result.
 function parseFilesSection(text: string): LogFile[] {
   const files: LogFile[] = [];
   const lines = text.split('\n');
@@ -49,7 +61,7 @@ function parseFilesSection(text: string): LogFile[] {
     }
     const sizeField = line.slice(0, tabIndex);
     const path = line.slice(tabIndex + 1);
-    if (!path) {
+    if (!path || !isLogFilePath(path)) {
       continue;
     }
     files.push({ path, bytes: parseBytes(sizeField) });

@@ -3,7 +3,7 @@ import {
   servicesCommand, serviceActionCommand, serviceStatusCommand,
   detectWebServerCommand, configFilesCommand, testConfigCommand,
   certInfoCommand, readFileCommand, isConfigFilePath,
-  logDiscoveryCommand, tailCommand, followCommand, journalCommand, journalFollowCommand,
+  logDiscoveryCommand, tailCommand, followCommand, journalCommand, journalFollowCommand, isLogFilePath,
 } from '../ops/command';
 import { shellSingle } from '../../../core/dbExec';
 import {
@@ -449,27 +449,100 @@ describe('logDiscoveryCommand', () => {
   it('bakes sudo -n into the returned command, per the file-wide privilege contract', () => {
     expect(logDiscoveryCommand()).toMatch(/^sudo -n sh -c /);
   });
-  it('reads size via stat -c%s, not find -printf, so it still works under busybox find', () => {
+  it('reads size via stat -c%s -- "$1", not find -printf, so it still works under busybox find', () => {
+    // No single quotes appear inside `stat -c%s -- "$1"` itself (it's
+    // double-quoted throughout), so -- unlike the @@ markers and guard
+    // newlines -- this substring survives the outer single-quote escaping
+    // completely unescaped and can be matched literally.
     const cmd = logDiscoveryCommand();
-    expect(cmd).toMatch(/stat -c%s/);
-    expect(cmd).not.toMatch(/find[^|]*-printf/);
+    expect(cmd).toContain('stat -c%s -- "$1"');
+    expect(cmd).not.toContain('-printf');
   });
   it('bounds the scan depth rather than walking the whole filesystem', () => {
     expect(logDiscoveryCommand()).toMatch(/-maxdepth \d+/);
   });
-  it('excludes journald\'s binary journal files from the file listing', () => {
-    expect(logDiscoveryCommand()).toMatch(/var\/log\/journal/);
+  it("excludes journald's binary journal files from the file listing -- asserts the negation " +
+     '(! -path), not just that the constant appears somewhere', () => {
+    const cmd = logDiscoveryCommand();
+    const escapedExclusion = shellSingle(`! -path '/var/log/journal/*'`).slice(1, -1);
+    expect(cmd).toContain(escapedExclusion);
   });
-  it('explicitly newline-terminates each section, so a short last line cannot swallow the next @@ marker', () => {
+  it('discovers each file via find -exec, not a `| while read` pipe, so a filename containing ' +
+     'a literal newline cannot be re-split by an intermediate shell on the remote side', () => {
+    // See the "Newline-in-filename hazard" comment on logDiscoveryCommand:
+    // a `find ... | while IFS= read -r f; do ... done` pipeline is
+    // line-based, so the remote shell itself re-splits find's output on
+    // '\n' before this process ever sees it -- letting one `find` match
+    // (a directory whose name embeds a newline) masquerade as two. `-exec
+    // ... {} \;` hands each match to the spawned process as a single argv
+    // element, unparsed, so this can't happen at this layer. (isLogFilePath
+    // is still the load-bearing fix for the residual, parser-level version
+    // of this -- this test only pins that the naive pipe form is gone.)
+    const cmd = logDiscoveryCommand();
+    expect(cmd).toMatch(/-exec sh -c/);
+    expect(cmd).not.toMatch(/\|\s*while/);
+  });
+  it('places a distinct trailing-newline guard strictly inside each section, not merely twice anywhere', () => {
     // Mirrors the configFilesCommand trailing-newline fix: an explicit
     // `printf '\n'` after each section is what stops the next section's
     // `@@` marker from ever landing appended to a line that -- for
-    // whatever reason -- did not end in its own `\n`. The script is itself
-    // single-quote escaped for the outer `sh -c`, so pin the *count* of
-    // `printf` invocations (2 `@@` markers + 1 per-file line + 2 trailing
-    // guard newlines = 5) rather than matching literal, unescaped quoting.
+    // whatever reason -- did not end in its own `\n`. Pinning a raw
+    // occurrence *count* would still pass if a guard were moved before its
+    // section, or one were deleted and an unrelated `printf` added
+    // elsewhere -- so assert placement instead: one guard strictly between
+    // the two markers, a second strictly after the last one.
     const cmd = logDiscoveryCommand();
-    expect(cmd.match(/printf/g)!.length).toBe(5);
+    const filesIdx = cmd.indexOf('@@files');
+    const unitsIdx = cmd.indexOf('@@units');
+    expect(filesIdx).toBeGreaterThanOrEqual(0);
+    expect(unitsIdx).toBeGreaterThan(filesIdx);
+
+    // The guard's own single quotes are subject to the same outer escaping
+    // as everything else in the script -- compute the expected escaped
+    // form with the real `shellSingle`, rather than hand-typing it, so the
+    // test can't silently drift from how the command actually escapes it.
+    const escapedGuard = shellSingle(`printf '\\n'`).slice(1, -1);
+    const firstGuardIdx = cmd.indexOf(escapedGuard, filesIdx);
+    const secondGuardIdx = cmd.indexOf(escapedGuard, unitsIdx);
+
+    expect(firstGuardIdx).toBeGreaterThan(filesIdx);
+    expect(firstGuardIdx).toBeLessThan(unitsIdx);
+    expect(secondGuardIdx).toBeGreaterThan(unitsIdx);
+  });
+});
+
+describe('isLogFilePath', () => {
+  it('accepts an ordinary path under /var/log', () => {
+    expect(isLogFilePath('/var/log/syslog')).toBe(true);
+    expect(isLogFilePath('/var/log/nginx/access.log')).toBe(true);
+  });
+  it('rejects a path outside /var/log entirely', () => {
+    expect(isLogFilePath('/etc/shadow')).toBe(false);
+    expect(isLogFilePath('/etc/passwd')).toBe(false);
+    expect(isLogFilePath('/root/.ssh/id_rsa')).toBe(false);
+  });
+  it('rejects a path that only looks like a prefix match', () => {
+    expect(isLogFilePath('/var/logging/evil')).toBe(false);
+    expect(isLogFilePath('/var/log')).toBe(false); // no trailing slash: not genuinely inside it
+  });
+  it('rejects a path that reaches outside /var/log via a .. segment', () => {
+    expect(isLogFilePath('/var/log/../etc/shadow')).toBe(false);
+    expect(isLogFilePath('/var/log/nested/../../etc/shadow')).toBe(false);
+  });
+  it('rejects a non-string', () => {
+    expect(isLogFilePath(undefined as any)).toBe(false);
+    expect(isLogFilePath(null as any)).toBe(false);
+  });
+  it('is the exact predicate that stops the newline-in-filename hazard: an /etc/shadow path ' +
+     'forged by a crafted directory name is rejected even though it individually looks well-formed', () => {
+    // Documents the attack this function exists to stop, per the reviewer
+    // report: a directory under /var/log whose name embeds a newline (and,
+    // for the parser-level variant, a tab) can make `find`'s output -- or
+    // the re-split @@files stream -- appear to name an arbitrary path like
+    // /etc/shadow as an ordinary discovery. isLogFilePath is what refuses
+    // to treat that path as a legitimate log file regardless of how
+    // well-formed it looks once it reaches this process.
+    expect(isLogFilePath('/etc/shadow')).toBe(false);
   });
 });
 
@@ -531,10 +604,16 @@ describe('journalCommand', () => {
   it('builds a quoted journalctl call using --unit=, not -u -- (confirmed against a real host: ' +
      '-u -- fails with "Invalid argument" since -- is consumed as -u\'s own argument value)', () => {
     expect(journalCommand('nginx.service', 200))
-      .toBe(`sudo -n journalctl -n 200 --no-pager --unit='nginx.service'`);
+      .toBe(`sudo -n journalctl --lines=200 --no-pager --unit='nginx.service'`);
   });
   it('never emits the broken -u -- shape', () => {
     expect(journalCommand('nginx.service', 200)).not.toMatch(/-u\s+--/);
+  });
+  it('uses --lines=, not -n, since -n is an optional-argument option that only works via a ' +
+     "hand-rolled lookahead -- the same idiosyncratic-parsing territory -u -- broke in", () => {
+    const cmd = journalCommand('nginx.service', 200);
+    expect(cmd).toContain('--lines=200');
+    expect(cmd).not.toMatch(/-n\s+\d/);
   });
   it('rejects every shell metacharacter in the unit, same as serviceActionCommand', () => {
     ['nginx; rm -rf /', 'nginx && reboot', 'nginx`id`', 'nginx$(id)', "nginx'", 'nginx"', 'nginx\nrestart']
@@ -555,12 +634,18 @@ describe('journalFollowCommand', () => {
   it('validates the unit with isSafeUnitName', () => {
     expect(() => journalFollowCommand('-Hroot@evil')).toThrow();
   });
-  it('builds a pure follow with no historical replay (-n 0 -f), using --unit= not -u --', () => {
+  it('builds a pure follow with no historical replay (--lines=0 -f), using --unit= not -u --', () => {
     expect(journalFollowCommand('nginx.service'))
-      .toBe(`sudo -n journalctl -n 0 -f --no-pager --unit='nginx.service'`);
+      .toBe(`sudo -n journalctl --lines=0 -f --no-pager --unit='nginx.service'`);
   });
   it('never emits the broken -u -- shape', () => {
     expect(journalFollowCommand('nginx.service')).not.toMatch(/-u\s+--/);
+  });
+  it('uses --lines=0, not -n 0 -- 0 sits right on the boundary of journalctl\'s ' +
+     'non-negative-integer lookahead peek', () => {
+    const cmd = journalFollowCommand('nginx.service');
+    expect(cmd).toContain('--lines=0');
+    expect(cmd).not.toMatch(/-n\s+0/);
   });
   it('rejects every shell metacharacter in the unit', () => {
     ['nginx; rm -rf /', 'nginx && reboot', 'nginx`id`', 'nginx$(id)']

@@ -449,3 +449,31 @@ export const LOG_DISCOVERY_GUARDED_NO_FINAL_NEWLINE_TEXT =
 // `configFilesCommand` trailing-newline bug produced.
 export const LOG_DISCOVERY_UNGUARDED_NO_FINAL_NEWLINE_TEXT =
   '@@files\n4096\t/var/log/nginx/access.log@@units\nnginx.service\n';
+
+// A size field too large to represent exactly as a JS number (> 2^53 - 1,
+// Number.MAX_SAFE_INTEGER) -- the one path to `parseBytes`' `bytes: null`
+// branch that isn't "the size field failed to parse as digits at all".
+// Not really achievable via a real /var/log file, but `stat -c%s`'s output
+// is plain decimal text with no upper bound of its own, so the parser has
+// to treat an absurdly large value as "not reliably computable" rather
+// than silently rounding it.
+export const LOG_DISCOVERY_HUGE_SIZE_TEXT =
+  '@@files\n99999999999999999999\t/var/log/huge.log\n@@units\n';
+
+// A `@@files` entry naming a path outside /var/log entirely -- the shape
+// `isLogFilePath` exists to reject. Realistically this arrives via the
+// newline-in-filename hazard documented on `logDiscoveryCommand`
+// (ops/command.ts), not because `logDiscoveryCommand` itself would ever
+// legitimately report such a path; this fixture isolates the parser-side
+// guard from that remote-side mechanism, pinning that `parseLogDiscovery`
+// drops it regardless of how it got there. Paired with one legitimate
+// /var/log entry to prove the guard drops ONLY the offending line, not the
+// whole section.
+export const LOG_DISCOVERY_INJECTED_PATH_TEXT = [
+  '@@files',
+  '4096\t/var/log/nginx/access.log',
+  '1234\t/etc/shadow',
+  '',
+  '@@units',
+  '',
+].join('\n');

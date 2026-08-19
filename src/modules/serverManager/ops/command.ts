@@ -344,14 +344,17 @@ export function certInfoCommand(paths: string[]): CertCommand {
 // ------------------------------------------------------------------- files --
 
 const DEFAULT_READ_LINES = 400;
-const MAX_READ_LINES = 5000;
+// Shared with `validateLineCount` below (`tailCommand`/`journalCommand`'s
+// bound) -- one constant, not two independently-maintained copies of the
+// same number for the same class of operand.
+const MAX_LOG_LINES = 5000;
 
 function clampLines(lines: number): number {
   const n = Number(lines);
   if (!isFinite(n) || n <= 0) {
     return DEFAULT_READ_LINES;
   }
-  return Math.min(Math.floor(n), MAX_READ_LINES);
+  return Math.min(Math.floor(n), MAX_LOG_LINES);
 }
 
 // `--` stops GNU sed from treating a "path" like `--expression=1w/etc/passwd`
@@ -407,9 +410,11 @@ const LOG_SCAN_EXCLUDE = `${LOG_SCAN_ROOT}/journal/*`;
 // `find` listing it and `stat` reading it (log rotation is exactly this
 // race), or one this user cannot stat even under sudo, leaves `sz` empty
 // rather than aborting the scan -- `parseLogDiscovery` turns that into
-// `bytes: null`, never `bytes: 0`.
+// `bytes: null`, never `bytes: 0`. `-- "$1"` guards `stat` the same way
+// `--` guards every other tool in this file: a filename that happens to
+// start with `-` is otherwise a valid, if bizarre, `stat` flag.
 //
-// Every line this command's own `stat` loop writes already ends in `\n`
+// Every line this command's own `stat` step writes already ends in `\n`
 // (each is its own `printf '...\n'` call), unlike `configFilesCommand`'s
 // `cat "$f"`, which reproduces a THIRD PARTY file's bytes verbatim and can
 // genuinely lack a trailing newline. Even so, an explicit `printf '\n'` is
@@ -419,10 +424,46 @@ const LOG_SCAN_EXCLUDE = `${LOG_SCAN_ROOT}/journal/*`;
 // line and being swallowed by `splitAt` (which only recognises `@@` at
 // index 0) -- from resurfacing the next time this script is edited to add
 // a line-emitting step that doesn't already end in `\n` on its own.
+//
+// Newline-in-filename hazard: a directory name under /var/log containing a
+// literal newline is a legal POSIX filename. A naive `find ... | while
+// IFS= read -r f; do ... done` pipeline is line-based, so that pipe's
+// output gets RE-SPLIT on '\n' by the remote shell itself -- on the remote
+// side, before this process ever sees any of it. A single `find` match
+// naming such a directory (with, say, `/etc/shadow` nested beneath it)
+// would be read back by that loop as TWO separate `f` values -- the
+// directory's own (truncated) name, and an attacker-chosen absolute path
+// -- and `stat`+`printf` would then report THAT path's real size as an
+// ordinary, well-formed discovery line, with nothing about either
+// fragment individually looking suspicious. Client-side validation like
+// `hasControlChars` cannot catch this: the split already happened
+// remotely, so each fragment this process receives back is individually
+// clean. `-exec sh -c '...' sh {} \;` below (not a `| while read` pipe)
+// avoids that re-split entirely -- `find` hands each match to the spawned
+// process as a single argv element, verbatim, embedded newline and all,
+// never re-parsed by an intermediate shell.
+//
+// That closes the NAIVE version of this hole at the source, but it is not
+// a complete fix by itself, and is not what actually makes this safe: a
+// directory name can still embed both a newline AND a tab (both legal
+// filename bytes) so that a single `find` match's own reported path forges
+// what looks like an entire second, well-formed `<size>\t<path>` record
+// once `parseFilesSection` (`ops/logs.ts`) re-splits the STREAM on '\n' --
+// no pipe re-splitting required for that, since the forged newline would
+// already be inside the one path string this command legitimately
+// reports. Only a parser-side allowlist that rejects anything not
+// genuinely rooted at /var/log can close that -- see `isLogFilePath`
+// below, which `parseLogDiscovery` applies to every discovered path. Task
+// 4 must use the same predicate before offering any discovered path to
+// `sudo -n tail`/`sudo -n tail -F`.
 export function logDiscoveryCommand(): string {
+  // Double-quoted throughout (no embedded `'`) so it nests cleanly inside
+  // the single-quoted `-exec sh -c '...'` clause below without needing a
+  // second round of single-quote escaping.
+  const statScript = `sz=$(stat -c%s -- "$1" 2>/dev/null); printf "%s\\t%s\\n" "$sz" "$1"`;
   const script = [
     `printf '%s\\n' '@@files'`,
-    `find ${LOG_SCAN_ROOT} -maxdepth ${LOG_SCAN_MAX_DEPTH} -type f ! -path ${shellSingle(LOG_SCAN_EXCLUDE)} 2>/dev/null | while IFS= read -r f; do sz=$(stat -c%s "$f" 2>/dev/null); printf '%s\\t%s\\n' "$sz" "$f"; done`,
+    `find ${LOG_SCAN_ROOT} -maxdepth ${LOG_SCAN_MAX_DEPTH} -type f ! -path ${shellSingle(LOG_SCAN_EXCLUDE)} -exec sh -c ${shellSingle(statScript)} sh {} \\; 2>/dev/null`,
     `printf '\\n'`,
     `printf '%s\\n' '@@units'`,
     'journalctl -F _SYSTEMD_UNIT --no-pager 2>/dev/null',
@@ -431,7 +472,31 @@ export function logDiscoveryCommand(): string {
   return `sudo -n sh -c ${shellSingle(script)}`;
 }
 
-// `tail -n <N>` / `journalctl -n <N>` interpolate N directly into the
+// Whether `path` could legitimately be one of `logDiscoveryCommand`'s own
+// discoveries -- i.e. whether it is safe to treat as a log file at all.
+// This is the load-bearing fix for the newline-in-filename hazard
+// documented above `logDiscoveryCommand`: a forged path smuggled into the
+// `@@files` stream looks, by the time it reaches this process, exactly
+// like an ordinary, well-formed discovery line -- it cannot be told apart
+// from a real one by SHAPE, only by asking whether it is actually rooted
+// where this feature is only ever supposed to look. Anything not
+// genuinely under `LOG_SCAN_ROOT`, or that reaches outside it via a `..`
+// path segment, is rejected.
+//
+// Direct analogue of `isConfigFilePath` above. `parseLogDiscovery`
+// (`ops/logs.ts`) applies this to every discovered path before returning
+// it, and Task 4 must apply it again before offering any path to
+// `sudo -n tail`/`sudo -n tail -F` -- the allowlist a privileged read is
+// gated on has to be checked at the point that read happens, not trusted
+// because it was checked once upstream.
+export function isLogFilePath(path: string): boolean {
+  if (typeof path !== 'string' || path.indexOf(`${LOG_SCAN_ROOT}/`) !== 0) {
+    return false;
+  }
+  return path.split('/').indexOf('..') === -1;
+}
+
+// `tail -n <N>` / `journalctl --lines=<N>` interpolate N directly into the
 // command text with NO quoting -- this is a different kind of operand from
 // every path/unit above. A path or unit name is made safe by quoting it
 // (`shellSingle`) and/or validating its charset; a line count can't be
@@ -450,10 +515,12 @@ export function logDiscoveryCommand(): string {
 // surface as an error, not a silently-different result. A non-`number`
 // value (e.g. the string `'200; rm -rf /'`) is rejected outright by the
 // `typeof` check, with no numeric coercion attempted on it at all.
-const MAX_TAIL_LINES = 5000;
-
+//
+// Shares `MAX_LOG_LINES` with `clampLines` above -- one bound for "how many
+// lines is a reasonable amount to read", not two numbers that happen to
+// agree today and could silently drift apart later.
 function validateLineCount(lines: number): number {
-  if (typeof lines !== 'number' || !Number.isInteger(lines) || lines <= 0 || lines > MAX_TAIL_LINES) {
+  if (typeof lines !== 'number' || !Number.isInteger(lines) || lines <= 0 || lines > MAX_LOG_LINES) {
     throw new Error(`Invalid line count: ${lines}`);
   }
   return lines;
@@ -526,22 +593,37 @@ export function followCommand(path: string): string {
 // belt-and-braces, matching this file's standing convention. Someone
 // tidying this back to `-u <unit>`/`-u -- <unit>` would silently reopen
 // this exact failure -- don't.
+//
+// `--lines=<n>`, NOT `-n <n>`: `journalctl` declares `-n`/`--lines` as an
+// OPTIONAL argument (`journalctl -n` alone is valid and means "the
+// default count"), and getopt_long never auto-consumes the next argv
+// element for an optional-argument option -- it only takes a value that is
+// directly attached (`-n200`/`--lines=200`). `journalctl -n 200` works
+// anyway only because journalctl separately peeks at the next argv element
+// itself and consumes it if, and only if, it parses as a non-negative
+// integer -- the exact same class of hand-rolled, idiosyncratic argument
+// lookahead that made `-u --` silently bind `--` as `-u`'s value above,
+// and `journalFollowCommand`'s `n = 0` sits right on the boundary of that
+// peek (0 "parses as a non-negative integer" same as any other value we'd
+// pass). `--lines=` sidesteps the lookahead entirely, the same way
+// `--unit=` sidesteps `-u`'s: the value is part of the same argv element,
+// so there is nothing left for journalctl to have to guess about.
 export function journalCommand(unit: string, lines: number): string {
   if (!isSafeUnitName(unit)) {
     throw new Error(`Unsafe unit name: ${unit}`);
   }
   const n = validateLineCount(lines);
-  return `sudo -n journalctl -n ${n} --no-pager --unit=${shellSingle(unit)}`;
+  return `sudo -n journalctl --lines=${n} --no-pager --unit=${shellSingle(unit)}`;
 }
 
-// journalctl's own pure-follow shape: `-n 0` for the same "no replay on
-// connect" reason as `followCommand`'s `tail -n 0 -F`, `-f` to follow, and
-// -- like `followCommand` -- a single direct foreground process with no
-// `sh -c` wrapper, so a consumer's SIGTERM reaches `journalctl` cleanly.
-// `--unit=`, not `-u`/`--` -- see the comment on `journalCommand` above.
+// journalctl's own pure-follow shape: `--lines=0` for the same "no replay
+// on connect" reason as `followCommand`'s `tail -n 0 -F` (see the comment
+// on `journalCommand` above for why `--lines=`, not `-n`), `-f` to follow,
+// and -- like `followCommand` -- a single direct foreground process with
+// no `sh -c` wrapper, so a consumer's SIGTERM reaches `journalctl` cleanly.
 export function journalFollowCommand(unit: string): string {
   if (!isSafeUnitName(unit)) {
     throw new Error(`Unsafe unit name: ${unit}`);
   }
-  return `sudo -n journalctl -n 0 -f --no-pager --unit=${shellSingle(unit)}`;
+  return `sudo -n journalctl --lines=0 -f --no-pager --unit=${shellSingle(unit)}`;
 }
