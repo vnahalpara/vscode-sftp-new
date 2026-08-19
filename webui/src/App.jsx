@@ -5,6 +5,7 @@ import Overview from './components/Overview.jsx';
 import Services from './components/Services.jsx';
 import WebServer from './components/WebServer.jsx';
 import Terminal from './components/Terminal.jsx';
+import Logs from './components/Logs.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Activity from './pages/Activity.jsx';
 import Settings from './pages/Settings.jsx';
@@ -167,6 +168,8 @@ export default function App() {
       tabContent = <WebServer />;
     } else if (tabPage === 'terminal') {
       tabContent = <Terminal profile={profile} />;
+    } else if (tabPage === 'logs') {
+      tabContent = <Logs />;
     } else {
       tabContent = <Overview snapshot={snapshot} slow={slow} series={series} facts={facts} />;
     }

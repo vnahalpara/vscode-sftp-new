@@ -185,8 +185,15 @@ export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
   // mirror-image failure.
   socket.on('error', () => teardown(CLOSE_INTERNAL_ERROR, 'socket error'));
 
-  deps.openShell(DEFAULT_SIZE).then(
-    openedStream => {
+  // .then(...).catch(...), NOT .then(onFulfilled, onRejected): with the
+  // two-argument form the rejection handler is attached to the ORIGINAL
+  // promise, so anything the fulfillment handler below throws -- setWindow()
+  // or a queued write() on a channel that died the instant it was handed
+  // back -- becomes an unhandled rejection, leaving the socket open with no
+  // teardown. Chained, that throw lands in the same catch.
+  deps
+    .openShell(DEFAULT_SIZE)
+    .then(openedStream => {
       // The socket went away while the channel was still opening -- there is
       // no reader left on the other end, so do not leave a shell running
       // with nobody attached to it.
@@ -221,12 +228,14 @@ export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
         openedStream.setWindow(pendingResize.rows, pendingResize.cols, 0, 0);
       }
       inputQueue.splice(0).forEach(chunk => openedStream.write(chunk));
-    },
-    error => {
-      // No stream was ever assigned, so teardown() only needs to close the
-      // socket -- but it must still close it, with a reason, rather than
-      // leaving an authenticated socket open with nothing ever driving it.
+    })
+    .catch(error => {
+      // Usually the shell failing to open, in which case no stream was ever
+      // assigned and teardown() only needs to close the socket -- but it
+      // must still close it, with a reason, rather than leaving an
+      // authenticated socket open with nothing ever driving it. This also
+      // catches a throw from the handler above, where a stream HAS been
+      // adopted; teardown() releases it either way.
       teardown(CLOSE_INTERNAL_ERROR, (error && error.message) || 'failed to open shell');
-    }
-  );
+    });
 }

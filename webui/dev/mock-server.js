@@ -70,8 +70,12 @@ const FACTS = {
 
 // Mirrors routes.ts's CAPABILITIES now that Tasks 1-5 have wired the seven
 // routes up for real — a mock that still greyed these out would make Tasks 7
-// and 8 unbuildable against it.
-const CAPABILITIES = { services: true, webserver: true, logs: false, terminal: true, database: false };
+// and 8 unbuildable against it. `logs: true` here is this mock's own dev
+// fixture flag, not src/modules/serverManager/routes.ts's real
+// CAPABILITIES.logs (still false there until that route wiring lands for
+// real — see routes.ts's own comment) — flipping THIS one is what lets the
+// Logs tab actually be exercised against the mock.
+const CAPABILITIES = { services: true, webserver: true, logs: true, terminal: true, database: false };
 
 function wave(i, amp, base) {
   return base + Math.sin((tick + i * 7) / 6) * amp + Math.random() * 3;

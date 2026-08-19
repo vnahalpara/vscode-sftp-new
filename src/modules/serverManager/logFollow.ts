@@ -342,8 +342,16 @@ export function bridgeLogFollow(deps: LogFollowDeps, socket: WsLike, target: Log
     return;
   }
 
-  deps.execStream(command).then(
-    openedStream => {
+  // .then(...).catch(...), NOT .then(onFulfilled, onRejected): with the
+  // two-argument form the rejection handler is attached to the ORIGINAL
+  // promise, so anything the fulfillment handler below throws (a channel
+  // that died the instant it was handed back, taking one of the on() calls
+  // with it) becomes an unhandled rejection -- a socket left open with no
+  // teardown, and a process-level warning nobody sees. Chained, that throw
+  // lands in the same catch, which tears the follow down properly.
+  deps
+    .execStream(command)
+    .then(openedStream => {
       // The socket went away while the channel was still opening -- there is
       // no reader left on the other end, so do not leave `tail -F`/
       // `journalctl -f` running with nobody attached to it.
@@ -384,12 +392,14 @@ export function bridgeLogFollow(deps: LogFollowDeps, socket: WsLike, target: Log
       // would send.
       openedStream.on('close', () => teardown(CLOSE_INTERNAL_ERROR, closeReason('log stream closed')));
       openedStream.on('error', () => teardown(CLOSE_INTERNAL_ERROR, closeReason('log channel error')));
-    },
-    error => {
-      // No stream was ever assigned, so teardown() only needs to close the
-      // socket -- but it must still close it, with a reason, rather than
-      // leaving an authenticated socket open with nothing ever driving it.
+    })
+    .catch(error => {
+      // Usually the channel failing to open, in which case no stream was
+      // ever assigned and teardown() only needs to close the socket -- but
+      // it must still close it, with a reason, rather than leaving an
+      // authenticated socket open with nothing ever driving it. This also
+      // catches a throw from the handler above, where a stream HAS been
+      // adopted; teardown() releases it either way.
       teardown(CLOSE_INTERNAL_ERROR, (error && error.message) || 'failed to open log stream');
-    }
-  );
+    });
 }

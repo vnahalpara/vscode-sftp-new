@@ -15,6 +15,8 @@ import { profileId, redactProfile } from './registry';
 import { targetOption, hasRootCreds } from './privilege';
 import { ManagedSession } from './session';
 import { closeServer, closeSessionSockets, createServer, listen } from './httpServer';
+import { parseSafe } from './wsServer';
+import { CLOSE_INTERNAL_ERROR } from './wsBridge';
 import { bootstrapHtml } from './bootstrap';
 import { buildRoutes } from './routes';
 import { browserCommand, BrowserKind } from './browser';
@@ -291,8 +293,11 @@ function onTerminal(ws: WebSocket, req: http.IncomingMessage, token: string): vo
     // shell(), and a valid token always resolves to a session (checkUpgrade
     // already required one to accept the upgrade at all) -- but a session
     // can in principle be disposed in the gap between the upgrade completing
-    // and this callback running, and closing costs nothing.
-    ws.close();
+    // and this callback running, and closing costs nothing. With a code and
+    // a reason, for the same reason onLogs's guards carry them: a bare
+    // close() is code 1005 and no text, which the client cannot tell apart
+    // from a server fault.
+    ws.close(CLOSE_INTERNAL_ERROR, 'That session is no longer open in VS Code.');
     return;
   }
   // Called as a method of the transport, not lifted off it. sshTransport
@@ -310,8 +315,21 @@ function onTerminal(ws: WebSocket, req: http.IncomingMessage, token: string): vo
 // third module re-deriving it here is cheaper than threading it through.
 // Exactly one of path/unit must be present; anything else (both, neither, an
 // empty value) is not a request this bridge knows how to serve.
-function logTargetFromRequest(req: http.IncomingMessage): LogTarget | null {
-  const parsed = url.parse(req.url || '', true);
+//
+// wsServer.ts's parseSafe, not a bare url.parse: legacy url.parse throws on
+// some inputs (an unterminated IPv6 literal raises ERR_INVALID_URL), and
+// this runs inside wss.handleUpgrade's synchronous callback on an
+// already-upgraded socket. Unreachable today only because checkUpgrade
+// already parsed this exact string a moment ago -- an invariant held in a
+// different function, which is not a property that survives editing.
+// Exported for its own tests: everything else in this module needs a live
+// server or a real SSH session to reach, but this is a pure function over a
+// request URL and is exactly where a malformed /ws/logs target is decided.
+export function logTargetFromRequest(req: http.IncomingMessage): LogTarget | null {
+  const parsed = parseSafe(req.url || '', true) as url.UrlWithParsedQuery | null;
+  if (!parsed) {
+    return null;
+  }
   const path = parsed.query.path;
   const unit = parsed.query.unit;
   const hasPath = typeof path === 'string' && path.length > 0;
@@ -352,15 +370,25 @@ function onLogs(
 ): void {
   const session = registry.lookupSession(token);
   const canFollow = session && session.privilegedTransport.execStream;
-  const target = logTargetFromRequest(req);
-  if (!canFollow || !target) {
-    // Unreachable in normal operation for the same reasons onTerminal's
+  if (!canFollow) {
+    // Unreachable in normal operation for the same reason onTerminal's
     // equivalent guard is -- sshTransport always implements execStream, and
     // a valid token always resolves to a session -- but a session can in
     // principle be disposed in the gap between the upgrade completing and
-    // this callback running, and a malformed/missing path or unit query is
-    // a real possibility a client could send. Closing costs nothing.
-    ws.close();
+    // this callback running.
+    ws.close(CLOSE_INTERNAL_ERROR, 'That session is no longer open in VS Code.');
+    return;
+  }
+  // A missing, empty, or doubled-up path/unit query, on the other hand, is a
+  // real thing a client can send. Both refusals close with 1011 AND a reason,
+  // like every other refusal in this feature: a bare ws.close() sends code
+  // 1005 ("no status received") with no text, which is indistinguishable from
+  // a server bug -- the client cannot tell "you asked for something I do not
+  // serve" from "the bridge fell over", and neither can whoever reads the
+  // bug report.
+  const target = logTargetFromRequest(req);
+  if (!target) {
+    ws.close(CLOSE_INTERNAL_ERROR, 'Ask for exactly one of ?path= or ?unit= on /ws/logs.');
     return;
   }
   bridgeLogFollow(

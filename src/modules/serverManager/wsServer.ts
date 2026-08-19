@@ -44,7 +44,14 @@ function isOurHostPort(hostPort: string | undefined, port: number): boolean {
 // is an uncaught exception in the extension host reachable with no
 // credential at all. Every parse in this module goes through here, and a
 // failure to parse is simply not a request we serve.
-function parseSafe(input: string, parseQuery?: boolean): url.UrlWithParsedQuery | url.Url | null {
+//
+// Exported because index.ts's /ws/logs handler parses req.url a second time
+// (for ?path=/?unit=) and must not be the one place in the WebSocket path
+// that opts out of this convention: that parse runs inside
+// wss.handleUpgrade's synchronous callback, on an ALREADY-upgraded socket,
+// where a throw is an uncaught exception in the extension host AND a leaked
+// socket that nothing is left to destroy.
+export function parseSafe(input: string, parseQuery?: boolean): url.UrlWithParsedQuery | url.Url | null {
   try {
     return parseQuery ? url.parse(input, true) : url.parse(input);
   } catch (error) {
