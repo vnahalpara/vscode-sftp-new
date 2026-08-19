@@ -341,6 +341,13 @@ export function logTargetFromRequest(req: http.IncomingMessage): LogTarget | nul
   return hasPath ? { kind: 'file', path: path as string } : { kind: 'unit', unit: unit as string };
 }
 
+// Concurrency accounting for /ws/logs, per session token. Module-level and
+// deliberately NOT rebuilt per server: it counts channels on pooled SSH
+// connections, which outlive any one http.Server this module binds. It
+// self-prunes -- a token back at zero follows is deleted -- so nothing has
+// to remember to clear it on disposal.
+const followLimit = createFollowLimit();
+
 // session.privilegedTransport is used here, deliberately never
 // session.transport: both followCommand and journalFollowCommand bake in
 // `sudo -n` (see ops/command.ts), the same reason /api/logs and /api/file
@@ -355,13 +362,6 @@ export function logTargetFromRequest(req: http.IncomingMessage): LogTarget | nul
 // than read off some module-level variable so there is no way to wire this
 // callback up without also deciding where its authorization answer comes
 // from.
-// Concurrency accounting for /ws/logs, per session token. Module-level and
-// deliberately NOT rebuilt per server: it counts channels on pooled SSH
-// connections, which outlive any one http.Server this module binds. It
-// self-prunes -- a token back at zero follows is deleted -- so nothing has
-// to remember to clear it on disposal.
-const followLimit = createFollowLimit();
-
 function onLogs(
   ws: WebSocket,
   req: http.IncomingMessage,
