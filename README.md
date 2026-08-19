@@ -93,9 +93,15 @@ The dashboard streams live metrics over the connection's SSH channel and renders
 tab: five stat cards (CPU, Memory, Disk, Load (1m), Uptime), charts for CPU usage, per-core usage,
 memory usage, load average and network throughput, plus tables for filesystems, top processes by
 CPU, disk I/O (IOPS and latency) and network interfaces. A range selector switches the charts
-between the last 5, 15 and 60 minutes of in-memory history. **Services** and **Web server** are
-also live tabs — see below. Logs, Terminal and Database appear as visibly disabled tabs, pending
-later releases.
+between the last 5, 15 and 60 minutes of in-memory history. **Services**, **Web server**,
+**Terminal** and **Logs** are also live tabs — see below. **Database** is enabled only for
+profiles with database settings configured.
+
+The Terminal and Logs tabs each open their own token-authenticated WebSocket (`/ws/terminal`,
+`/ws/logs`) alongside the dashboard's existing HTTP/SSE traffic, gated the same way the rest of the
+page is: the per-session token, plus checks on the request's `Origin` and `Host` headers so that a
+malicious page open in another tab — or a hostile domain that resolves to `127.0.0.1` — cannot ride
+a leaked token in.
 
 Metric history lives in memory only and is not persisted across VS Code restarts.
 
@@ -252,6 +258,69 @@ unit/path name being reinterpreted as a flag, and it is not going to be removed 
 compatibility. If you want a narrow rule, write it to match what is actually run (including the
 `--` and the `.service` suffix); otherwise grant the binary without arguments, as in the examples
 above.
+
+### Terminal tab
+
+A real interactive shell in the browser, backed by [xterm.js](https://xtermjs.org/) over a
+dedicated `/ws/terminal` WebSocket. It rides the connection's own already-authenticated SSH
+session — no new `ssh` process is spawned, and unlike **Open SSH in Terminal** (which shells out to
+a real `ssh` process, optionally prefixed with `ssh_prefix`, e.g. `sshpass -p …`), no password ever
+appears on any command line for this feature.
+
+**The shell runs as the profile's ordinary SSH user — the same account used for file transfers —
+never the root-credential lane described above.** Whatever that account can do on the host, the
+Terminal tab can do, with no further prompt and no `sudo` wrapper of its own. Configuring
+`root_user`/`root_password` changes nothing about the Terminal: don't assume a Terminal session is
+root because the dashboard's privileged actions elsewhere run as root, and don't assume it's
+unprivileged if the SSH user itself happens to have passwordless sudo or is `root` — either way, the
+Terminal is exactly that account, no more and no less.
+
+Closing the tab (or the browser) ends the shell; there is no persistent session to reattach to.
+
+### Logs tab
+
+Discovers log files under `/var/log` (up to three directories deep) and journald units that have
+ever logged (`GET /api/logs`), shows a read-only snapshot of a selected source (its last 500
+lines), and can switch to a live **Follow** — `tail -F` for a file, `journalctl -f` for a unit —
+over a dedicated `/ws/logs` WebSocket.
+
+**Only paths a discovery scan actually returned for this session can be read or followed.** There
+is no free-form path field: `GET /api/logs` seeds a per-session allowlist, and both the snapshot
+read and Follow re-check the requested path against it — and against the same `/var/log`-rooted
+shape check the scan itself applies — before doing anything privileged with it.
+
+Rotated, compressed and login-accounting files that a scan of `/var/log` legitimately turns up —
+`*.gz`/`*.bz2`/`*.xz`/`*.zip`, `*.1`/`*.2`/…, `*.old`, `wtmp`, `btmp`, `lastlog`, `faillog` — are
+not hidden, but are demoted into a separate, collapsed-by-default group below the primary file
+list, each tagged with why. `tail`/`sed` render most of these as binary garbage or truncated text,
+so keeping them out of the primary list keeps that list usable at a glance without pretending the
+scan didn't find them.
+
+journald units have no one-shot snapshot route — the only way to see a unit's output is to start
+Follow.
+
+**Discovery, the snapshot read and Follow all need the same privileged-read arrangement as the
+Services and Web server tabs** — see [Sudo requirement for Services and Web
+server](#sudo-requirement-for-services-and-web-server) above; nothing about Logs relaxes it. One
+detail is specific to Follow, though: `tail -F`/`journalctl -f` run directly (`sudo -n tail …` /
+`sudo -n journalctl …`), not inside the `sudo -n sh -c` wrapper the vhost reads and Test config use
+— so a sudoers rule that grants only `/bin/systemctl` (enough for the Services tab's action
+buttons) does **not** enable Follow, and neither does one that grants only `/bin/sh`/`/bin/sed`.
+Follow needs its own rule naming the binaries it actually execs:
+
+```
+deploy ALL=(ALL) NOPASSWD: /bin/tail, /bin/journalctl
+```
+
+— or the root-credential lane, which covers all of it.
+
+**Up to 4 log follows may be open at once per Manage Server session.** Starting a fifth is refused
+outright rather than queued. Every open follow holds an SSH exec channel for as long as it runs, on
+the same pooled SSH connection shared with SFTP transfers, the metrics sampler and the Terminal
+tab. OpenSSH's default `MaxSessions` is 10 channels per connection, and running past it doesn't
+just refuse the extra follow — every other channel on that connection starts failing too, including
+file transfers, with `administratively prohibited`. The cap keeps four channels of headroom under
+that limit for everything else the dashboard and your file transfers need.
 
 ### Install the .vsix (both platforms)
 - **UI:** Extensions panel → `…` menu → **Install from VSIX…** → pick `vaibhav-sftp-plus-<version>.vsix` → reload.
