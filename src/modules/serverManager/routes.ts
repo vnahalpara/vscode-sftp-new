@@ -32,6 +32,16 @@ export interface RouteDeps {
   pingMs: number;
   schedule(fn: () => void, ms: number): any;
   cancel(handle: any): void;
+  // Optional: lets buildRoutes register a listener that fires when a
+  // session's token is disposed (session closed on shutdown, or evicted
+  // because its credentials changed under it -- see
+  // SessionRegistryHooks.onTokenDisposed in index.ts, which this is meant
+  // to be wired to). Subscribe-shaped (`deps.onTokenDisposed(listener)`),
+  // not a single direct callback, because more than one piece of
+  // per-token state below wants to hear about it. Optional because
+  // RouteDeps predates this hook; a caller that doesn't wire it keeps the
+  // pre-existing behaviour of never pruning allowedFiles.
+  onTokenDisposed?(listener: (token: string) => void): void;
 }
 
 // Everything the later milestones will turn on. The UI reads these to decide
@@ -194,6 +204,19 @@ export function buildRoutes(deps: RouteDeps): Route<Handler>[] {
     }
     paths.forEach(p => set!.add(p));
   }
+
+  // Not exploitable on its own -- tokens are crypto.randomBytes(32), so a
+  // disposed token's set can never be revived by a later session reusing
+  // it -- but without this, allowedFiles retains every path ever
+  // discovered for every session opened in this extension host's
+  // lifetime, unbounded. /api/logs makes that materially bigger than the
+  // handful of /etc paths a vhost listing seeded: it adds every regular
+  // file under /var/log to depth 3, per scan, per refresh. Pruning on
+  // disposal keeps the map's size bounded by "sessions currently open",
+  // not "sessions ever opened".
+  deps.onTokenDisposed?.(token => {
+    allowedFiles.delete(token);
+  });
 
   return [
     {

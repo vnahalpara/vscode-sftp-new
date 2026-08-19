@@ -3,6 +3,7 @@ import { matchRoute, Route } from '../router';
 import { Ctx, Handler } from '../httpServer';
 import { logDiscoveryCommand } from '../ops/command';
 import { LOG_DISCOVERY_TEXT, LOG_DISCOVERY_INJECTED_PATH_TEXT } from '../__fixtures__/ops';
+import * as opsLogs from '../ops/logs';
 
 // Distinctive on purpose: a three-letter needle like 'tok' could pass even
 // against a leaky implementation, which would make the assertion worthless.
@@ -783,6 +784,46 @@ describe('buildRoutes', () => {
       expect(forgedCtx.res.status).toBe(403);
     });
 
+    // The test above only ever exercises parseLogDiscovery's OWN
+    // isLogFilePath filtering (ops/logs.ts:64) -- nothing forged there
+    // survives long enough to reach routes.ts at all, so it cannot tell
+    // the routes-layer re-check (routes.ts, right where `safeFiles` is
+    // built) apart from no re-check existing. That routes-layer guard is
+    // deliberate defence-in-depth: if a later change to parseFilesSection
+    // ever stops filtering (e.g. to surface a "dropped N rows" count, or
+    // to let the UI grey out rejected entries instead of hiding them), the
+    // allowlist must not silently start trusting whatever the parser
+    // hands back -- exactly the /api/file regression this whole route
+    // exists to avoid repeating. Mocking parseLogDiscovery itself is the
+    // only way to reach that branch, since nothing forged survives the
+    // real parser by construction.
+    it('re-checks isLogFilePath in routes.ts itself, independent of what parseLogDiscovery already filtered', async () => {
+      const spy = jest.spyOn(opsLogs, 'parseLogDiscovery').mockReturnValue({
+        files: [{ path: '/etc/shadow', bytes: 1 }],
+        units: [],
+      });
+      try {
+        const { session } = fakeSession({
+          privilegedTransport: { exec: async () => ({ stdout: 'irrelevant -- parseLogDiscovery is mocked', stderr: '', code: 0 }) },
+        });
+        store.set('tok', session);
+        const { ctx, res } = fakeCtx('tok');
+
+        await find(routes, 'GET', '/api/logs')(ctx);
+
+        expect(res.status).toBe(200);
+        const body = JSON.parse(res.body);
+        expect(body.files).toEqual([]);
+        expect(body.files.map((f: any) => f.path)).not.toContain('/etc/shadow');
+
+        const forgedCtx = fakeCtx('tok', { path: '/etc/shadow' });
+        await find(routes, 'GET', '/api/file')(forgedCtx.ctx);
+        expect(forgedCtx.res.status).toBe(403);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     // The previous milestone's defect: /api/file's allowlist could be
     // seeded from a config file's own CONTENT, because configFilesCommand
     // `cat`s each file into the same stream its `@@` markers travel in.
@@ -860,6 +901,43 @@ describe('buildRoutes', () => {
       expect(body.units).toEqual(['nginx.service']);
       expect(body.units).not.toContain('evil; rm -rf /');
       expect(body.units).not.toContain('-Hattacker@evil');
+    });
+
+    // allowedFiles is otherwise retained for the lifetime of the extension
+    // host, per token, forever -- /api/logs makes that materially worse
+    // than it was pre-Task-4 (every regular file under /var/log to depth
+    // 3, per scan, per session, vs. a handful of /etc paths). RouteDeps
+    // exposes onTokenDisposed precisely so a disposed session's entry can
+    // be pruned; this pins that buildRoutes actually subscribes to it.
+    it("prunes a disposed token's allowlist entry via RouteDeps.onTokenDisposed", async () => {
+      const listeners: Array<(token: string) => void> = [];
+      const localStore = new Map<string, any>();
+      const localRoutes = buildRoutes({
+        sessions: { get: token => localStore.get(token) },
+        pingMs: 25000,
+        schedule: () => 1,
+        cancel: () => undefined,
+        onTokenDisposed: listener => listeners.push(listener),
+      });
+
+      const { session } = fakeSession({
+        privilegedTransport: { exec: async () => ({ stdout: LOG_DISCOVERY_TEXT, stderr: '', code: 0 }) },
+      });
+      localStore.set('tok', session);
+
+      const { ctx } = fakeCtx('tok');
+      await find(localRoutes, 'GET', '/api/logs')(ctx);
+
+      const beforeCtx = fakeCtx('tok', { path: '/var/log/syslog' });
+      await find(localRoutes, 'GET', '/api/file')(beforeCtx.ctx);
+      expect(beforeCtx.res.status).toBe(200);
+
+      expect(listeners.length).toBe(1);
+      listeners[0]('tok');
+
+      const afterCtx = fakeCtx('tok', { path: '/var/log/syslog' });
+      await find(localRoutes, 'GET', '/api/file')(afterCtx.ctx);
+      expect(afterCtx.res.status).toBe(403);
     });
   });
 
