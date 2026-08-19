@@ -68,7 +68,14 @@ function occupy(port: number): Promise<net.Server> {
  * the real binary would and listens on it, so waitForPort() sees a live socket
  * without this suite ever spawning a process.
  */
-function fakeWireproxy(state: { spawns: number }) {
+interface FakeState {
+  spawns: number;
+  // Every fake child this run produced, so a test can assert whether the one
+  // we started was the thing that got torn down.
+  children: any[];
+}
+
+function fakeWireproxy(state: FakeState) {
   return (_bin: string, args: string[]) => {
     state.spawns += 1;
     const conf = fs.readFileSync(args[args.length - 1], 'utf8');
@@ -84,10 +91,13 @@ function fakeWireproxy(state: { spawns: number }) {
     child.pid = FAKE_PID;
     child.stdout = null;
     child.stderr = null;
+    child.killed = false;
     child.kill = () => {
+      child.killed = true;
       server.close();
       child.emit('exit', 0);
     };
+    state.children.push(child);
     return child;
   };
 }
@@ -96,7 +106,7 @@ interface Harness {
   mod: VpnTunnel;
   vpn: any;
   derivedPort: number;
-  state: { spawns: number };
+  state: FakeState;
 }
 
 /**
@@ -119,7 +129,7 @@ async function harness(overrides: Deps): Promise<Harness> {
   // tslint:disable-next-line:no-var-requires
   const mod: VpnTunnel = require('../vpnTunnel');
   loaded = mod;
-  const state = { spawns: 0 };
+  const state: FakeState = { spawns: 0, children: [] };
   // keepAlive false so release() actually tears the tunnel down: this file is
   // about what acquire() does with what a *previous* run left behind, and the
   // release-time assertions below need the teardown to happen. The keepAlive
@@ -336,7 +346,19 @@ describe('ownership marker', () => {
     expect(fs.existsSync(h.mod.markerPathFor(h.vpn))).toBe(false);
   });
 
-  test('releasing an adopted tunnel kills the recorded pid and drops the marker', async () => {
+  test('releasing an adopted tunnel signals nothing and leaves its marker alone', async () => {
+    // The marker directory lives under globalStoragePath, which every VS Code
+    // window of the same install shares. So the tunnel adopted here is just as
+    // likely to belong to another window that is open and transferring right
+    // now as to a run that has ended -- nothing in the marker distinguishes
+    // them, and all five adoption conditions hold either way.
+    //
+    // This test used to assert the opposite (signal the recorded pid, drop the
+    // marker), which meant: window B adopts window A's tunnel, correctly; the
+    // user closes B; B SIGTERMs the tunnel A's transfer is running over. That
+    // is the exact harm the reap gating in openTunnel() exists to prevent,
+    // reached through a door with no gate. So an adopted tunnel is now
+    // released, never killed.
     const killed: number[] = [];
     const h = await harness({
       isPidAlive: () => true,
@@ -352,50 +374,60 @@ describe('ownership marker', () => {
     h.mod.release(h.vpn);
     await settle();
 
-    expect(killed).toEqual([FAKE_PID]);
+    expect(killed).toEqual([]);
+    // The marker has to survive too: it is the other window's only proof of
+    // ownership, and deleting it would strand its tunnel anonymously -- never
+    // adoptable, never reapable -- for the rest of the machine's uptime.
+    expect(fs.existsSync(h.mod.markerPathFor(h.vpn))).toBe(true);
+
+    // And this window can take it straight back out, still without spawning.
+    await expect(h.mod.acquire(h.vpn)).resolves.toBe(h.derivedPort);
+    expect(h.state.spawns).toBe(0);
+  });
+
+  test('disposeAll() does not signal an adopted tunnel', async () => {
+    // Closing one VS Code window. disposeAll() runs on deactivate() regardless
+    // of keepAlive, so this is the path the two-window case actually takes.
+    const killed: number[] = [];
+    const h = await harness({
+      isPidAlive: () => true,
+      speaksSocks5: async () => true,
+      killPid: pid => killed.push(pid),
+    });
+    await occupy(h.derivedPort);
+    plantMarker(h, ourMarker(h.derivedPort, FAKE_PID));
+
+    await h.mod.acquire(h.vpn); // no release: the window just goes away
+    h.mod.disposeAll();
+    await settle();
+
+    expect(killed).toEqual([]);
+    expect(fs.existsSync(h.mod.markerPathFor(h.vpn))).toBe(true);
+    // Forgotten locally, which is all this window is entitled to do.
+    expect(h.mod.portFor(h.vpn)).toBeUndefined();
+  });
+
+  test('a tunnel we spawned ourselves is still killed on release', async () => {
+    // The other half of the same rule: leaving an adopted tunnel alone must
+    // not turn into leaving *every* tunnel alone. With keepAlive off, the
+    // process this run started is still torn down by its last release().
+    const killed: number[] = [];
+    const h = await harness({ killPid: pid => killed.push(pid) });
+
+    const port = await h.mod.acquire(h.vpn);
+    expect(h.state.spawns).toBe(1);
+    const child = h.state.children[0];
+
+    h.mod.release(h.vpn);
+    await settle();
+
+    // Killed through the child handle, not through killPid (which only ever
+    // signals a pid we hold no handle on).
+    expect(child.killed).toBe(true);
+    expect(killed).toEqual([]);
+    expect(h.mod.portFor(h.vpn)).toBeUndefined();
     expect(fs.existsSync(h.mod.markerPathFor(h.vpn))).toBe(false);
-  });
-
-  test('releasing an adopted tunnel does not signal a pid the marker no longer names', async () => {
-    // We hold no child handle on an adopted tunnel, only a number someone
-    // wrote down. Re-reading the marker at release time is the last check
-    // before a SIGTERM: if it has changed, the pid we remember may since have
-    // been recycled onto a program that has nothing to do with us.
-    const killed: number[] = [];
-    const h = await harness({
-      isPidAlive: () => true,
-      speaksSocks5: async () => true,
-      killPid: pid => killed.push(pid),
-    });
-    await occupy(h.derivedPort);
-    plantMarker(h, ourMarker(h.derivedPort, FAKE_PID));
-
-    await h.mod.acquire(h.vpn);
-    plantMarker(h, ourMarker(h.derivedPort, FAKE_PID + 1));
-
-    h.mod.release(h.vpn);
-    await settle();
-
-    expect(killed).toEqual([]);
-  });
-
-  test('releasing an adopted tunnel does not signal once the marker is gone', async () => {
-    const killed: number[] = [];
-    const h = await harness({
-      isPidAlive: () => true,
-      speaksSocks5: async () => true,
-      killPid: pid => killed.push(pid),
-    });
-    await occupy(h.derivedPort);
-    plantMarker(h, ourMarker(h.derivedPort, FAKE_PID));
-
-    await h.mod.acquire(h.vpn);
-    fs.unlinkSync(h.mod.markerPathFor(h.vpn));
-
-    h.mod.release(h.vpn);
-    await settle();
-
-    expect(killed).toEqual([]);
+    expect(port).toBe(h.derivedPort);
   });
 });
 

@@ -832,31 +832,37 @@ async function openTunnel(vpn: VpnOption, key: string): Promise<Tunnel> {
   return startTunnel(vpn, key, port);
 }
 
+/**
+ * Stop a tunnel *this* run spawned, and clear what it left behind.
+ *
+ * An adopted tunnel is deliberately left alone -- not signalled, its merged
+ * config not deleted, its marker not removed. The marker directory lives under
+ * globalStoragePath, which every VS Code window of the same install shares, so
+ * an adopted tunnel is as likely to belong to another window that is open and
+ * transferring right now as to a run that has ended. Adoption cannot tell those
+ * apart: nothing in the marker records whether the extension host that spawned
+ * the process is still alive, and all five adoption conditions hold either way.
+ *
+ * So the two windows case used to run: window B adopts window A's tunnel,
+ * correctly; the user closes B; disposeAll() reaches this function with no
+ * child handle, re-reads the marker, finds A's pid alive -- and SIGTERMs the
+ * tunnel A's in-flight transfer is running over. With keepAlive off, an
+ * ordinary release() did the same. That is precisely the harm the reap gating
+ * in openTunnel() exists to prevent, arriving through a door that has no gate.
+ *
+ * Leaving it running costs nothing new: it is the same outcome keepAlive: true
+ * produces for a tunnel we spawned, its marker survives so the next acquire()
+ * adopts it back, and a genuinely dead run's tunnel that has since wedged is
+ * still reaped by the guarded path in openTunnel().
+ */
 function killTunnel(tunnel: Tunnel) {
-  if (tunnel.process) {
-    try {
-      tunnel.process.kill();
-    } catch (_e) {
-      /* ignore */
-    }
-  } else {
-    // An adopted tunnel: no child handle, only a recorded pid. Re-read the
-    // marker and require it to still name this exact pid and port before
-    // signalling, so a pid recycled since we adopted is not our problem to
-    // kill. That is pidfile-grade certainty -- the recycle could in principle
-    // happen inside this window too -- but it is the strongest check
-    // available without a handle, and the alternative (never killing) leaks
-    // the process for the rest of the machine's uptime.
-    const marker = readMarker(tunnel.key);
-    const stillOurs =
-      marker !== undefined && marker.pid === tunnel.pid && marker.port === tunnel.port;
-    if (stillOurs && deps.isPidAlive(tunnel.pid)) {
-      try {
-        deps.killPid(tunnel.pid);
-      } catch (_e) {
-        /* already gone */
-      }
-    }
+  if (!tunnel.process) {
+    return;
+  }
+  try {
+    tunnel.process.kill();
+  } catch (_e) {
+    /* ignore */
   }
   try {
     fs.unlinkSync(tunnel.mergedConfPath);
@@ -966,7 +972,11 @@ export function release(vpn: VpnOption): void {
       }
       tunnels.delete(key);
       killTunnel(tunnel);
-      logger.info(`VPN tunnel closed for ${vpn.configFile}`);
+      logger.info(
+        tunnel.process
+          ? `VPN tunnel closed for ${vpn.configFile}`
+          : `VPN tunnel released for ${vpn.configFile}; it was adopted, so it is left running`
+      );
     })
     .catch(() => {
       // start failed; acquire() already cleaned up the map entry.
@@ -974,7 +984,9 @@ export function release(vpn: VpnOption): void {
 }
 
 /**
- * Kill every tracked tunnel (extension deactivation).
+ * Kill every tunnel this run spawned (extension deactivation). Adopted ones
+ * are dropped from the map but left running -- see killTunnel(): closing this
+ * window says nothing about the other window that may still be using them.
  *
  * With "sftp.vpn.keepAlive" on -- the default -- this is the only teardown in
  * the normal path, so it kills synchronously. deactivate() returns to a host

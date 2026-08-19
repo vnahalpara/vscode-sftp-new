@@ -607,7 +607,10 @@ keeps working instead of going stale.
   last SFTP/terminal session using it disconnects, so the next connection reuses it instead
   of paying wireproxy's startup and health-check cost again. Set to `false` to kill the
   tunnel as soon as its last user releases it, as before. Either way, closing VS Code (or
-  disabling the extension) always tears down every tunnel it started.
+  disabling the extension) tears down every tunnel that window itself started — as long as
+  the extension gets to shut down cleanly. A force-quit or a crashed extension host skips
+  that teardown entirely, and the tunnel is left holding its port until the next connection
+  adopts or replaces it.
 
 An explicit `vpn.socksPort` in a profile still always wins over the derived port — it is
 never silently moved.
@@ -643,6 +646,16 @@ out a slow machine rather than a dead one) and, only if it still never answers, 
 `SIGTERM` before starting its replacement. This never happens to a process the extension did
 not itself record in a marker it trusts; a listener that fails any of the five adoption
 checks above is left alone, not signalled.
+
+**An adopted tunnel is never torn down by the window that adopted it.** The marker directory
+is shared by every VS Code window of the same install, so a tunnel that passes all five
+checks may equally well belong to another window that is open and transferring right now —
+nothing recorded in the marker can tell "a previous run" from "the window next to this one".
+So closing a window (or, with `keepAlive: false`, simply disconnecting) tears down only the
+tunnels *that* window started; one it adopted is dropped from its own bookkeeping and left
+running, exactly as `keepAlive: true` would leave it. Its marker stays on disk, so the next
+connection adopts it again — and if it has genuinely wedged in the meantime, the reap above
+still cleans it up.
 
 #### Upgrading from before 1.26.0
 
