@@ -132,6 +132,16 @@ function plantMarker(h: Harness, marker: any): void {
   fs.writeFileSync(markerPath, typeof marker === 'string' ? marker : JSON.stringify(marker));
 }
 
+/**
+ * A marker exactly as a running tunnel of ours would have left it: every field
+ * present and current-boot. Tests that are about one gate override the single
+ * field that gate reads, so the marker fails for the reason under test and not
+ * incidentally for some other one.
+ */
+function ourMarker(port: number, pid: number, overrides: any = {}): any {
+  return { port, pid, startedAt: Date.now(), ...overrides };
+}
+
 // release() and disposeAll() both finish on a promise chain; let it drain
 // before asserting.
 function settle(): Promise<void> {
@@ -219,6 +229,38 @@ describe('keepAlive', () => {
     expect(second).toBe(h.derivedPort);
   });
 
+  test('an adopted tunnel whose pid has died is not handed out again', async () => {
+    // The case the liveness check in the `existing` branch exists for. A
+    // tunnel we spawned has a child handle, so its 'exit' clears the map entry
+    // on its own; an *adopted* one has no handle and therefore no exit event,
+    // so nothing ever clears its entry and the check on the way out of the map
+    // is the only thing that notices the process is gone. Without it, every
+    // later acquire() would hand back a port with nothing behind it -- or
+    // whatever bound it since.
+    let pidAlive = true;
+    const h = await harness(
+      {
+        isPidAlive: () => pidAlive,
+        speaksSocks5: async () => true,
+        killPid: () => undefined,
+      },
+      { keepAlive: true }
+    );
+    await occupy(h.derivedPort);
+    plantMarker(h, ourMarker(h.derivedPort, OLD_PID));
+
+    expect(await h.mod.acquire(h.vpn)).toBe(h.derivedPort);
+    expect(h.state.spawns).toBe(0); // adopted, so no child handle exists
+
+    // The adopted wireproxy dies. No 'exit' can fire for it: it is not our
+    // child. The map entry survives untouched.
+    pidAlive = false;
+
+    const second = await h.mod.acquire(h.vpn);
+    expect(h.state.spawns).toBe(1);
+    expect(second).not.toBe(h.derivedPort);
+  });
+
   test('disposeAll() kills the tunnel even when keepAlive is true', async () => {
     const h = await harness({}, { keepAlive: true });
 
@@ -286,7 +328,7 @@ describe('reaping a hung tunnel', () => {
       },
     });
     stale = await occupy(h.derivedPort);
-    plantMarker(h, { port: h.derivedPort, pid: OLD_PID, startedAt: Date.now() });
+    plantMarker(h, ourMarker(h.derivedPort, OLD_PID));
 
     const port = await h.mod.acquire(h.vpn);
 
@@ -315,7 +357,7 @@ describe('reaping a hung tunnel', () => {
       killPid: pid => killed.push(pid),
     });
     await occupy(h.derivedPort);
-    plantMarker(h, { port: h.derivedPort, pid: OLD_PID, startedAt: Date.now() });
+    plantMarker(h, ourMarker(h.derivedPort, OLD_PID));
 
     const port = await h.mod.acquire(h.vpn);
 
@@ -323,6 +365,62 @@ describe('reaping a hung tunnel', () => {
     expect(port).toBe(h.derivedPort);
     expect(h.state.spawns).toBe(0); // adopted, not replaced
     expect(probes).toBeGreaterThan(1);
+  });
+
+  test('a tunnel that answers only on the last re-probe is still adopted, not killed', async () => {
+    // The test above is satisfied by a single retry; this one pins how many
+    // retries the reap path actually owes a quiet tunnel. REAP_PROBE_ATTEMPTS
+    // is 3, so the full sequence is the adopt-path probe plus three re-probes
+    // -- four in all -- and this fake answers only on the fourth, the very
+    // last chance it is given. Lower the count and this healthy-but-slow
+    // wireproxy gets a SIGTERM instead of being adopted.
+    const killed: number[] = [];
+    let probes = 0;
+    const h = await harness({
+      isPidAlive: () => true,
+      speaksSocks5: async () => {
+        probes += 1;
+        return probes >= 4;
+      },
+      killPid: pid => killed.push(pid),
+    });
+    await occupy(h.derivedPort);
+    plantMarker(h, ourMarker(h.derivedPort, OLD_PID));
+
+    const port = await h.mod.acquire(h.vpn);
+
+    expect(killed).toEqual([]);
+    expect(port).toBe(h.derivedPort);
+    expect(h.state.spawns).toBe(0);
+    expect(probes).toBe(4);
+  });
+
+  test('the re-probes ask with the longer reap timeout, not the adopt-path default', async () => {
+    // The other half of "ask again, patiently": asking three more times with
+    // the same 300ms budget is just three more chances to fail the same way,
+    // so a machine slow enough to miss the first round trip would still lose
+    // its tunnel. The first probe is the adopt-path one and passes no timeout
+    // at all (probeSocks5 applies its own 300ms default); every re-probe must
+    // pass REAP_PROBE_TIMEOUT_MS, which is 2000. The literal is deliberate --
+    // comparing against the module's own constant would agree with any value
+    // the constant were changed to, which is not a pin.
+    const timeouts: Array<number | undefined> = [];
+    const h = await harness({
+      isPidAlive: () => true,
+      speaksSocks5: async (_port, timeoutMs) => {
+        timeouts.push(timeoutMs);
+        return false;
+      },
+      // Never frees the port, so acquire() steps aside to a free one; this
+      // test is only about how the port was interrogated on the way there.
+      killPid: () => undefined,
+    });
+    await occupy(h.derivedPort);
+    plantMarker(h, ourMarker(h.derivedPort, OLD_PID));
+
+    await h.mod.acquire(h.vpn);
+
+    expect(timeouts).toEqual([undefined, 2000, 2000, 2000]);
   });
 
   test('a marker written before this boot is never reaped', async () => {
@@ -339,7 +437,7 @@ describe('reaping a hung tunnel', () => {
     });
     await occupy(h.derivedPort);
     // 1970: earlier than any machine's boot, however long its uptime.
-    plantMarker(h, { port: h.derivedPort, pid: OLD_PID, startedAt: 1 });
+    plantMarker(h, ourMarker(h.derivedPort, OLD_PID, { startedAt: 1 }));
 
     const port = await h.mod.acquire(h.vpn);
 
@@ -354,7 +452,44 @@ describe('reaping a hung tunnel', () => {
     // user's SSH session.
     const h = await harness({ isPidAlive: () => true, speaksSocks5: async () => true });
     await occupy(h.derivedPort);
-    plantMarker(h, { port: h.derivedPort, pid: OLD_PID, startedAt: 1 });
+    plantMarker(h, ourMarker(h.derivedPort, OLD_PID, { startedAt: 1 }));
+
+    const port = await h.mod.acquire(h.vpn);
+
+    expect(port).not.toBe(h.derivedPort);
+    expect(h.state.spawns).toBe(1);
+  });
+
+  test('a marker with no startedAt at all is never reaped', async () => {
+    // Every build predating this milestone wrote {port, pid} and nothing
+    // else, and those markers are still on disk. A marker that cannot say
+    // which boot it belongs to has to fail the boot gate, so the fallback for
+    // a missing timestamp must be the disqualifying value rather than "now":
+    // read as current, such a marker would authorise a SIGTERM to whatever
+    // program inherited its pid across the reboot.
+    const killed: number[] = [];
+    const h = await harness({
+      isPidAlive: () => true,
+      speaksSocks5: async () => false,
+      killPid: pid => killed.push(pid),
+    });
+    await occupy(h.derivedPort);
+    plantMarker(h, ourMarker(h.derivedPort, OLD_PID, { startedAt: undefined }));
+
+    const port = await h.mod.acquire(h.vpn);
+
+    expect(killed).toEqual([]);
+    expect(port).not.toBe(h.derivedPort);
+    expect(h.state.spawns).toBe(1);
+  });
+
+  test('a marker with no startedAt at all is not adopted either', async () => {
+    // Same marker, the other direction: it cannot prove which boot it belongs
+    // to, so it cannot prove the listener answering SOCKS5 is ours, and
+    // adopting hands the user's SSH session to whoever that is.
+    const h = await harness({ isPidAlive: () => true, speaksSocks5: async () => true });
+    await occupy(h.derivedPort);
+    plantMarker(h, ourMarker(h.derivedPort, OLD_PID, { startedAt: undefined }));
 
     const port = await h.mod.acquire(h.vpn);
 
@@ -380,7 +515,7 @@ describe('reaping a hung tunnel', () => {
     const pinned = await freePort();
     h.vpn.socksPort = pinned;
     await occupy(pinned);
-    plantMarker(h, { port: pinned, pid: OLD_PID, startedAt: Date.now() });
+    plantMarker(h, ourMarker(pinned, OLD_PID));
 
     await expect(h.mod.acquire(h.vpn)).rejects.toThrow(/still held/);
 
@@ -399,7 +534,7 @@ describe('reaping a hung tunnel', () => {
       killPid: pid => killed.push(pid),
     });
     await occupy(h.derivedPort);
-    plantMarker(h, { port: h.derivedPort, pid: OLD_PID, startedAt: Date.now() });
+    plantMarker(h, ourMarker(h.derivedPort, OLD_PID));
 
     const port = await h.mod.acquire(h.vpn);
 
