@@ -18,7 +18,11 @@ const configScheme = {
   port: Joi.number().integer(),
   connectTimeout: Joi.number().integer(),
   username: Joi.string().required(),
-  password: nullable(Joi.string()),
+  // An empty string is a legitimate value, not a missing one: schema/definitions.json
+  // documents `"password": { "default": "" }`, so VS Code's completion inside sftp.json
+  // offers exactly the value Joi would otherwise reject -- and a rejection here fails the
+  // WHOLE profile, taking plain SFTP and the DB features down with it.
+  password: nullable(Joi.string().allow('')),
 
   agent: nullable(Joi.string()),
   privateKeyPath: nullable(Joi.string()),
@@ -52,7 +56,9 @@ const configScheme = {
       host: Joi.string(),
       port: Joi.number().integer(),
       username: Joi.string().required(),
-      password: Joi.string().required(),
+      // .allow('') so a local/dev database with no password validates. The `local`
+      // variant below already does this; the two were inconsistent.
+      password: Joi.string().required().allow(''),
       name: Joi.string().required(),
       label: Joi.string(),
     })

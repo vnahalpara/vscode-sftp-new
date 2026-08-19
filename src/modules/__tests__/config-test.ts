@@ -47,3 +47,31 @@ describe('validateConfig: vpn.socksPort', () => {
     expect(validateConfig(profile())).toBeNull();
   });
 });
+
+// The same class of defect the socksPort tests above pin, found by sweeping the
+// rest of the schema for values we document and then reject. Both of these
+// predate the VPN work; a rejection fails the WHOLE profile, so plain SFTP and
+// the database features die for a user who did nothing wrong.
+describe('validateConfig: documented empty passwords', () => {
+  test('accepts an empty connection password, which the schema gives as its default', () => {
+    expect(
+      validateConfig({ host: 'h', username: 'u', password: '', protocol: 'sftp', remotePath: '/srv' } as any)
+    ).toBeNull();
+  });
+
+  test('still accepts an absent connection password', () => {
+    expect(validateConfig({ host: 'h', username: 'u', protocol: 'sftp', remotePath: '/srv' } as any)).toBeNull();
+  });
+
+  test('accepts an empty database password, for a local database with none set', () => {
+    expect(
+      validateConfig({
+        host: 'h',
+        username: 'u',
+        protocol: 'sftp',
+        remotePath: '/srv',
+        database: [{ host: 'db', username: 'root', password: '', name: 'app' }],
+      } as any)
+    ).toBeNull();
+  });
+});
