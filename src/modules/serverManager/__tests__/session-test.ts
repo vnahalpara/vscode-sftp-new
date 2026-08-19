@@ -450,3 +450,54 @@ describe('ManagedSession', () => {
     expect(h.session.isRunning()).toBe(true);
   });
 });
+
+// The cloudflareConfig parameter carries a default of {}, so a caller that
+// forgets to pass it produces a session where the feature is silently OFF --
+// no type error, no test failure, just a purge button whose routes 404. That
+// is the same shape as two bugs that shipped in this module already: an
+// allowlist prune wired but never invoked, and allowLogPaths with no callers.
+// Both read as done and did nothing. These pin the field's real behaviour.
+describe('ManagedSession cloudflareConfig', () => {
+  // A minimal SessionDeps: none of these tests start a collector, so the
+  // transports and callbacks only have to satisfy the type.
+  const deps: SessionDeps = {
+    transport: { openSampler: async () => ({} as any), exec: async () => ({ stdout: '', stderr: '', code: 0 }) },
+    privilegedTransport: {
+      openSampler: async () => ({} as any),
+      exec: async () => ({ stdout: '', stderr: '', code: 0 }),
+    },
+    readFacts: async () => FACTS,
+    makeCollector: () => new FakeCollector(),
+    schedule: () => 0,
+    cancel: () => undefined,
+    now: () => 1234,
+  };
+
+  test('carries the two Cloudflare fields it was constructed with', () => {
+    const session = new ManagedSession(PROFILE, 'tok', deps, { graceMs: 1, interval: 1 }, {
+      CLOUDFLARE_ZONE_ID: 'zone123',
+      CLOUDFLARE_API_TOKEN: 'cf-token-value',
+    });
+    expect(session.cloudflareConfig.CLOUDFLARE_ZONE_ID).toBe('zone123');
+    expect(session.cloudflareConfig.CLOUDFLARE_API_TOKEN).toBe('cf-token-value');
+  });
+
+  test('defaults to an empty object when omitted, rather than undefined', () => {
+    const session = new ManagedSession(PROFILE, 'tok', deps, { graceMs: 1, interval: 1 });
+    expect(session.cloudflareConfig).toEqual({});
+  });
+
+  // The whole point of the narrow field: the raw config also carries the SSH
+  // password and, on a hop profile, the target's root_password. Neither may
+  // ride along, and state() is what /api/session and /api/host serialise.
+  test('never appears in state(), which is serialised to the browser', () => {
+    const session = new ManagedSession(PROFILE, 'tok', deps, { graceMs: 1, interval: 1 }, {
+      CLOUDFLARE_ZONE_ID: 'zone123',
+      CLOUDFLARE_API_TOKEN: 'cf-token-value',
+    });
+    const json = JSON.stringify(session.state());
+    expect(json).not.toContain('cf-token-value');
+    expect(json).not.toContain('CLOUDFLARE_API_TOKEN');
+    expect(json).not.toContain('cloudflareConfig');
+  });
+});
