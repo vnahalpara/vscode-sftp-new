@@ -1,4 +1,11 @@
-import { bridgeLogFollow, LogFollowDeps, LogStream, LogTarget } from '../logFollow';
+import {
+  bridgeLogFollow,
+  createFollowLimit,
+  LogFollowDeps,
+  LogStream,
+  LogTarget,
+  MAX_CONCURRENT_FOLLOWS,
+} from '../logFollow';
 import { WsLike } from '../wsBridge';
 
 // Same minimal EventEmitter-shaped fake terminal-test.ts uses -- no
@@ -88,11 +95,15 @@ function deps(opts: {
   stream?: Promise<LogStream>;
   isPathAllowed?: (path: string) => boolean;
   execStream?: jest.Mock;
+  acquire?: () => (() => void) | null;
 } = {}): { deps: LogFollowDeps; execStream: jest.Mock } {
   const execStream = opts.execStream || jest.fn(async (_cmd: string) => (await (opts.stream || Promise.resolve(new FakeStream()))) as LogStream);
   return {
     deps: {
       isPathAllowed: opts.isPathAllowed || (() => true),
+      // Uncapped by default: the cap has its own describe block below, and
+      // every other test here is about a single follow.
+      acquire: opts.acquire || (() => () => undefined),
       execStream,
     },
     execStream,
@@ -485,5 +496,129 @@ describe('backpressure', () => {
     socket.drain();
 
     expect(stream.resumes).toBe(0);
+  });
+});
+
+// Teardown was already correct on every path, but nothing bounded
+// SIMULTANEOUS follows. Each open socket holds one exec channel on the
+// pooled SSH connection this dashboard shares with SFTP and the sampler, so
+// ten concurrent follows exhaust OpenSSH's default MaxSessions and every
+// later file transfer on the profile fails with "administratively
+// prohibited" -- a failure that shows up nowhere near the Logs tab.
+describe('concurrency cap', () => {
+  test('allows follows up to the cap and refuses the next one', () => {
+    const limit = createFollowLimit(2);
+
+    expect(limit.acquire('tok')).not.toBeNull();
+    expect(limit.acquire('tok')).not.toBeNull();
+    expect(limit.acquire('tok')).toBeNull();
+    expect(limit.active('tok')).toBe(2);
+  });
+
+  test('releasing a slot lets the next follow through', () => {
+    const limit = createFollowLimit(1);
+    const release = limit.acquire('tok');
+
+    expect(limit.acquire('tok')).toBeNull();
+    release!();
+    expect(limit.active('tok')).toBe(0);
+    expect(limit.acquire('tok')).not.toBeNull();
+  });
+
+  test('a double release does not hand back a slot twice', () => {
+    const limit = createFollowLimit(1);
+    const first = limit.acquire('tok');
+    const second = limit.acquire('tok'); // refused, at cap
+
+    first!();
+    first!();
+
+    expect(second).toBeNull();
+    expect(limit.active('tok')).toBe(0);
+    expect(limit.acquire('tok')).not.toBeNull();
+    expect(limit.acquire('tok')).toBeNull();
+  });
+
+  test('is per session: one session at its cap does not block another', () => {
+    const limit = createFollowLimit(1);
+    limit.acquire('tok-a');
+
+    expect(limit.acquire('tok-a')).toBeNull();
+    expect(limit.acquire('tok-b')).not.toBeNull();
+  });
+
+  test('the default cap leaves headroom under sshd MaxSessions 10', () => {
+    expect(MAX_CONCURRENT_FOLLOWS).toBeLessThan(10);
+  });
+
+  test('refuses an over-cap open with a reason instead of opening a channel', async () => {
+    const limit = createFollowLimit(1);
+    const first = new FakeSocket();
+    const { deps: d1 } = deps({ stream: Promise.resolve(new FakeStream()), acquire: () => limit.acquire('tok') });
+    bridgeLogFollow(d1, first, fileTarget());
+    await flush();
+    expect(first.closed).toBe(false);
+
+    const second = new FakeSocket();
+    const { deps: d2, execStream } = deps({ acquire: () => limit.acquire('tok') });
+    bridgeLogFollow(d2, second, fileTarget());
+    await flush();
+
+    expect(execStream).not.toHaveBeenCalled();
+    expect(second.closed).toBe(true);
+    expect(second.closeCode).toBe(1011);
+    expect(second.closeReason).toContain('Too many log follows');
+  });
+
+  test('a closed follow gives its slot back, so the next open succeeds', async () => {
+    const limit = createFollowLimit(1);
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    const { deps: d } = deps({ stream: Promise.resolve(stream), acquire: () => limit.acquire('tok') });
+    bridgeLogFollow(d, socket, fileTarget());
+    await flush();
+    expect(limit.active('tok')).toBe(1);
+
+    socket.emit('close');
+    expect(limit.active('tok')).toBe(0);
+
+    const next = new FakeSocket();
+    const { deps: d2, execStream } = deps({
+      stream: Promise.resolve(new FakeStream()),
+      acquire: () => limit.acquire('tok'),
+    });
+    bridgeLogFollow(d2, next, fileTarget());
+    await flush();
+
+    expect(execStream).toHaveBeenCalledTimes(1);
+    expect(next.closed).toBe(false);
+  });
+
+  test('a refused request never spends a slot', async () => {
+    const limit = createFollowLimit(1);
+    const socket = new FakeSocket();
+    const { deps: d } = deps({ isPathAllowed: () => false, acquire: () => limit.acquire('tok') });
+
+    bridgeLogFollow(d, socket, fileTarget());
+    await flush();
+
+    expect(socket.closeCode).toBe(1011);
+    expect(limit.active('tok')).toBe(0);
+  });
+
+  test('a channel that fails to open gives its slot back', async () => {
+    const limit = createFollowLimit(1);
+    const socket = new FakeSocket();
+    const { deps: d } = deps({
+      stream: Promise.reject(new Error('permission denied')) as any,
+      acquire: () => limit.acquire('tok'),
+    });
+
+    bridgeLogFollow(d, socket, fileTarget());
+    await flush();
+    await flush();
+
+    expect(socket.closeCode).toBe(1011);
+    expect(limit.active('tok')).toBe(0);
   });
 });

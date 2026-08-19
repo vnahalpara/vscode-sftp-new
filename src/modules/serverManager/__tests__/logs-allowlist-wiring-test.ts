@@ -135,6 +135,9 @@ async function follow(
   bridgeLogFollow(
     {
       isPathAllowed: p => built.isLogPathAllowed(token, p),
+      // Uncapped: this file is about the allowlist seam. The concurrency
+      // cap has its own tests in log-follow-test.ts.
+      acquire: () => () => undefined,
       execStream,
     },
     socket,

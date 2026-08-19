@@ -61,6 +61,13 @@ export interface LogFollowDeps {
   // True when `path` is in the CALLING SESSION's own allowlist. Must be a
   // closure over one specific token/session -- see the module comment above.
   isPathAllowed(path: string): boolean;
+  // Reserves one of this session's concurrent-follow slots, returning the
+  // function that gives it back -- or null when the session is already at
+  // its cap, in which case this bridge refuses the open rather than queueing
+  // it. Required, not optional: an unwired cap is no cap, and the failure it
+  // prevents (see createFollowLimit) is silent until every SFTP transfer on
+  // the profile starts failing.
+  acquire(): (() => void) | null;
   // Opens `cmd` (already built by followCommand/journalFollowCommand, and
   // therefore already carrying its own `sudo -n`) as a raw, long-running
   // exec channel over the PRIVILEGED lane. Callers wire this to
@@ -68,6 +75,78 @@ export interface LogFollowDeps {
   // transport, and never a shell/PTY (there is no interactivity here, only a
   // single foreground process to read from).
   execStream(cmd: string): Promise<LogStream>;
+}
+
+// How many /ws/logs follows one session may hold open at once.
+//
+// Every follow holds an ssh2 exec channel for as long as the socket lives,
+// and those channels ride the SAME pooled SSH connection as SFTP, the
+// monitor sampler, the Terminal tab and every privileged one-shot command:
+// with no root_user/root_password on the profile, privilegedConfig() returns
+// a value-identical copy of the config, which hashes to the same pool key
+// (index.ts's privilegedConnectionIsSeparate answers exactly this). OpenSSH's
+// default MaxSessions is 10 channels per connection, and the failure past
+// that is not confined to this tab -- it is every subsequent file transfer,
+// `systemctl status` and metrics sample on the profile failing with
+// "administratively prohibited".
+//
+// Teardown is correct on every path, but nothing bounded SIMULTANEOUS
+// follows: a Logs tab following several files at once, or a client
+// reconnect loop outrunning the close-frame round trips, reaches ten open
+// channels without anything having leaked. `tail -F` makes that far more
+// reachable than the single Terminal tab ever was.
+//
+// Four leaves six channels of headroom for everything else on the
+// connection (SFTP, the sampler's long-lived channel, a terminal, and the
+// one-shot privileged commands the other tabs issue) -- deliberately well
+// under 10 rather than close to it, because this bridge is the only
+// consumer here that can multiply.
+export const MAX_CONCURRENT_FOLLOWS = 4;
+
+export interface FollowLimit {
+  // A release function, or null when `token` is already at the cap.
+  acquire(token: string): (() => void) | null;
+  // Slots currently held by `token`. For tests and diagnostics only.
+  active(token: string): number;
+}
+
+// Per-token concurrency accounting for /ws/logs. Deliberately a free
+// function over a private map rather than state on ManagedSession: the
+// counter must fall back to zero on its own as sockets close (which is what
+// makes it self-pruning -- a token at zero is deleted, so this map is
+// bounded by "sessions currently following", not "tokens ever seen"), and
+// nothing outside this bridge has any business adjusting it.
+export function createFollowLimit(max: number = MAX_CONCURRENT_FOLLOWS): FollowLimit {
+  const counts = new Map<string, number>();
+
+  return {
+    acquire(token: string): (() => void) | null {
+      const held = counts.get(token) || 0;
+      if (held >= max) {
+        return null;
+      }
+      counts.set(token, held + 1);
+      // Idempotent: teardown is one-shot today, but a double release would
+      // otherwise hand this session a free slot it is not entitled to,
+      // which is precisely how a cap stops being one.
+      let released = false;
+      return () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        const remaining = (counts.get(token) || 1) - 1;
+        if (remaining <= 0) {
+          counts.delete(token);
+        } else {
+          counts.set(token, remaining);
+        }
+      };
+    },
+    active(token: string): number {
+      return counts.get(token) || 0;
+    },
+  };
 }
 
 // Builds the command for `target`, having already proved it authorized to
@@ -106,6 +185,7 @@ function buildCommand(deps: LogFollowDeps, target: LogTarget, refuse: (reason: s
 
 export function bridgeLogFollow(deps: LogFollowDeps, socket: WsLike, target: LogTarget): void {
   let stream: LogStream | null = null;
+  let releaseSlot: (() => void) | null = null;
   let torndown = false;
 
   // Both directions end here, guarded by `torndown` so it does not matter
@@ -120,6 +200,18 @@ export function bridgeLogFollow(deps: LogFollowDeps, socket: WsLike, target: Log
     torndown = true;
     if (stream) {
       releaseStream(stream);
+    }
+    // Give the concurrency slot back on EVERY teardown path, and before the
+    // socket close below can throw: a slot that outlives its channel would
+    // ratchet the session's cap down to zero over a few reconnects, which
+    // looks exactly like the exhaustion this cap exists to prevent.
+    if (releaseSlot) {
+      try {
+        releaseSlot();
+      } catch (error) {
+        // Nothing to do; the accounting is best-effort by design.
+      }
+      releaseSlot = null;
     }
     try {
       socket.close(code || CLOSE_NORMAL, reason === undefined ? undefined : truncateReason(reason));
@@ -150,6 +242,21 @@ export function bridgeLogFollow(deps: LogFollowDeps, socket: WsLike, target: Log
   // close-code handling identical for both bridges.
   const command = buildCommand(deps, target, reason => teardown(CLOSE_INTERNAL_ERROR, reason));
   if (command === null) {
+    return;
+  }
+
+  // Claimed AFTER validation (a refused request must not spend a slot) and
+  // BEFORE the channel is opened (the whole point is not to open the
+  // eleventh channel on a connection that allows ten). Refused outright
+  // rather than queued: a queued follow is a socket sitting silently open
+  // with nothing arriving on it, which is indistinguishable to the user
+  // from a broken tab, and the queue itself is one more unbounded thing.
+  releaseSlot = deps.acquire();
+  if (!releaseSlot) {
+    // The number itself is deliberately not in the message: the cap lives in
+    // the FollowLimit the caller supplied (see createFollowLimit), and a
+    // hard-coded figure here would be wrong for any other cap.
+    teardown(CLOSE_INTERNAL_ERROR, 'Too many log follows are already open for this session. Close one and retry.');
     return;
   }
 

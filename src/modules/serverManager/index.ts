@@ -19,7 +19,7 @@ import { bootstrapHtml } from './bootstrap';
 import { buildRoutes } from './routes';
 import { browserCommand, BrowserKind } from './browser';
 import { bridgeTerminal } from './terminal';
-import { bridgeLogFollow, LogTarget } from './logFollow';
+import { bridgeLogFollow, createFollowLimit, LogTarget } from './logFollow';
 
 const GRACE_MS = 30000;
 const PING_MS = 25000;
@@ -337,6 +337,13 @@ function logTargetFromRequest(req: http.IncomingMessage): LogTarget | null {
 // than read off some module-level variable so there is no way to wire this
 // callback up without also deciding where its authorization answer comes
 // from.
+// Concurrency accounting for /ws/logs, per session token. Module-level and
+// deliberately NOT rebuilt per server: it counts channels on pooled SSH
+// connections, which outlive any one http.Server this module binds. It
+// self-prunes -- a token back at zero follows is deleted -- so nothing has
+// to remember to clear it on disposal.
+const followLimit = createFollowLimit();
+
 function onLogs(
   ws: WebSocket,
   req: http.IncomingMessage,
@@ -359,6 +366,7 @@ function onLogs(
   bridgeLogFollow(
     {
       isPathAllowed: path => isLogPathAllowed(token, path),
+      acquire: () => followLimit.acquire(token),
       execStream: cmd => session!.privilegedTransport.execStream!(cmd),
     },
     ws,
