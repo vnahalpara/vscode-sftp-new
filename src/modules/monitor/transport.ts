@@ -91,6 +91,13 @@ export function sshTransport(fileService: any, config: any): MonitorTransport {
       const ssh = await getSshClient(fileService, config);
       return ssh.shell(opts);
     },
+    // Rides the same pooled SSH connection as everything else on this
+    // transport -- see logFollow.ts for why the raw ssh2 stream (not
+    // channelFromStream's SamplerChannel wrapper) is what that bridge needs.
+    async execStream(cmd: string) {
+      const ssh = await getSshClient(fileService, config);
+      return ssh.execStream(cmd);
+    },
   };
 }
 

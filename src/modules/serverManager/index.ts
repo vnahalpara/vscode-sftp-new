@@ -1,6 +1,7 @@
 import * as http from 'http';
 import * as crypto from 'crypto';
 import * as path from 'path';
+import * as url from 'url';
 import { spawn } from 'child_process';
 import * as vscode from 'vscode';
 import { WebSocket } from 'ws';
@@ -18,6 +19,7 @@ import { bootstrapHtml } from './bootstrap';
 import { buildRoutes } from './routes';
 import { browserCommand, BrowserKind } from './browser';
 import { bridgeTerminal } from './terminal';
+import { bridgeLogFollow, LogTarget } from './logFollow';
 
 const GRACE_MS = 30000;
 const PING_MS = 25000;
@@ -279,6 +281,60 @@ function onTerminal(ws: WebSocket, req: http.IncomingMessage, token: string): vo
   bridgeTerminal({ openShell: opts => session!.transport.shell!(opts) }, ws);
 }
 
+// Reads `path=`/`unit=` off the /ws/logs upgrade URL -- a SECOND parse of
+// req.url, same as onUpgrade's own token re-derivation in wsServer.ts, and
+// for the same reason: checkUpgrade already parsed it once to prove the
+// upgrade legitimate, but does not hand the rest of the query back, and a
+// third module re-deriving it here is cheaper than threading it through.
+// Exactly one of path/unit must be present; anything else (both, neither, an
+// empty value) is not a request this bridge knows how to serve.
+function logTargetFromRequest(req: http.IncomingMessage): LogTarget | null {
+  const parsed = url.parse(req.url || '', true);
+  const path = parsed.query.path;
+  const unit = parsed.query.unit;
+  const hasPath = typeof path === 'string' && path.length > 0;
+  const hasUnit = typeof unit === 'string' && unit.length > 0;
+  if (hasPath === hasUnit) {
+    // Both or neither -- ambiguous, refuse rather than guess.
+    return null;
+  }
+  return hasPath ? { kind: 'file', path: path as string } : { kind: 'unit', unit: unit as string };
+}
+
+// session.privilegedTransport is used here, deliberately never
+// session.transport: both followCommand and journalFollowCommand bake in
+// `sudo -n` (see ops/command.ts), the same reason /api/logs and /api/file
+// (routes.ts) run over the privileged lane rather than the session's own.
+//
+// The authorization check (isPathAllowed) is answered from THIS session's
+// own allowlist (session.isLogPathAllowed -- see session.ts), never a global
+// one, so that a path session A's own GET /api/logs discovered can never be
+// followed through session B's socket even if both happen to name the same
+// path.
+function onLogs(ws: WebSocket, req: http.IncomingMessage, token: string): void {
+  const session = registry.lookupSession(token);
+  const canFollow = session && session.privilegedTransport.execStream;
+  const target = logTargetFromRequest(req);
+  if (!canFollow || !target) {
+    // Unreachable in normal operation for the same reasons onTerminal's
+    // equivalent guard is -- sshTransport always implements execStream, and
+    // a valid token always resolves to a session -- but a session can in
+    // principle be disposed in the gap between the upgrade completing and
+    // this callback running, and a malformed/missing path or unit query is
+    // a real possibility a client could send. Closing costs nothing.
+    ws.close();
+    return;
+  }
+  bridgeLogFollow(
+    {
+      isPathAllowed: path => session!.isLogPathAllowed(path),
+      execStream: cmd => session!.privilegedTransport.execStream!(cmd),
+    },
+    ws,
+    target
+  );
+}
+
 function settings() {
   const cfg = vscode.workspace.getConfiguration('sftp.serverManager');
   return {
@@ -320,6 +376,7 @@ async function ensureServer(): Promise<Running> {
       hasToken: token => registry.lookupSession(token) !== undefined,
       fallbackHtml: bootstrapHtml,
       onTerminal,
+      onLogs,
     });
     const port = await listen(server);
     if (startedAt !== generation) {

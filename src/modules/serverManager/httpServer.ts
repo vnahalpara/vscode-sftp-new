@@ -25,9 +25,14 @@ export interface ServerDeps {
   // Wired by index.ts (see ensureServer()) once the Terminal tab has a
   // session to bridge to. Left undefined here still means what it always
   // has: an authenticated upgrade to /ws/terminal is accepted and then
-  // immediately closed -- see attachWs's WsOpts.onTerminal. /ws/logs has no
-  // equivalent field yet on purpose; that arrives with the log follower.
+  // immediately closed -- see attachWs's WsOpts.onTerminal.
   onTerminal?: WsOpts['onTerminal'];
+  // Wired by index.ts the same way onTerminal is, once there is a session to
+  // resolve the token against -- see serverManager/logFollow.ts. Left
+  // undefined still means what onTerminal's absence always has: an
+  // authenticated upgrade to /ws/logs is accepted and then immediately
+  // closed, never left open with nothing driving it.
+  onLogs?: WsOpts['onLogs'];
 }
 
 const TYPES: { [ext: string]: string } = {
@@ -88,16 +93,16 @@ function isApi(pathname: string): boolean {
 // server and the same per-session token as /api/*: attachWs() installs its
 // own 'upgrade' listener and re-checks Origin/Host on top of the token (see
 // wsServer.ts's checkUpgrade for why that extra check exists) before ever
-// handing a caller a live socket. /ws/terminal now has a real handler
-// (deps.onTerminal, wired by index.ts once it can resolve a token to a
-// session); /ws/logs still has nothing plugged into it -- that arrives with
-// the log follower -- so an authenticated upgrade to THAT path is still
-// accepted and then immediately closed. The auth boundary being live and
-// exercised even for the still-unwired path (including by the production
-// build, which is what proves the `ws` dependency's optional native addons
-// are excluded correctly -- see webpack.config.js) was the point of standing
-// this up before either feature existed, rather than alongside one of them
-// under pressure to ship it.
+// handing a caller a live socket. Both /ws/terminal and /ws/logs now have
+// real handlers (deps.onTerminal/deps.onLogs, wired by index.ts once it can
+// resolve a token to a session); an authenticated upgrade to either path
+// with no handler wired (e.g. a test server built without one) is still
+// accepted and then immediately closed rather than left open with nothing
+// driving it. The auth boundary being live and exercised even before either
+// feature existed (including by the production build, which is what proves
+// the `ws` dependency's optional native addons are excluded correctly -- see
+// webpack.config.js) was the point of standing this up first, rather than
+// alongside one of them under pressure to ship it.
 // The WebSocket side of a server built by createServer(), kept beside the
 // http.Server rather than returned from it so createServer keeps its
 // single-value signature and every existing caller keeps working. A WeakMap
@@ -168,6 +173,7 @@ export function createServer(deps: ServerDeps): http.Server {
   const ws = attachWs(server, {
     hasToken: token => deps.hasToken(token),
     onTerminal: deps.onTerminal,
+    onLogs: deps.onLogs,
   });
   wsHandles.set(server, ws);
 

@@ -24,6 +24,15 @@ export interface MonitorTransport {
   // calls it, so a transport built purely for sampling has no reason to
   // implement it.
   shell?(opts: { cols: number; rows: number }): Promise<any>;
+  // Opens a raw, long-running exec channel for the Manage Server "Logs" tab's
+  // live follow (`tail -F`/`journalctl -f` -- see serverManager/logFollow.ts).
+  // Deliberately NOT routed through openSampler/SamplerChannel: that
+  // adapter's close() already collapses end()+close() together and hides
+  // pause()/resume(), which is exactly the flow-control primitive
+  // logFollow.ts needs to throttle a busy log without buffering it in this
+  // process's heap. Optional for the same reason shell? is: only a real SSH
+  // transport implements it, and Collector itself never calls it.
+  execStream?(cmd: string): Promise<any>;
 }
 
 export interface CollectorOpts extends ProcOpts {

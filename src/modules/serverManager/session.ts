@@ -64,6 +64,19 @@ export class ManagedSession {
   private _stopHandle: any = null;
   private _pending: Promise<void> = Promise.resolve();
   private _disposed = false;
+  // Paths this session's own GET /api/logs discovery has surfaced, and which
+  // /ws/logs (logFollow.ts) may therefore follow. Session-scoped by
+  // construction -- it lives on this instance, not a token-keyed map another
+  // session could be confused with -- which is what makes it safe for
+  // logFollow.ts's isPathAllowed to be built directly from one session's own
+  // copy. NOTE: as of this writing routes.ts's `/api/logs` handler still
+  // seeds its own private `allowedFiles` map (see routes.ts) rather than
+  // calling allowLogPaths() below; wiring that one-line call is a follow-up
+  // outside this change (routes.ts was off-limits while this was written --
+  // see the Task 5 report). Until that call is added, isLogPathAllowed()
+  // below correctly, safely refuses every file path (fails closed, not
+  // open) rather than silently trusting an unpopulated set.
+  private _allowedLogPaths = new Set<string>();
 
   constructor(profile: RedactedProfile, token: string, deps: SessionDeps, opts: SessionOpts) {
     this.id = profile.id;
@@ -104,6 +117,22 @@ export class ManagedSession {
       interval: this._opts.interval,
       lastSeen: this._lastSeen,
     };
+  }
+
+  // Called by GET /api/logs (routes.ts) once discovery has run, with the
+  // paths it already re-checked against isLogFilePath -- same discipline as
+  // routes.ts's own allowedFiles map, just keyed by session instance instead
+  // of by token in a second data structure.
+  allowLogPaths(paths: string[]): void {
+    paths.forEach(p => this._allowedLogPaths.add(p));
+  }
+
+  // Whether `path` is in THIS session's own log allowlist -- never a global
+  // one. See logFollow.ts's module comment for why that distinction is the
+  // entire point of this method existing on ManagedSession rather than as a
+  // free function over some shared map.
+  isLogPathAllowed(path: string): boolean {
+    return this._allowedLogPaths.has(path);
   }
 
   subscriberCount(): number {

@@ -94,8 +94,12 @@ const DEFAULT_SIZE: TerminalSize = { cols: 80, rows: 24 };
 // channel failed under us. The UI reads these to decide whether to show
 // "session ended" or an actual error, so reporting 1011 for every close (as
 // this did) makes a clean exit indistinguishable from a broken bridge.
-const CLOSE_NORMAL = 1000;
-const CLOSE_INTERNAL_ERROR = 1011;
+//
+// Exported so logFollow.ts (the /ws/logs bridge) uses the exact same two
+// codes rather than inventing its own scheme -- see that module for how it
+// maps an authorization refusal onto CLOSE_INTERNAL_ERROR.
+export const CLOSE_NORMAL = 1000;
+export const CLOSE_INTERNAL_ERROR = 1011;
 
 // A close frame's payload is at most 125 bytes: 2 for the code, 123 for the
 // reason. `ws` does not truncate -- sender.close() THROWS a RangeError past
@@ -108,7 +112,11 @@ const CLOSE_INTERNAL_ERROR = 1011;
 // channel-open failure message out of verbatim text from the remote sshd.
 const MAX_REASON_BYTES = 123;
 
-function truncateReason(reason: string): string {
+// Exported so logFollow.ts reuses this exact truncation rather than writing a
+// second one -- see the module comment above for why a naive close(code,
+// reason) is unsafe with a reason this bridge did not choose (ssh2/sshd
+// error text).
+export function truncateReason(reason: string): string {
   // Every character is at least one byte, so 123 characters is a safe upper
   // bound to start from -- this avoids walking a pathologically long remote
   // string one character at a time.
@@ -131,8 +139,11 @@ function truncateReason(reason: string): string {
 // second in this process until it dies -- taking every other extension, and
 // the user's unsaved work, with it. A megabyte of pending output is far more
 // than any interactive session needs, and is bounded.
-const SEND_HIGH_WATER = 1024 * 1024;
-const SEND_LOW_WATER = 256 * 1024;
+// Exported so logFollow.ts uses the same watermarks rather than picking its
+// own, arbitrarily different numbers for what is the identical hazard: a
+// busy `tail -F` outrunning a WebSocket.
+export const SEND_HIGH_WATER = 1024 * 1024;
+export const SEND_LOW_WATER = 256 * 1024;
 
 const MIN_DIM = 1;
 const MAX_DIM = 1000;
