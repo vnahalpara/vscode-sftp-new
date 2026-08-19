@@ -102,6 +102,71 @@ export function derivePort(key: string, range: [number, number]): number {
   return range[0] + (h.readUInt16BE(0) % (range[1] - range[0] + 1));
 }
 
+const SOCKS5_GREETING = Buffer.from([0x05, 0x01, 0x00]);
+const DEFAULT_PROBE_TIMEOUT_MS = 300;
+
+/**
+ * Ask whether something on `port` actually speaks SOCKS5, by sending the
+ * handshake greeting and checking that the reply starts with the SOCKS5
+ * version byte. Used to decide whether an already-bound port is a live
+ * tunnel worth adopting rather than some unrelated service that happens to
+ * be sitting on the port we derived.
+ *
+ * This runs on the connection path, so it must never reject and must never
+ * leave a socket (or a pending timer) behind -- either would hang or break
+ * every SFTP connection, VPN or not. Every exit -- good reply, wrong
+ * version, error, close, or timeout -- funnels through `finish()`, which is
+ * itself guarded to run at most once since more than one of those can fire
+ * for the same socket (e.g. 'error' followed by 'close').
+ */
+export function probeSocks5(port: number, timeoutMs = DEFAULT_PROBE_TIMEOUT_MS): Promise<boolean> {
+  return new Promise(resolve => {
+    let settled = false;
+    let received = 0;
+    const chunks: Buffer[] = [];
+
+    const socket = net.connect(port, '127.0.0.1');
+
+    const timer = setTimeout(() => finish(false), timeoutMs);
+
+    function finish(result: boolean) {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      socket.removeAllListeners();
+      // 'error' must still be handled even after we're done with the
+      // socket, or a late ECONNRESET while we're destroying it becomes an
+      // uncaught exception.
+      socket.on('error', () => {
+        /* already resolved; nothing left to do */
+      });
+      socket.destroy();
+      resolve(result);
+    }
+
+    socket.once('connect', () => {
+      socket.write(SOCKS5_GREETING);
+    });
+
+    // A real SOCKS5 reply is 2 bytes (version, chosen method), and they can
+    // arrive split across TCP segments -- a lone first byte (even 0x05)
+    // proves nothing, so wait for both before deciding. A server that sends
+    // one byte and stalls falls through to the timeout below, as it should.
+    socket.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
+      received += chunk.length;
+      if (received >= 2) {
+        finish(Buffer.concat(chunks)[0] === 0x05);
+      }
+    });
+
+    socket.once('error', () => finish(false));
+    socket.once('close', () => finish(false));
+  });
+}
+
 /**
  * Append the `[Socks5]` section wireproxy needs onto a user's WireGuard conf,
  * binding the proxy to the given localhost port. Pure (no I/O) so it is unit-testable.
