@@ -50,6 +50,12 @@ const SAFE_KEYS = new Set([
   'protocol',
   'host',
   'port',
+  // Names a remote defined in User Settings; not a credential. It earns its
+  // place here specifically because fileService's failure for it reads
+  // `Can't not find remote "<name>"` -- masking it would black out the one
+  // value a user needs when they paste the output channel to debug that
+  // exact error.
+  'remote',
   'connectTimeout',
   'remotePath',
   'workspace',
@@ -191,7 +197,7 @@ function maskObject(config: any): any {
 
     if (!SAFE_KEYS.has(key)) {
       // null/undefined are printed as they are: there is nothing to leak, and
-      // "present but unset" is exactly the kind of thing this log exists to
+      // "present but unset (for null; note JSON.stringify at the output sink drops an undefined-valued key entirely, so undefined is indistinguishable from absent there)" is exactly the kind of thing this log exists to
       // show. Everything else -- including an empty string -- reports MASK.
       copy[key] = value === null || value === undefined ? value : MASK;
       return;
