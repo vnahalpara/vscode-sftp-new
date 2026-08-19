@@ -120,7 +120,11 @@ async function harness(overrides: Deps): Promise<Harness> {
   const mod: VpnTunnel = require('../vpnTunnel');
   loaded = mod;
   const state = { spawns: 0 };
-  mod.init(dir, { portRange: `${derivedPort}-${derivedPort}` });
+  // keepAlive false so release() actually tears the tunnel down: this file is
+  // about what acquire() does with what a *previous* run left behind, and the
+  // release-time assertions below need the teardown to happen. The keepAlive
+  // default itself is covered in vpnTunnel-lifecycle-test.ts.
+  mod.init(dir, { portRange: `${derivedPort}-${derivedPort}`, keepAlive: false });
   mod.__setDeps({
     isPidAlive: () => true,
     speaksSocks5: async () => false,

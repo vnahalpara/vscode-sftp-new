@@ -58,7 +58,14 @@ function occupy(port: number): Promise<net.Server> {
  * the real binary would and listens on it, so waitForPort() sees a live socket
  * without this suite ever spawning a process.
  */
-function fakeWireproxy(state: { spawns: number }) {
+interface FakeState {
+  spawns: number;
+  // Every fake child this run produced, so a test can make one die the way a
+  // real wireproxy would (drop the socket, emit 'exit') without a real process.
+  children: any[];
+}
+
+function fakeWireproxy(state: FakeState) {
   return (_bin: string, args: string[]) => {
     state.spawns += 1;
     const conf = fs.readFileSync(args[args.length - 1], 'utf8');
@@ -74,10 +81,12 @@ function fakeWireproxy(state: { spawns: number }) {
     child.pid = FAKE_PID;
     child.stdout = null;
     child.stderr = null;
+    child.server = server;
     child.kill = () => {
       server.close();
       child.emit('exit', 0);
     };
+    state.children.push(child);
     return child;
   };
 }
@@ -86,7 +95,7 @@ interface Harness {
   mod: VpnTunnel;
   vpn: any;
   derivedPort: number;
-  state: { spawns: number };
+  state: FakeState;
 }
 
 async function harness(
@@ -104,7 +113,7 @@ async function harness(
   // tslint:disable-next-line:no-var-requires
   const mod: VpnTunnel = require('../vpnTunnel');
   loaded = mod;
-  const state = { spawns: 0 };
+  const state: FakeState = { spawns: 0, children: [] };
   mod.init(dir, { portRange: `${derivedPort}-${derivedPort}`, keepAlive: initOptions.keepAlive });
   mod.__setDeps({
     isPidAlive: () => true,
@@ -169,6 +178,45 @@ describe('keepAlive', () => {
 
     expect(h.mod.portFor(h.vpn)).toBeUndefined();
     expect(fs.existsSync(h.mod.markerPathFor(h.vpn))).toBe(false);
+  });
+
+  test('keepAlive defaults to true when init() is given no opinion', async () => {
+    // package.json documents the setting's default as true, and init()'s own
+    // default has to agree: a caller that passes only a portRange must not
+    // silently flip a user-visible behaviour.
+    const h = await harness({}); // no keepAlive in initOptions at all
+
+    const port = await h.mod.acquire(h.vpn);
+    h.mod.release(h.vpn);
+    await settle();
+
+    expect(h.mod.portFor(h.vpn)).toBe(port);
+  });
+
+  test('a tunnel whose wireproxy has exited is not handed out again', async () => {
+    // keepAlive keeps the map entry past release(), and nothing else was
+    // clearing it: the next acquire() used to return this port with no spawn,
+    // no probe and nothing listening -- and if anything else had bound the
+    // port meanwhile, the SSH session would have gone to it.
+    const h = await harness({}, { keepAlive: true });
+
+    const port = await h.mod.acquire(h.vpn);
+    h.mod.release(h.vpn);
+    await settle();
+    expect(h.mod.portFor(h.vpn)).toBe(port);
+
+    // wireproxy dies on its own -- crash, OOM kill, someone's `pkill`.
+    const child = h.state.children[0];
+    await new Promise<void>(resolve => child.server.close(() => resolve()));
+    child.emit('exit', 1);
+    await settle();
+
+    expect(h.mod.portFor(h.vpn)).toBeUndefined();
+
+    // And the next acquire() starts a real replacement rather than reusing it.
+    const second = await h.mod.acquire(h.vpn);
+    expect(h.state.spawns).toBe(2);
+    expect(second).toBe(h.derivedPort);
   });
 
   test('disposeAll() kills the tunnel even when keepAlive is true', async () => {

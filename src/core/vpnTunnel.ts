@@ -53,14 +53,11 @@ let storageDir = os.tmpdir();
 let portRangeSetting: string | undefined;
 // Mirrors "sftp.vpn.keepAlive": leave the process running across a release()
 // that drops the refcount to zero, so the next acquire() reuses it instead of
-// paying the wireproxy startup cost (and health-check wait) again. The
-// setting's own default (in package.json) is true; this module-internal
-// default is deliberately the opposite, false, so that anything which starts
-// a tunnel without ever calling init() with an explicit choice -- there is no
-// such caller in production, since extension.ts always resolves the real
-// setting -- gets the conservative, leak-averse behaviour rather than
-// silently inheriting a background process it never asked to keep.
-let keepAliveSetting = false;
+// paying the wireproxy startup cost (and health-check wait) again. Defaults
+// to true, matching the setting's own default in package.json, so a caller
+// that passes no opinion gets the documented behaviour rather than its
+// opposite.
+let keepAliveSetting = true;
 
 // key (resolved config path) -> live tunnel or its pending start promise
 const tunnels = new Map<string, Tunnel | Promise<Tunnel>>();
@@ -68,7 +65,7 @@ const tunnels = new Map<string, Tunnel | Promise<Tunnel>>();
 export function init(dir: string, options: { portRange?: string; keepAlive?: boolean } = {}) {
   storageDir = dir;
   portRangeSetting = options.portRange;
-  keepAliveSetting = options.keepAlive === true;
+  keepAliveSetting = options.keepAlive !== false;
 }
 
 function expandHome(p: string): string {
@@ -550,12 +547,28 @@ async function startTunnel(vpn: VpnOption, key: string, port: number): Promise<T
 
   let exited = false;
   let spawnError: NodeJS.ErrnoException | undefined;
+  // Filled in once this tunnel is built, below; the exit handler needs it to
+  // tell "the entry in the map is mine" from "someone has since started a
+  // replacement for the same key".
+  let started: Tunnel | undefined;
+  const forgetIfCurrent = () => {
+    if (started && tunnels.get(key) === started) {
+      // Without this the map keeps a tunnel whose process is gone, and with
+      // keepAlive on it keeps it for the life of the window: acquire() then
+      // hands out its port on the `existing` branch with no spawn and no
+      // check, pointing the SSH session at a closed port -- or at whatever
+      // bound it in the meantime.
+      tunnels.delete(key);
+    }
+  };
   child.on('error', err => {
     spawnError = err as NodeJS.ErrnoException;
     exited = true;
+    forgetIfCurrent();
   });
   child.on('exit', () => {
     exited = true;
+    forgetIfCurrent();
   });
   // wireproxy's own logs never include the private key; surface them for debugging.
   if (child.stdout) {
@@ -608,7 +621,8 @@ async function startTunnel(vpn: VpnOption, key: string, port: number): Promise<T
   writeMarker(key, { port, pid: child.pid, startedAt: Date.now() });
 
   logger.info(`VPN tunnel up (SOCKS5 127.0.0.1:${port}) for ${vpn.configFile}`);
-  return { key, port, pid: child.pid, process: child, mergedConfPath, refCount: 1 };
+  started = { key, port, pid: child.pid, process: child, mergedConfPath, refCount: 1 };
+  return started;
 }
 
 /**
@@ -732,8 +746,19 @@ export async function acquire(vpn: VpnOption): Promise<number> {
   const existing = tunnels.get(key);
   if (existing) {
     const tunnel = await existing;
-    tunnel.refCount += 1;
-    return tunnel.port;
+    // A tracked entry is not proof of a running tunnel. With keepAlive on it
+    // survives every release() for the life of the window, and an adopted one
+    // has no child handle whose 'exit' could clear it. Returning its port
+    // unchecked would point the SSH session at a closed port, or at whatever
+    // has bound it since -- so ask before reusing, and fall through to a
+    // fresh start when the answer is no.
+    if (deps.isPidAlive(tunnel.pid)) {
+      tunnel.refCount += 1;
+      return tunnel.port;
+    }
+    if (tunnels.get(key) === tunnel) {
+      tunnels.delete(key);
+    }
   }
 
   const startPromise = openTunnel(vpn, key);
