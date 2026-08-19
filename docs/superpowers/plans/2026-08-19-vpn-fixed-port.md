@@ -32,6 +32,21 @@ So adoption requires **proof of ownership**, not just protocol agreement:
 
 The SOCKS5 probe stays: it catches a stale marker whose PID was recycled onto an unrelated process. Neither check is sufficient alone; both together are.
 
+## Reaping a hung tunnel — scope this plan did not originally have
+
+**This was never in the plan.** It was added mid-implementation, in a task dispatch, which is how a behaviour that sends `SIGTERM` to a process we hold no handle on reached the codebase without design review. It ships, and this section documents it so the plan matches what ships.
+
+**What it does.** When the port we want is occupied and `classifyOwnedPort()` decides the listener is a tunnel of ours that has stopped answering — the `hung` outcome — `openTunnel()` signals that pid before starting the replacement, rather than stepping aside to a free port.
+
+**Why it earns its place.** A hung tunnel can never be adopted again (a live marker whose pid fails the probe never yields `adopt`), and once we step aside to a free port, nothing will ever re-read that marker to kill it either. Left alone it holds the port for the rest of the machine's uptime, and every reload after it leaks one more. The leak is real and compounding.
+
+**Why it needs gating anyway.** Killing an unrelated process is worse than leaking one. The four adoption conditions do not make a kill safe on their own: nothing in them ties the pid to the port, and marker + live pid + failing probe is *precisely* the recycled-pid signature — the one case the probe was introduced to catch. So two gates gate the escalation, and neither may be removed without replacing it:
+
+1. **Re-probe before escalating.** Three attempts at a 2s timeout, on top of the 300ms adopt probe, and a listener that answers any of them is adopted rather than killed. A single missed loopback round trip — a saturated CPU, a swapping machine, a laptop a second out of sleep — is not evidence of death. Adopting wrongly costs one extra wireproxy; killing wrongly can take down another window's tunnel mid-transfer, and asymmetric cost buys asymmetric confidence.
+2. **`marker.startedAt` against `os.uptime()`.** A marker written before the current boot describes a process that cannot still exist, because pids are handed out afresh every boot — so whatever is alive under that pid now is, with certainty, unrelated. Such a marker is disqualified outright: not reaped, and not adopted either, since a marker that cannot vouch for a pid cannot vouch for a listener. Force-quitting VS Code leaves exactly this marker behind.
+
+**What is deliberately *not* claimed.** The reap is best effort. If the signal does not free the port (EPERM, or a process ignoring `SIGTERM`), the marker stays on disk — it is the only handle a future run has on that process — and we fall back to a free port, or fail outright when `vpn.socksPort` pins the port. Both gates are covered by tests, including that a pre-boot marker is never killed.
+
 ---
 
 ### Task 1: Deterministic port derivation
