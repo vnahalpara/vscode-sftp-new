@@ -6,6 +6,7 @@ import { simplifyPath, reportError } from '../../helper';
 import { UResource, FileService, TransferTask } from '../../core';
 import { validateConfig } from '../config';
 import watcherService from '../fileWatcher';
+import { maskConfig } from './maskConfig';
 import Trie from './trie';
 
 const WIN_DRIVE_REGEX = /^([a-zA-Z]):/;
@@ -17,31 +18,6 @@ const serviceManager = new Trie<FileService>(
     delimiter: path.sep,
   }
 );
-
-function maskConfig(config) {
-  const copy = {};
-  const MASK = '******';
-  Object.keys(config).forEach(key => {
-    const configValue = config[key];
-    switch (key) {
-      case 'username':
-      case 'password':
-      case 'passphrase':
-        copy[key] = MASK;
-        break;
-      case 'interactiveAuth':
-        if (Array.isArray(configValue)) {
-          copy[key] = configValue.map(phrase => MASK);
-        } else {
-          copy[key] = configValue;
-        }
-        break;
-      default:
-        copy[key] = configValue;
-    }
-  });
-  return copy;
-}
 
 function normalizePathForTrie(pathname) {
   if (isWindows) {
