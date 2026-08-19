@@ -50,14 +50,14 @@ export function hasCloudflare(config: any): boolean {
 //
 // Layer 1 -- exact match, used whenever the caller has the real token in
 // scope (every caller in this file does; see checkResponse below). Reduce
-// both the token and the CANDIDATE OUTPUT TEXT to their ALPHANUMERIC
-// SKELETON -- strip every character that isn't a letter or digit,
-// deliberately including `-` and `_` even though those are themselves valid
-// token characters -- then check whether the token's skeleton appears in
-// the candidate's skeleton.
+// both the token and the CANDIDATE OUTPUT TEXT to their FOLDED SKELETON --
+// strip every character that isn't a letter or digit, deliberately
+// including `-` and `_` even though those are themselves valid token
+// characters, then lowercase what remains -- and check whether the token's
+// skeleton appears in the candidate's.
 //
-// Two things about "candidate output text" matter, both learned from a
-// guard that got defeated twice:
+// Three things about that comparison matter, each of them learned from a
+// version of this guard that got defeated:
 //
 // 1. Stripping `-`/`_` too (not just "everything outside the token
 //    charset") closes substitution, not just insertion: a token's own
@@ -68,25 +68,45 @@ export function hasCloudflare(config: any): boolean {
 //    token would still be sitting there, fully readable with spaces
 //    instead of hyphens, while an exact substring check against the
 //    unmodified token quietly reports no match.
-// 2. The candidate MUST be the exact string this module is about to emit
-//    -- i.e. the DECODED `message` text, built the same way `detail`
-//    below is built -- never the raw wire-format `body`. `JSON.stringify`
-//    escapes control characters (a real newline becomes the two
-//    characters `\` and `n`); checking the pre-parse body let a token
-//    survive that escaping undetected, because the escaped `\n` in the
-//    wire body doesn't line up character-for-character with the real
-//    newline in the decoded string that actually reaches the activity
-//    log/browser -- stripping non-alphanumerics from the *escaped* form
-//    keeps a stray `n`, `t`, `r`, `b` or `f` that the *decoded* form never
-//    had, and the alignment the whole comparison depends on breaks.
-//    `cloudflareError` below builds the exact detail text first, then
-//    tests THAT -- there is no transformation left between "what we
-//    checked" and "what we emit" for a bypass to hide in.
+// 2. Case is folded for the same reason. Uppercasing text on its way to a
+//    log or a UI is reformatting, not an attack, and a case-sensitive
+//    comparison combined with the delimiter substitution above defeated
+//    both layers at once: Layer 1 missed on case, Layer 2 missed because
+//    no run of 20+ token-charset characters survived the substitution.
+//    The skeleton is ASCII alphanumerics only by the time it is folded, so
+//    the fold is locale-independent and cannot merge two distinct
+//    skeletons the way a Unicode fold could.
+// 3. The candidate MUST be the FULL, FINAL string this function is about to
+//    return -- not the raw wire-format `body`, and not any intermediate the
+//    output is later derived from. Every defeat of this guard so far has
+//    been the same mistake in a new costume: checking a proxy for the
+//    output instead of the output.
+//      - Checking the pre-parse `body` failed because `JSON.stringify`
+//        escapes control characters (a real newline becomes the two
+//        characters `\` and `n`); stripping non-alphanumerics from the
+//        *escaped* form keeps a stray `n`/`t`/`r`/`b`/`f` the *decoded*
+//        form never had, and the alignment the comparison depends on broke.
+//      - Checking the decoded-but-unassembled detail text failed because
+//        two transformations still ran downstream of the check: `scrub()`
+//        (which REWRITES text, and can therefore manufacture a skeleton the
+//        check just ruled out -- a token containing the literal word
+//        `redacted` is enough), and the status template (which splices the
+//        `[Cloudflare error N]` suffix in front of the detail, so a match
+//        straddling the two is invisible to a check on the detail alone).
+//    So `cloudflareError` below assembles the complete message, tests THAT
+//    exact string, and on contamination re-assembles a shorter one and
+//    tests again -- down a fixed ladder that ends in the empty string. What
+//    it returns is always a string that has itself been tested, so no
+//    transformation exists between "what we checked" and "what we emit" for
+//    a bypass to hide in. Anything added to the assembly (an annotation, an
+//    ellipsis, a normaliser) is automatically covered, because the check
+//    runs on the result rather than on an input to it.
 //
-// If the token's skeleton shows up in that candidate at all, the whole
-// detail is dropped -- only the fixed-vocabulary message for the status
-// code is returned. This is the only layer that makes token leakage
-// structurally impossible rather than merely unlikely.
+// If the token's skeleton shows up in a candidate at all, that candidate is
+// discarded whole -- the detail is not surgically edited, since editing is
+// what put `scrub()` on the wrong side of the check in the first place.
+// This is the only layer that makes token leakage structurally impossible
+// rather than merely unlikely.
 //
 // A minimum skeleton length gates the match: without one, a short token
 // (a one- or two-character skeleton) matches almost any English text and
@@ -105,21 +125,32 @@ export function hasCloudflare(config: any): boolean {
 // close. It is kept only as a defense for callers that, for whatever
 // reason, invoke `cloudflareError` without the token in hand.
 const NON_ALPHANUMERIC_RE = /[^A-Za-z0-9]/g;
-function alphanumericSkeleton(text: string): string {
+function foldedSkeleton(text: string): string {
   // Defensive against non-string input (see the guard at the top of
   // cloudflareError for why that can happen despite the `string` type):
   // this helper must never throw either, since it is the thing that would
-  // throw first.
-  return typeof text === 'string' ? text.replace(NON_ALPHANUMERIC_RE, '') : '';
+  // throw first. `toLowerCase` (not `toLocaleLowerCase`) is deliberate --
+  // what is left after the strip is ASCII alphanumerics, so the fold must
+  // not vary with the host's locale.
+  return typeof text === 'string' ? text.replace(NON_ALPHANUMERIC_RE, '').toLowerCase() : '';
 }
 
+// Tokens whose skeleton falls under this floor are DELIBERATELY left
+// unprotected by Layer 1 -- a decision, not an oversight. A one- or
+// two-character skeleton is a substring of nearly every English sentence,
+// so matching on it blacks out every diagnostic Cloudflare sends without
+// protecting anything real. A genuine 40-character Cloudflare API token
+// skeletonises to 37-38 characters, three times this floor, so no real
+// secret is ever in the unprotected band; only degenerate inputs (tests,
+// half-typed config) land there, and those are not secrets worth the
+// blackout. Layer 2's shape-based scrub still applies to them.
 const MIN_TOKEN_SKELETON_LENGTH = 12;
 function candidateContainsToken(candidateText: string, token: string): boolean {
-  const tokenSkeleton = alphanumericSkeleton(token);
+  const tokenSkeleton = foldedSkeleton(token);
   if (tokenSkeleton.length < MIN_TOKEN_SKELETON_LENGTH) {
     return false;
   }
-  return alphanumericSkeleton(candidateText).includes(tokenSkeleton);
+  return foldedSkeleton(candidateText).includes(tokenSkeleton);
 }
 
 const TOKEN_SHAPED_RUN_RE = /[A-Za-z0-9_-]{20,}/g;
@@ -135,15 +166,18 @@ function scrub(text: string): string {
  * still commit -- and it never interpolates raw response text into the
  * result -- every branch below is built from a fixed vocabulary plus
  * Cloudflare's numeric `code`s plus, at most, a `message` detail that has
- * been proven (Layer 1 above) or scrubbed (Layer 2) not to carry the token.
- * Pass `token` whenever it is available -- every caller in this file does --
- * so Layer 1's exact-match, fragmentation-proof check runs instead of the
- * weaker shape-based fallback.
+ * been scrubbed (Layer 2) of token-shaped runs.
+ *
+ * The guarantee it actually makes, and the one Layer 1 above is written to
+ * hold: WHEN `token` IS PASSED, THE RETURNED STRING IS ALWAYS A STRING THAT
+ * WAS ITSELF TESTED FOR THE TOKEN AND FOUND CLEAN. Not an input to it, not a
+ * fragment of it -- the returned string. Pass `token` whenever it is
+ * available; every caller in this file does.
  */
 export function cloudflareError(status: number, body: string, token?: string): string {
   const safeBody = typeof body === 'string' ? body : '';
   let codes: number[] = [];
-  let detail = '';
+  let detailText = '';
   try {
     const parsed = JSON.parse(safeBody);
     if (parsed && Array.isArray(parsed.errors)) {
@@ -153,16 +187,7 @@ export function cloudflareError(status: number, body: string, token?: string): s
       const messages = parsed.errors
         .map((e: any) => e && typeof e.message === 'string' ? e.message : '')
         .filter(Boolean);
-      if (messages.length) {
-        // This is the exact text that would be emitted below, decoded --
-        // build it, THEN decide whether it's safe. Checking anything else
-        // (the raw body, a differently-derived string) reopens the gap
-        // Layer 1's doc comment above describes.
-        const rawDetailText = messages.join('; ');
-        if (!(token && candidateContainsToken(rawDetailText, token))) {
-          detail = ` (${scrub(rawDetailText)})`;
-        }
-      }
+      detailText = messages.join('; ');
     }
   } catch {
     // Non-JSON body -- an HTML gateway error page, for instance. Degrade to
@@ -170,20 +195,48 @@ export function cloudflareError(status: number, body: string, token?: string): s
     // ever used in that case.
   }
 
+  // The one place a message is assembled. Everything variable reaches the
+  // output through a parameter here, so testing this function's RESULT tests
+  // the whole output -- there is nothing downstream of it to slip past.
+  const assemble = (codeSuffix: string, detail: string): string => {
+    if (status === 401 || status === 403) {
+      return `Cloudflare rejected the request: the CLOUDFLARE_API_TOKEN is invalid or lacks the ` +
+        `Zone.Cache Purge permission.${codeSuffix}${detail}`;
+    }
+    if (status === 404) {
+      return `Cloudflare zone not found -- check CLOUDFLARE_ZONE_ID.${codeSuffix}${detail}`;
+    }
+    if (status === 429) {
+      return `Cloudflare rate limited this request. Cloudflare limits purge_everything far more ` +
+        `tightly than targeted purges, so this can happen even under light use.${codeSuffix}${detail}`;
+    }
+    return `Cloudflare returned HTTP ${status}${codeSuffix}${detail}`;
+  };
+
   const codeSuffix = codes.length ? ` [Cloudflare error ${codes.join(', ')}]` : '';
 
-  if (status === 401 || status === 403) {
-    return `Cloudflare rejected the request: the CLOUDFLARE_API_TOKEN is invalid or lacks the ` +
-      `Zone.Cache Purge permission.${codeSuffix}${detail}`;
+  // A ladder from most informative to least, each rung a fully assembled
+  // message. Emit the first rung that tests clean; every rung is tested, so
+  // whatever is returned has been checked in exactly the form it is
+  // returned in. Successive rungs drop content rather than rewrite it,
+  // which is what keeps a lower rung from re-introducing what a higher one
+  // was rejected for.
+  const candidates = [
+    assemble(codeSuffix, detailText ? ` (${scrub(detailText)})` : ''),
+    assemble(codeSuffix, ''),
+    assemble('', ''),
+  ];
+  for (const candidate of candidates) {
+    if (!token || !candidateContainsToken(candidate, token)) {
+      return candidate;
+    }
   }
-  if (status === 404) {
-    return `Cloudflare zone not found -- check CLOUDFLARE_ZONE_ID.${codeSuffix}${detail}`;
-  }
-  if (status === 429) {
-    return `Cloudflare rate limited this request. Cloudflare limits purge_everything far more ` +
-      `tightly than targeted purges, so this can happen even under light use.${codeSuffix}${detail}`;
-  }
-  return `Cloudflare returned HTTP ${status}${codeSuffix}${detail}`;
+  // Unreachable for any real token: getting here means the token's folded
+  // skeleton occurs inside this module's own fixed vocabulary, which for a
+  // 37-character skeleton cannot happen. Kept so the guarantee above has no
+  // unexamined tail -- if there is no message left that does not contain the
+  // secret, the answer is no message, never a best-effort one.
+  return '';
 }
 
 // A 200 with `success: false` is still an error -- Cloudflare does that,

@@ -99,6 +99,14 @@ function alnumSkeleton(s: string): string {
   return s.replace(/[^A-Za-z0-9]/g, '');
 }
 
+// The same reduction the module itself compares on: skeleton + case fold.
+// Assertions written against this catch a leak that has merely been
+// reformatted (delimiters swapped, case changed) on its way to the output,
+// which `.not.toContain(token)` would happily let through.
+function foldedSkeleton(s: string): string {
+  return alnumSkeleton(s).toLowerCase();
+}
+
 test('a token fragmented by inserted or substituted delimiters is still caught, not leaked piecemeal', async () => {
   const midpoint = Math.floor(TOKEN.length / 2);
   const tokenSkeleton = alnumSkeleton(TOKEN);
@@ -162,6 +170,87 @@ test('a token fragmented by JSON-escaped control-character delimiters is still c
   }
 });
 
+// Re-review finding (MEDIUM): the skeleton comparison was case-SENSITIVE.
+// Case folding is reformatting, not an attack -- plenty of things uppercase
+// text on its way to a log or a UI -- so it sits squarely in the same
+// realistic threat class as the delimiter substitution above, and combining
+// the two defeated both layers at once: Layer 1 missed on case, Layer 2
+// missed because no run of 20+ token-charset characters survived the
+// delimiter swap. Every character of a realistic 40-character token reached
+// the browser. Both skeletons are lowercased before comparing now; since the
+// skeleton is ASCII alphanumerics only, that fold is locale-independent, and
+// at a 37-character skeleton the false-positive cost is nil.
+test('a token echoed back case-folded AND delimiter-substituted is still caught', async () => {
+  // A realistically shaped 40-char Cloudflare-style token: mixed case, with
+  // hyphens, skeletonising to 37 characters.
+  const casedToken = 'v1-a7Kd3xQ9m-Zp2Lr8Tn4W-c6Hb0Ys5Jf-1Ge2Dq';
+  const echoes = [
+    // The review's exact repro: upstream echoes it uppercased with the
+    // hyphens turned into spaces.
+    casedToken.toUpperCase().split('-').join(' '),
+    // The mirror image, for symmetry: lowercased, hyphens turned into dots.
+    casedToken.toLowerCase().split('-').join('.'),
+  ];
+  for (const echo of echoes) {
+    const body = JSON.stringify({ success: false, errors: [{ code: 1, message: 'bad token ' + echo }] });
+    const msg = cloudflareError(403, body, casedToken);
+    expect(foldedSkeleton(msg)).not.toContain(foldedSkeleton(casedToken));
+    // The message still has to be useful -- dropping the detail is the whole
+    // response, not blanking the message.
+    expect(msg).toMatch(/Zone.Cache Purge/);
+    const d = deps(403, body);
+    await expect(purgeEverything(d, 'z1', casedToken)).rejects.toThrow(/Zone.Cache Purge/);
+    await expect(purgeEverything(d, 'z1', casedToken)).rejects.toThrow(
+      expect.not.stringContaining(echo) as any
+    );
+  }
+});
+
+// Re-review finding (MEDIUM, structural): rounds 1-3 all made the same
+// mistake -- they tested a PROXY for the emitted string instead of the
+// emitted string. Round 3 checked `rawDetailText`, which is nearly but not
+// quite what gets emitted: `scrub()` runs after the check, and the status
+// template then splices the error-code suffix and fixed vocabulary in front
+// of the detail. Both transformations demonstrably change the answer, per
+// the two repros below. The fix assembles the full message, tests THAT, and
+// re-assembles without the detail if it is contaminated, so there is no
+// transformation left downstream of the check for a bypass to hide in.
+test('a message that scrub() REWRITES into the token skeleton is caught', () => {
+  // scrub() replaces the 25-Q run with the literal text `[redacted]`,
+  // manufacturing the very skeleton a check on the pre-scrub text ruled out.
+  const token = 'aaaaa-redacted-bbbbb-ccccc';
+  const body = JSON.stringify({
+    success: false,
+    errors: [{ code: 1, message: 'aaaaa ' + 'Q'.repeat(25) + ' bbbbb ccccc' }],
+  });
+  const msg = cloudflareError(403, body, token);
+  expect(foldedSkeleton(msg)).not.toContain(foldedSkeleton(token));
+  expect(msg).toMatch(/Zone.Cache Purge/);
+});
+
+test('a token skeleton straddling the error-code suffix and the detail is caught', () => {
+  // The match spans `[Cloudflare error 10000]` into `(abcdefghijklmnop)`, so
+  // it is invisible to any check that looks at the detail alone.
+  const token = '10000-abcdefghijklmnop';
+  const body = JSON.stringify({
+    success: false,
+    errors: [{ code: 10000, message: 'abcdefghijklmnop' }],
+  });
+  const msg = cloudflareError(403, body, token);
+  expect(foldedSkeleton(msg)).not.toContain(foldedSkeleton(token));
+  expect(msg).toMatch(/Zone.Cache Purge/);
+});
+
+// The ladder's last rung. If a (degenerate) token's skeleton occurs inside
+// this module's own fixed vocabulary, there is no message left to emit that
+// does not contain it -- so nothing is emitted. This is documented rather
+// than merely tolerated: it is what makes "the returned string never
+// contains the token's folded skeleton" an unconditional statement instead
+// of one with an unexamined tail.
+test('a token whose skeleton is inside the fixed vocabulary leaves nothing to say', () => {
+  expect(cloudflareError(403, '{}', 'Cloudflare rejected the request')).toBe('');
+});
+
 // Re-review finding (MEDIUM): the earlier fix called the skeleton helper on
 // the raw `body` argument outside cloudflareError's try/catch, so a
 // non-string body (null/undefined/a number -- a contract violation this
@@ -183,8 +272,14 @@ test('cloudflareError never throws even when body is not actually a string', () 
 // diagnostic detail Cloudflare sends -- a security guard turning into a
 // diagnostics blackout. Real Cloudflare tokens are 40 characters, far
 // above the floor, so this costs nothing against the real threat.
+//
+// The short token must actually OCCUR in the message being asserted on,
+// otherwise the test passes with or without the floor and proves nothing:
+// the original `'x'` never appeared in the sentence below, so this test was
+// green even against the floor-less version it was written to pin. `'zone'`
+// occurs twice.
 test('a degenerate short token does not black out an unrelated diagnostic message', () => {
-  const shortToken = 'x';
+  const shortToken = 'zone';
   const body = JSON.stringify({
     success: false,
     errors: [{ code: 1, message: 'The zone configuration is invalid, please check your settings' }],
