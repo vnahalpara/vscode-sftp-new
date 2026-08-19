@@ -192,6 +192,7 @@ describe('buildRoutes', () => {
       logs: true,
       terminal: true,
       database: false,
+      cloudflare: true,
     });
   });
 
@@ -1019,6 +1020,171 @@ describe('buildRoutes', () => {
       const okCtx = fakeCtx('tok', { path: NGINX_FILE });
       await find(routes, 'GET', '/api/file')(okCtx.ctx);
       expect(okCtx.res.status).toBe(200);
+    });
+  });
+
+  describe('cloudflare', () => {
+    const CF_ZONE_ID = 'zone123';
+    // Distinctive for the same reason SECRET_TOKEN is above -- a leak must be
+    // unambiguous in an assertion failure, not maskable by a short needle.
+    const CF_TOKEN = 'cf-secret-token-value-9d4e1a';
+
+    function withCloudflareConfig(overrides: any = {}) {
+      return { CLOUDFLARE_ZONE_ID: CF_ZONE_ID, CLOUDFLARE_API_TOKEN: CF_TOKEN, ...overrides };
+    }
+
+    // A local buildRoutes per test, not the shared beforeEach one, because
+    // each test needs its own fake Cloudflare `request` -- a stand-in for a
+    // real network call, which routes.ts must never make.
+    function cloudflareRoutes(request: (opts: any) => Promise<{ status: number; body: string }>) {
+      return buildRoutes({
+        sessions: { get: token => store.get(token) },
+        pingMs: 25000,
+        schedule: () => 1,
+        cancel: () => undefined,
+        cloudflare: { request },
+      }).routes;
+    }
+
+    it('404s both routes when the profile has no Cloudflare config', async () => {
+      const cfRoutes = cloudflareRoutes(async () => ({ status: 200, body: '{}' }));
+      const { session } = fakeSession({ cloudflareConfig: {} });
+      store.set('tok', session);
+
+      const zoneCtx = fakeCtx('tok');
+      await find(cfRoutes, 'GET', '/api/cloudflare/zone')(zoneCtx.ctx);
+      expect(zoneCtx.res.status).toBe(404);
+
+      const purgeCtx = fakeCtx('tok');
+      await find(cfRoutes, 'POST', '/api/cloudflare/purge')(purgeCtx.ctx);
+      expect(purgeCtx.res.status).toBe(404);
+    });
+
+    it('404s both routes when only one Cloudflare field is set', async () => {
+      const cfRoutes = cloudflareRoutes(async () => ({ status: 200, body: '{}' }));
+      const { session } = fakeSession({ cloudflareConfig: { CLOUDFLARE_ZONE_ID: CF_ZONE_ID } });
+      store.set('tok', session);
+
+      const zoneCtx = fakeCtx('tok');
+      await find(cfRoutes, 'GET', '/api/cloudflare/zone')(zoneCtx.ctx);
+      expect(zoneCtx.res.status).toBe(404);
+
+      const purgeCtx = fakeCtx('tok');
+      await find(cfRoutes, 'POST', '/api/cloudflare/purge')(purgeCtx.ctx);
+      expect(purgeCtx.res.status).toBe(404);
+    });
+
+    it('the zone route returns the zone name and no credential', async () => {
+      const seen: any[] = [];
+      const cfRoutes = cloudflareRoutes(async opts => {
+        seen.push(opts);
+        return {
+          status: 200,
+          body: JSON.stringify({ success: true, result: { id: CF_ZONE_ID, name: 'example.com' } }),
+        };
+      });
+      const { session } = fakeSession({ cloudflareConfig: withCloudflareConfig() });
+      store.set('tok', session);
+      const { ctx, res } = fakeCtx('tok');
+
+      await find(cfRoutes, 'GET', '/api/cloudflare/zone')(ctx);
+
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({ id: CF_ZONE_ID, name: 'example.com' });
+      expect(res.body).not.toContain(CF_TOKEN);
+      expect(res.body).not.toContain('CLOUDFLARE_API_TOKEN');
+      // The token is sent to Cloudflare over the injected client, not over
+      // SSH and not in a URL -- prove the fake actually received it, so this
+      // test cannot pass merely because the route never used it at all.
+      expect(seen[0].token).toBe(CF_TOKEN);
+      expect(seen[0].path).toBe(`/client/v4/zones/${CF_ZONE_ID}`);
+    });
+
+    it('the purge route posts purge_everything and reports ok, with no credential in the body', async () => {
+      const seen: any[] = [];
+      const cfRoutes = cloudflareRoutes(async opts => {
+        seen.push(opts);
+        return { status: 200, body: JSON.stringify({ success: true, result: {} }) };
+      });
+      const { session } = fakeSession({ cloudflareConfig: withCloudflareConfig() });
+      store.set('tok', session);
+      const { ctx, res } = fakeCtx('tok');
+
+      await find(cfRoutes, 'POST', '/api/cloudflare/purge')(ctx);
+
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({ purged: true });
+      expect(res.body).not.toContain(CF_TOKEN);
+      expect(seen[0].method).toBe('POST');
+      expect(seen[0].path).toBe(`/client/v4/zones/${CF_ZONE_ID}/purge_cache`);
+    });
+
+    it('the purge route returns 502 with a mapped message, and the body contains no part of the token', async () => {
+      const cfRoutes = cloudflareRoutes(async () => ({
+        status: 403,
+        body: JSON.stringify({ success: false, errors: [{ code: 10000, message: 'bad token ' + CF_TOKEN }] }),
+      }));
+      const { session } = fakeSession({ cloudflareConfig: withCloudflareConfig() });
+      store.set('tok', session);
+      const { ctx, res } = fakeCtx('tok');
+
+      await find(cfRoutes, 'POST', '/api/cloudflare/purge')(ctx);
+
+      expect(res.status).toBe(502);
+      expect(res.body).not.toContain(CF_TOKEN);
+      expect(res.body).toMatch(/token/i);
+    });
+
+    it('the zone route returns 502 on an upstream failure, never the raw response body', async () => {
+      const cfRoutes = cloudflareRoutes(async () => ({ status: 500, body: '<html>gateway error</html>' }));
+      const { session } = fakeSession({ cloudflareConfig: withCloudflareConfig() });
+      store.set('tok', session);
+      const { ctx, res } = fakeCtx('tok');
+
+      await find(cfRoutes, 'GET', '/api/cloudflare/zone')(ctx);
+
+      expect(res.status).toBe(502);
+      expect(res.body).not.toContain('<html>');
+      expect(res.body).toContain('500');
+    });
+
+    it('logs the zone id and outcome to the activity log on failure, never the token or an Authorization header', async () => {
+      const cfRoutes = cloudflareRoutes(async () => ({
+        status: 403,
+        body: JSON.stringify({ success: false, errors: [{ code: 10000, message: 'bad token ' + CF_TOKEN }] }),
+      }));
+      const { session } = fakeSession({ cloudflareConfig: withCloudflareConfig() });
+      store.set('tok', session);
+      const { ctx } = fakeCtx('tok');
+
+      await find(cfRoutes, 'POST', '/api/cloudflare/purge')(ctx);
+
+      expect((session.activity.push as jest.Mock)).toHaveBeenCalled();
+      const entry = (session.activity.push as jest.Mock).mock.calls[0][0];
+      const serialisedEntry = JSON.stringify(entry);
+      expect(entry.command).toContain(CF_ZONE_ID);
+      expect(serialisedEntry).not.toContain(CF_TOKEN);
+      expect(serialisedEntry).not.toContain('Authorization');
+      expect(serialisedEntry).not.toContain('Bearer');
+    });
+
+    it('logs the zone id and outcome to the activity log on success, never the token', async () => {
+      const cfRoutes = cloudflareRoutes(async () => ({
+        status: 200,
+        body: JSON.stringify({ success: true, result: { id: CF_ZONE_ID, name: 'example.com' } }),
+      }));
+      const { session } = fakeSession({ cloudflareConfig: withCloudflareConfig() });
+      store.set('tok', session);
+      const { ctx } = fakeCtx('tok');
+
+      await find(cfRoutes, 'GET', '/api/cloudflare/zone')(ctx);
+
+      expect((session.activity.push as jest.Mock)).toHaveBeenCalled();
+      const entry = (session.activity.push as jest.Mock).mock.calls[0][0];
+      const serialisedEntry = JSON.stringify(entry);
+      expect(entry.command).toContain(CF_ZONE_ID);
+      expect(entry.error).toBeNull();
+      expect(serialisedEntry).not.toContain(CF_TOKEN);
     });
   });
 });

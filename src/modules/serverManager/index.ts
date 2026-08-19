@@ -20,6 +20,7 @@ import { CLOSE_INTERNAL_ERROR } from './wsBridge';
 import { bootstrapHtml } from './bootstrap';
 import { createFanout } from './fanout';
 import { buildRoutes } from './routes';
+import { httpsRequest } from './ops/cloudflare';
 import { browserCommand, BrowserKind } from './browser';
 import { bridgeTerminal } from './terminal';
 import { bridgeLogFollow, createFollowLimit, LogTarget } from './logFollow';
@@ -447,6 +448,7 @@ async function ensureServer(): Promise<Running> {
       schedule: (fn, ms) => setInterval(fn, ms),
       cancel: handle => clearInterval(handle),
       onTokenDisposed: listener => tokenDisposed.add(listener),
+      cloudflare: { request: httpsRequest },
     });
     const server = createServer({
       root,
@@ -536,7 +538,13 @@ export async function ensureSession(fileService: any, config: any): Promise<stri
       cancel: handle => clearTimeout(handle),
       now: () => Date.now(),
     },
-    { graceMs: GRACE_MS, interval: cfg.interval }
+    { graceMs: GRACE_MS, interval: cfg.interval },
+    // Only the two Cloudflare fields, extracted into a fresh object -- not
+    // `config` itself, which also carries the SSH password/passphrase (and,
+    // on a hop profile, the target's root_password). See the field's doc
+    // comment on ManagedSession: it is read by routes.ts's
+    // /api/cloudflare/* handlers and must never reach state()/the browser.
+    { CLOUDFLARE_ZONE_ID: config.CLOUDFLARE_ZONE_ID, CLOUDFLARE_API_TOKEN: config.CLOUDFLARE_API_TOKEN }
   );
 
   session.activity.onEntry = entry =>

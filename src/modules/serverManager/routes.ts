@@ -22,6 +22,7 @@ import {
 import { parseUnits, parseUnitFiles, mergeServices, sortServices } from './ops/services';
 import { parseDetect, parseNginxVhosts, parseApacheVhosts, parseCertInfo, CertInfo } from './ops/webserver';
 import { parseLogDiscovery } from './ops/logs';
+import { hasCloudflare, zoneInfo, purgeEverything, CloudflareDeps } from './ops/cloudflare';
 
 export interface SessionLookup {
   get(token: string): ManagedSession | undefined;
@@ -51,6 +52,15 @@ export interface RouteDeps {
   // handler) would register into whatever list existed at that later moment
   // -- which after a server restart is a different one. Register eagerly.
   onTokenDisposed?(listener: (token: string) => void): void;
+  // The Cloudflare HTTP client the /api/cloudflare/* routes call through --
+  // production wires the real `httpsRequest` (ops/cloudflare.ts); tests
+  // inject a fake so no route in this file ever makes a real network call.
+  // Optional, like onTokenDisposed above, so the many pre-existing tests
+  // that never exercise a Cloudflare route need not supply it -- those
+  // routes' capability gate (hasCloudflare(session.cloudflareConfig)) always
+  // returns false for a fake session with no cloudflareConfig override, so
+  // the handler 404s before this is ever touched.
+  cloudflare?: CloudflareDeps;
 }
 
 // Everything the later milestones will turn on. The UI reads these to decide
@@ -61,6 +71,7 @@ const CAPABILITIES = {
   logs: true,
   terminal: true,
   database: false,
+  cloudflare: true,
 };
 
 function resolve(deps: RouteDeps, ctx: Ctx): ManagedSession | null {
@@ -176,6 +187,50 @@ async function runConfigTest(
   });
 
   return { ok, output };
+}
+
+// Runs one Cloudflare API call (zoneInfo/purgeEverything) and records the
+// outcome in the activity log -- the zone id and success/failure only, never
+// the token and never an Authorization header. Same ordering discipline as
+// runPrivileged: the entry is pushed regardless of outcome, before the
+// caller below turns a rejection into a response.
+//
+// The message on a rejection is never Cloudflare's raw response body --
+// zoneInfo/purgeEverything already route every failure (a bad HTTP status,
+// or a 200 with `success: false`) through cloudflareError, which is what
+// guarantees the token cannot appear in it even if Cloudflare's own error
+// payload echoes it back. This function does not call cloudflareError a
+// second time; it only relays the message that call already produced.
+async function runCloudflare<T>(
+  session: ManagedSession,
+  label: string,
+  zoneId: string,
+  call: () => Promise<T>
+): Promise<{ ok: true; value: T } | { ok: false; message: string }> {
+  const start = Date.now();
+  try {
+    const value = await call();
+    session.activity.push({
+      at: Date.now(),
+      label,
+      command: `zone ${zoneId}`,
+      code: 0,
+      ms: Date.now() - start,
+      error: null,
+    });
+    return { ok: true, value };
+  } catch (error) {
+    const message = (error as Error).message;
+    session.activity.push({
+      at: Date.now(),
+      label,
+      command: `zone ${zoneId}`,
+      code: 1,
+      ms: Date.now() - start,
+      error: message,
+    });
+    return { ok: false, message };
+  }
 }
 
 // What buildRoutes hands back: the handlers, plus read-only access to the
@@ -560,6 +615,60 @@ export function buildRoutes(deps: RouteDeps): BuiltRoutes {
 
         const result = await runPrivileged(ops, `view ${requestedPath}`, command);
         ctx.json(200, { content: result.stdout });
+      },
+    },
+    {
+      method: 'GET',
+      path: '/api/cloudflare/zone',
+      handler: async ctx => {
+        const session = resolve(deps, ctx);
+        if (!session) {
+          return;
+        }
+        // A profile without both CLOUDFLARE_ZONE_ID and CLOUDFLARE_API_TOKEN
+        // must behave as if this route does not exist -- 404, not a 500 or a
+        // hang against an empty zone id.
+        if (!hasCloudflare(session.cloudflareConfig)) {
+          ctx.text(404, 'Cloudflare is not configured for this profile.');
+          return;
+        }
+        const zoneId = session.cloudflareConfig.CLOUDFLARE_ZONE_ID!;
+        const token = session.cloudflareConfig.CLOUDFLARE_API_TOKEN!;
+        const result = await runCloudflare(session, 'read cloudflare zone', zoneId, () =>
+          zoneInfo(deps.cloudflare!, zoneId, token)
+        );
+        if (!result.ok) {
+          // 502: Cloudflare (the upstream) failed, not this server. The
+          // message is already the mapped, token-safe text runCloudflare
+          // relayed from cloudflareError -- never Cloudflare's raw body.
+          ctx.text(502, result.message);
+          return;
+        }
+        ctx.json(200, result.value);
+      },
+    },
+    {
+      method: 'POST',
+      path: '/api/cloudflare/purge',
+      handler: async ctx => {
+        const session = resolve(deps, ctx);
+        if (!session) {
+          return;
+        }
+        if (!hasCloudflare(session.cloudflareConfig)) {
+          ctx.text(404, 'Cloudflare is not configured for this profile.');
+          return;
+        }
+        const zoneId = session.cloudflareConfig.CLOUDFLARE_ZONE_ID!;
+        const token = session.cloudflareConfig.CLOUDFLARE_API_TOKEN!;
+        const result = await runCloudflare(session, 'purge cloudflare cache', zoneId, () =>
+          purgeEverything(deps.cloudflare!, zoneId, token)
+        );
+        if (!result.ok) {
+          ctx.text(502, result.message);
+          return;
+        }
+        ctx.json(200, result.value);
       },
     },
   ];

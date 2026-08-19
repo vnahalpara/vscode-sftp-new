@@ -49,6 +49,14 @@ export class ManagedSession {
   readonly id: string;
   readonly token: string;
   readonly profile: RedactedProfile;
+  // The two Cloudflare fields only -- deliberately NOT the whole raw
+  // sftp.json config (which also carries the SSH password/passphrase and,
+  // on a hop profile, the target's root_password). routes.ts is the only
+  // reader, for hasCloudflare()/zoneInfo()/purgeEverything() gating and
+  // calls. This must never be added to state()/SessionState: that object is
+  // serialised straight to the browser over GET /api/session and
+  // GET /api/host, the same contract RedactedProfile exists to uphold.
+  readonly cloudflareConfig: { CLOUDFLARE_ZONE_ID?: string; CLOUDFLARE_API_TOKEN?: string };
   readonly sse = new SseChannel();
   readonly activity = new ActivityLog();
 
@@ -74,12 +82,19 @@ export class ManagedSession {
   // index.ts, which is what /ws/logs authorizes against. Do not reintroduce a
   // parallel copy here.
 
-  constructor(profile: RedactedProfile, token: string, deps: SessionDeps, opts: SessionOpts) {
+  constructor(
+    profile: RedactedProfile,
+    token: string,
+    deps: SessionDeps,
+    opts: SessionOpts,
+    cloudflareConfig: { CLOUDFLARE_ZONE_ID?: string; CLOUDFLARE_API_TOKEN?: string } = {}
+  ) {
     this.id = profile.id;
     this.token = token;
     this.profile = profile;
     this._deps = deps;
     this._opts = opts;
+    this.cloudflareConfig = cloudflareConfig;
   }
 
   // Public on purpose: the ops layer (routes.ts, readOpsFor) runs this

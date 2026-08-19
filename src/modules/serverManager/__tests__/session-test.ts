@@ -15,6 +15,7 @@ const PROFILE: RedactedProfile = {
   workspace: '/ws',
   hasVpn: false,
   hasDatabase: false,
+  hasCloudflare: false,
 };
 
 const FACTS: HostFacts = {

@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
 import { targetOption, hasRootCreds } from './privilege';
+import { hasCloudflare } from './ops/cloudflare';
 
 export interface RedactedProfile {
   id: string;
@@ -13,6 +14,7 @@ export interface RedactedProfile {
   workspace: string;
   hasVpn: boolean;
   hasDatabase: boolean;
+  hasCloudflare: boolean;
 }
 
 // Two workspace folders can each hold a profile called "prod", so the folder
@@ -73,5 +75,11 @@ export function redactProfile(workspace: string, config: any): RedactedProfile {
     workspace,
     hasVpn: Boolean(config.vpn && config.vpn.configFile),
     hasDatabase: Array.isArray(config.database) && config.database.length > 0,
+    // A boolean only -- never CLOUDFLARE_ZONE_ID/CLOUDFLARE_API_TOKEN
+    // themselves. This object is serialised straight to the browser; the
+    // token lives only in the raw config, which never reaches this
+    // function's return value (this is an allowlist that builds a fresh
+    // object from named fields, not a denylist of secret keys to strip).
+    hasCloudflare: hasCloudflare(config),
   };
 }

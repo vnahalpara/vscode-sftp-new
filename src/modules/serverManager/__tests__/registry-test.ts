@@ -83,6 +83,7 @@ describe('redactProfile', () => {
       workspace: '/ws',
       hasVpn: true,
       hasDatabase: true,
+      hasCloudflare: false,
     });
   });
 
@@ -171,5 +172,26 @@ describe('redactProfile', () => {
     expect(out.port).toBe(22);
     expect(out.hasVpn).toBe(false);
     expect(out.hasDatabase).toBe(false);
+    expect(out.hasCloudflare).toBe(false);
+  });
+
+  it('exposes hasCloudflare but never the token', () => {
+    const TOKEN = 'cf-secret-token-value';
+    const redacted = redactProfile('/ws', {
+      ...CONFIG,
+      CLOUDFLARE_ZONE_ID: 'zone123',
+      CLOUDFLARE_API_TOKEN: TOKEN,
+    } as any);
+
+    expect(redacted.hasCloudflare).toBe(true);
+
+    const json = JSON.stringify(redacted);
+    expect(json).not.toContain(TOKEN);
+    expect(json).not.toContain('CLOUDFLARE_API_TOKEN');
+  });
+
+  it('hasCloudflare is false when only one field is set', () => {
+    expect(redactProfile('/ws', { ...CONFIG, CLOUDFLARE_ZONE_ID: 'z' } as any).hasCloudflare).toBe(false);
+    expect(redactProfile('/ws', { ...CONFIG, CLOUDFLARE_API_TOKEN: 't' } as any).hasCloudflare).toBe(false);
   });
 });
