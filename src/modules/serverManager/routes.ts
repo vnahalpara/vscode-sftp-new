@@ -58,7 +58,7 @@ export interface RouteDeps {
 const CAPABILITIES = {
   services: true,
   webserver: true,
-  logs: false,
+  logs: true,
   terminal: true,
   database: false,
 };

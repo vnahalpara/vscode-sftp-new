@@ -189,7 +189,7 @@ describe('buildRoutes', () => {
     expect(body.capabilities).toEqual({
       services: true,
       webserver: true,
-      logs: false,
+      logs: true,
       terminal: true,
       database: false,
     });
