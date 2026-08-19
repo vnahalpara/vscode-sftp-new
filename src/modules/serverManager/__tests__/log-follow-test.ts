@@ -54,12 +54,18 @@ class FakeSocket extends FakeEmitter implements WsLike {
   }
 }
 
+// A stand-in for ssh2's separate stderr readable -- the channel's stderr is
+// NOT interleaved into 'data', so a bridge that never reads it cannot see
+// why `sudo -n tail` died.
+class FakeStderr extends FakeEmitter {}
+
 class FakeStream extends FakeEmitter implements LogStream {
   ended = false;
   closed = false;
   paused = false;
   pauses = 0;
   resumes = 0;
+  stderr = new FakeStderr();
 
   end(): void {
     this.ended = true;
@@ -96,6 +102,8 @@ function deps(opts: {
   isPathAllowed?: (path: string) => boolean;
   execStream?: jest.Mock;
   acquire?: () => (() => void) | null;
+  user?: string;
+  host?: string;
 } = {}): { deps: LogFollowDeps; execStream: jest.Mock } {
   const execStream = opts.execStream || jest.fn(async (_cmd: string) => (await (opts.stream || Promise.resolve(new FakeStream()))) as LogStream);
   return {
@@ -104,6 +112,8 @@ function deps(opts: {
       // Uncapped by default: the cap has its own describe block below, and
       // every other test here is about a single follow.
       acquire: opts.acquire || (() => () => undefined),
+      user: opts.user || 'deploy',
+      host: opts.host || '10.0.0.5',
       execStream,
     },
     execStream,
@@ -620,5 +630,113 @@ describe('concurrency cap', () => {
 
     expect(socket.closeCode).toBe(1011);
     expect(limit.active('tok')).toBe(0);
+  });
+});
+
+// ssh2 puts a channel's stderr on a separate readable. Leaving it unread
+// costs twice: the most common real failure of this feature (no NOPASSWD
+// sudoers rule) becomes a generic "log stream closed" with the actual
+// diagnosis sitting unread, and those bytes sit outside the backpressure
+// scheme, holding channel window the log output does not get.
+describe('stderr', () => {
+  test('maps a sudo failure to the actionable hint, naming the privileged account', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    const { deps: d } = deps({ stream: Promise.resolve(stream), user: 'deploy', host: 'web1' });
+
+    bridgeLogFollow(d, socket, fileTarget());
+    await flush();
+
+    stream.stderr.emit('data', Buffer.from('sudo: a password is required\n'));
+    stream.emit('close');
+
+    expect(socket.closeCode).toBe(1011);
+    expect(socket.closeReason).toContain('deploy@web1');
+    expect(socket.closeReason).not.toBe('log stream closed');
+  });
+
+  test('surfaces a non-sudo stderr message verbatim rather than a generic close', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    const { deps: d } = deps({ stream: Promise.resolve(stream) });
+
+    bridgeLogFollow(d, socket, fileTarget());
+    await flush();
+
+    stream.stderr.emit(
+      'data',
+      Buffer.from("tail: cannot open '/var/log/nginx/access.log' for reading: No such file or directory\n")
+    );
+    stream.emit('close');
+
+    expect(socket.closeReason).toContain('cannot open');
+  });
+
+  test('reports the same diagnosis when the channel errors rather than closing', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    const { deps: d } = deps({ stream: Promise.resolve(stream) });
+
+    bridgeLogFollow(d, socket, fileTarget());
+    await flush();
+
+    stream.stderr.emit('data', Buffer.from('sudo: no tty present and no askpass program specified\n'));
+    stream.emit('error', new Error('connection reset'));
+
+    expect(socket.closeCode).toBe(1011);
+    expect(socket.closeReason).not.toBe('log channel error');
+  });
+
+  test('falls back to the generic reason when stderr said nothing', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    const { deps: d } = deps({ stream: Promise.resolve(stream) });
+
+    bridgeLogFollow(d, socket, fileTarget());
+    await flush();
+
+    stream.emit('close');
+
+    expect(socket.closeReason).toBe('log stream closed');
+  });
+
+  test('a long stderr reason still fits a close frame', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    const { deps: d } = deps({ stream: Promise.resolve(stream) });
+
+    bridgeLogFollow(d, socket, fileTarget());
+    await flush();
+
+    stream.stderr.emit('data', Buffer.from('x'.repeat(9000)));
+    stream.emit('close');
+
+    expect(Buffer.byteLength(socket.closeReason || '', 'utf8')).toBeLessThanOrEqual(123);
+  });
+
+  test('stderr is never forwarded to the client as log output', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    const { deps: d } = deps({ stream: Promise.resolve(stream) });
+
+    bridgeLogFollow(d, socket, fileTarget());
+    await flush();
+
+    stream.stderr.emit('data', Buffer.from('sudo: a password is required\n'));
+
+    expect(socket.sent).toEqual([]);
+  });
+
+  test('a channel with no stderr readable at all still tears down cleanly', async () => {
+    const stream = new FakeStream();
+    delete (stream as any).stderr;
+    const socket = new FakeSocket();
+    const { deps: d } = deps({ stream: Promise.resolve(stream) });
+
+    bridgeLogFollow(d, socket, fileTarget());
+    await flush();
+
+    expect(() => stream.emit('close')).not.toThrow();
+    expect(socket.closeReason).toBe('log stream closed');
   });
 });

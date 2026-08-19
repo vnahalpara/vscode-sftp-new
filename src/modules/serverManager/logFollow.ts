@@ -30,6 +30,7 @@
 //   There is no allowlist for units -- validating the unit name IS the whole
 //   gate, same as journalCommand/journalFollowCommand already require for a
 //   one-shot read.
+import { sudoHint } from './activity';
 import {
   followCommand,
   isLogFilePath,
@@ -55,12 +56,33 @@ export type LogTarget = { kind: 'file'; path: string } | { kind: 'unit'; unit: s
 // BridgeStream (release + flow control + the three events) and nothing more:
 // this bridge is read-only, so unlike ShellStream there is no
 // write()/setWindow() here.
-export interface LogStream extends BridgeStream {}
+export interface LogStream extends BridgeStream {
+  // ssh2 delivers a channel's stderr on a SEPARATE readable hanging off the
+  // channel, not interleaved into 'data'. Optional only because the type is
+  // structural and a test fake may not need one; every real channel
+  // (sshClient.ts's execStream hands back the raw ssh2 ClientChannel) has it.
+  // Leaving it unread is not neutral -- see attachStderr below.
+  stderr?: LogStderr;
+}
+
+export interface LogStderr {
+  on(event: 'data', cb: (chunk: Buffer | string) => void): void;
+  on(event: 'error', cb: (err: Error) => void): void;
+}
 
 export interface LogFollowDeps {
   // True when `path` is in the CALLING SESSION's own allowlist. Must be a
   // closure over one specific token/session -- see the module comment above.
   isPathAllowed(path: string): boolean;
+  // The account privileged commands actually run as, and the host they run
+  // on -- exactly what routes.ts passes to sudoHint via OpsDeps.user/host.
+  // Only used to phrase a failure (see closeReason below): a sudo hint that
+  // names the wrong account tells the operator to grant sudo to the wrong
+  // user, so this must be session.profile.privilegedAs, never the session
+  // username, since followCommand/journalFollowCommand run over the
+  // privileged lane.
+  user: string;
+  host: string;
   // Reserves one of this session's concurrent-follow slots, returning the
   // function that gives it back -- or null when the session is already at
   // its cap, in which case this bridge refuses the open rather than queueing
@@ -149,6 +171,46 @@ export function createFollowLimit(max: number = MAX_CONCURRENT_FOLLOWS): FollowL
   };
 }
 
+// How much stderr is kept for diagnosis. Only the first ~123 BYTES can ever
+// reach the client (a close frame's whole reason budget), but sudoHint has
+// to pattern-match over more than that, and the interesting line is not
+// always the first one -- `sudo -n` writes its own failure after whatever
+// the shell already said. A couple of KB is far more than any of these
+// commands produces and is bounded, which matters because this is remote
+// output arriving on a channel that has no other reader.
+const MAX_STDERR_CHARS = 2048;
+
+// Consume the channel's stderr. This is not merely nice diagnostics:
+//
+//   1. The single most common real failure of this feature -- no NOPASSWD
+//      sudoers rule -- produces NOTHING on stdout. `sudo -n tail ...` writes
+//      "sudo: a password is required" to stderr and exits, so the bridge
+//      sees only a spontaneous channel close and, without this, reports a
+//      generic "log stream closed" while the precise, fixable diagnosis sits
+//      unread on the channel. Same for a file rotated away between discovery
+//      and follow ("tail: cannot open ... No such file or directory").
+//   2. An UNREAD stderr shares the ssh2 channel's flow-control window with
+//      'data'. Never reading it puts those bytes outside the backpressure
+//      scheme entirely -- ssh2 buffers them in this process, and the window
+//      they occupy is window the log output does not get.
+//
+// Failures to attach are swallowed: a channel that is already dead cannot
+// tell us anything, and it must not take the follow down with it.
+function attachStderr(stream: LogStream, append: (text: string) => void): void {
+  const stderr = stream.stderr;
+  if (!stderr) {
+    return;
+  }
+  try {
+    stderr.on('data', chunk => append(typeof chunk === 'string' ? chunk : chunk.toString('utf8')));
+    // A readable that emits 'error' with no listener throws out of the event
+    // loop -- an extension host crash. Same reasoning as releaseStream's.
+    stderr.on('error', () => undefined);
+  } catch (error) {
+    // Nothing to do; the follow itself is unaffected.
+  }
+}
+
 // Builds the command for `target`, having already proved it authorized to
 // run. Returns null (having already torn the socket down with a reason) for
 // anything that fails validation, so the caller can simply bail out on a
@@ -187,6 +249,26 @@ export function bridgeLogFollow(deps: LogFollowDeps, socket: WsLike, target: Log
   let stream: LogStream | null = null;
   let releaseSlot: (() => void) | null = null;
   let torndown = false;
+  let stderrText = '';
+
+  // What actually killed the follow, in the client's own close frame.
+  // Without this, the commonest real failure -- `sudo -n` refusing for want
+  // of a NOPASSWD rule -- reaches the user as the generic `fallback`, while
+  // the fixable diagnosis stays on an unread stderr. sudoHint is the SAME
+  // mapping routes.ts uses for the HTTP surface (activity.ts), not a second
+  // one that could disagree with it about what a sudo failure looks like or
+  // what to advise; raw stderr is the fallback when it is not a sudo
+  // failure (a rotated-away file, a missing journalctl). teardown() applies
+  // truncateReason, so a hint longer than a close frame's 123-byte budget is
+  // cut there rather than throwing -- the first 123 bytes still name the
+  // account and the problem.
+  function closeReason(fallback: string): string {
+    const text = stderrText.trim();
+    if (!text) {
+      return fallback;
+    }
+    return sudoHint(text, deps.user, deps.host) || text;
+  }
 
   // Both directions end here, guarded by `torndown` so it does not matter
   // which side notices first (socket close vs. channel close/error) --
@@ -283,6 +365,11 @@ export function bridgeLogFollow(deps: LogFollowDeps, socket: WsLike, target: Log
       // hazard as a flooding shell, not a different one, so it gets the same
       // code rather than a second implementation of it.
       forwardOutput(openedStream, socket, () => torndown);
+      attachStderr(openedStream, text => {
+        if (stderrText.length < MAX_STDERR_CHARS) {
+          stderrText += text;
+        }
+      });
       // Unlike an interactive shell, `tail -F`/`journalctl -f` have no
       // `exit` a user types -- the ONLY ways this channel ever closes are
       // this bridge tearing it down (already 1000, via teardown() above,
@@ -295,8 +382,8 @@ export function bridgeLogFollow(deps: LogFollowDeps, socket: WsLike, target: Log
       // 'error' below, rather than the misleading "session ended cleanly"
       // 1000 a literal copy of terminal.ts's `stream.on('close', ... 1000)`
       // would send.
-      openedStream.on('close', () => teardown(CLOSE_INTERNAL_ERROR, 'log stream closed'));
-      openedStream.on('error', () => teardown(CLOSE_INTERNAL_ERROR, 'log channel error'));
+      openedStream.on('close', () => teardown(CLOSE_INTERNAL_ERROR, closeReason('log stream closed')));
+      openedStream.on('error', () => teardown(CLOSE_INTERNAL_ERROR, closeReason('log channel error')));
     },
     error => {
       // No stream was ever assigned, so teardown() only needs to close the

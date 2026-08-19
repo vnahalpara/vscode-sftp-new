@@ -367,6 +367,12 @@ function onLogs(
     {
       isPathAllowed: path => isLogPathAllowed(token, path),
       acquire: () => followLimit.acquire(token),
+      // privilegedAs, not profile.username: followCommand/journalFollowCommand
+      // both carry `sudo -n` and run over privilegedTransport, so this is the
+      // account whose sudoers rule a "sudo: a password is required" on stderr
+      // is actually about. Same pairing routes.ts's opsFor() uses.
+      user: session!.profile.privilegedAs,
+      host: session!.profile.host,
       execStream: cmd => session!.privilegedTransport.execStream!(cmd),
     },
     ws,

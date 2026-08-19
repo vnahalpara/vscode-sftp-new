@@ -138,6 +138,8 @@ async function follow(
       // Uncapped: this file is about the allowlist seam. The concurrency
       // cap has its own tests in log-follow-test.ts.
       acquire: () => () => undefined,
+      user: 'deploy',
+      host: '10.0.0.5',
       execStream,
     },
     socket,
