@@ -35,7 +35,7 @@ const configScheme = {
     type: Joi.string().valid('wireguard'),
     configFile: Joi.string().required(),
     wireproxyPath: Joi.string(),
-    socksPort: Joi.number().integer(),
+    socksPort: Joi.number().integer().min(1).max(65535),
     healthCheckTimeout: Joi.number().integer(),
   },
   ssh_prefix: Joi.string(),

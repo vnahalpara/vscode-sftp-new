@@ -125,6 +125,15 @@ export default checkCommand({
     // only ever called once per terminal, so a second release() here would
     // double-release and prematurely kill a tunnel a still-open terminal
     // elsewhere is relying on.
+    //
+    // Worth knowing what that leans on, though: with "sftp.vpn.keepAlive" at
+    // its default of true, release() never kills anything, so disposeAll() is
+    // the *only* teardown in the normal path -- and it is best effort. VS Code
+    // skips deactivate() entirely if the extension host crashes or is force
+    // quit, in which case wireproxy is left running (it is spawned
+    // non-detached, so it dies with the host, but nothing tears down its
+    // marker). That leak is bounded: the next run recognises the marker and
+    // reaps or adopts the tunnel rather than accumulating another.
     if (remoteConfig.vpn) {
       const sub = vscode.window.onDidCloseTerminal(closed => {
         if (closed === terminal) {

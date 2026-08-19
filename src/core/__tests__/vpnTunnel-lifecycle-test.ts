@@ -248,6 +248,22 @@ describe('keepAlive', () => {
   });
 });
 
+describe('storage directory', () => {
+  test('refuses to work at all until init() supplies one', async () => {
+    // The marker directory is the root of trust for adoption: a marker there
+    // is the only thing distinguishing "reuse our tunnel" from "route SSH
+    // credentials through a stranger's proxy". Defaulting it to os.tmpdir(),
+    // which every account on the machine can write to, would let anyone plant
+    // one. Refusing outright is structural; relying on call ordering is not.
+    jest.resetModules();
+    // tslint:disable-next-line:no-var-requires
+    const mod: VpnTunnel = require('../vpnTunnel');
+    loaded = mod;
+
+    expect(() => mod.markerPathFor({ configFile: '/nowhere/wg0.conf' })).toThrow(/init/);
+  });
+});
+
 describe('reaping a hung tunnel', () => {
   test('kills our own hung tunnel and removes its marker before starting the replacement', async () => {
     const killed: number[] = [];
@@ -344,6 +360,35 @@ describe('reaping a hung tunnel', () => {
 
     expect(port).not.toBe(h.derivedPort);
     expect(h.state.spawns).toBe(1);
+  });
+
+  test('a signal that does not free the port leaves the marker in place', async () => {
+    // EPERM, or a process ignoring SIGTERM. Removing the marker here would
+    // strand the port anonymously: no future run could identify the process
+    // holding it, let alone reap it -- the exact leak reaping exists to stop.
+    // An explicit port makes the failure observable, since a pinned port is
+    // never silently relocated.
+    const killed: number[] = [];
+    const h = await harness({
+      isPidAlive: () => true,
+      speaksSocks5: async () => false,
+      killPid: pid => {
+        killed.push(pid);
+        // Note what is missing: the occupying server is never closed.
+      },
+    });
+    const pinned = await freePort();
+    h.vpn.socksPort = pinned;
+    await occupy(pinned);
+    plantMarker(h, { port: pinned, pid: OLD_PID, startedAt: Date.now() });
+
+    await expect(h.mod.acquire(h.vpn)).rejects.toThrow(/still held/);
+
+    expect(killed).toEqual([OLD_PID]);
+    expect(h.state.spawns).toBe(0);
+    const marker = JSON.parse(fs.readFileSync(h.mod.markerPathFor(h.vpn), 'utf8'));
+    expect(marker.pid).toBe(OLD_PID);
+    expect(marker.port).toBe(pinned);
   });
 
   test('a marker naming a dead pid is left alone -- no kill attempted', async () => {

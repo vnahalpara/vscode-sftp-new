@@ -47,8 +47,20 @@ interface TunnelMarker {
 
 const DEFAULT_HEALTHCHECK_MS = 15000;
 
-// Resolved writable directory for merged configs; set from activate().
-let storageDir = os.tmpdir();
+/**
+ * The writable directory init() gave us, for merged configs and markers.
+ * Undefined until then, and deliberately *not* defaulted to os.tmpdir(): this
+ * directory is the root of trust for adoption. The marker file inside it is
+ * the only thing standing between "reuse the tunnel already on this port" and
+ * "route the user's SSH credentials through a stranger's proxy", and a
+ * world-writable shared path cannot carry that weight -- anyone with an
+ * account on the machine could plant a marker there. Production always calls
+ * init() (extension.ts, during activate, with the extension's own
+ * globalStoragePath), so the guards keyed off this never fire in practice;
+ * they exist so a future caller that forgets gets a hard failure instead of a
+ * silently downgraded trust boundary.
+ */
+let storageDir: string | undefined;
 // The user's port-range setting, as typed. Parsed (and defaulted) per use.
 let portRangeSetting: string | undefined;
 // Mirrors "sftp.vpn.keepAlive": leave the process running across a release()
@@ -63,7 +75,7 @@ let keepAliveSetting = true;
 const tunnels = new Map<string, Tunnel | Promise<Tunnel>>();
 
 export function init(dir: string, options: { portRange?: string; keepAlive?: boolean } = {}) {
-  storageDir = dir;
+  storageDir = typeof dir === 'string' && dir.length > 0 ? dir : undefined;
   portRangeSetting = options.portRange;
   keepAliveSetting = options.keepAlive !== false;
 }
@@ -150,8 +162,11 @@ const REAP_PROBE_DELAY_MS = 100;
 // A port we could actually connect to or bind: whole, positive, in range.
 // Deliberately wider than the MIN_PORT..MAX_PORT range setting, since an
 // explicit vpn.socksPort or a marker may legitimately name a low port.
-function isUsablePort(port: number): boolean {
-  return Number.isInteger(port) && port > 0 && port <= MAX_PORT;
+// Accepts `undefined` (and, via the typeof, anything else JSON can hold) so
+// callers holding an optional or unvalidated port can funnel through it
+// instead of hand-rolling the same check.
+function isUsablePort(port: number | undefined): port is number {
+  return typeof port === 'number' && Number.isInteger(port) && port > 0 && port <= MAX_PORT;
 }
 
 function delay(ms: number): Promise<void> {
@@ -294,6 +309,14 @@ export function __resetDeps(): void {
 }
 
 function vpnDir(): string {
+  // See storageDir's comment: without a directory of our own there is nowhere
+  // to keep a merged config (it embeds the WireGuard private key) or a marker
+  // anyone else could not forge, so refusing to run is the only honest answer.
+  if (!storageDir) {
+    throw new Error(
+      'VPN tunnel storage directory is not configured; vpnTunnel.init() must run first.'
+    );
+  }
   return path.join(storageDir, 'vpn');
 }
 
@@ -394,6 +417,11 @@ type OwnedPortOutcome =
  * -- the latter is ours to clean up rather than route around.
  */
 async function classifyOwnedPort(key: string, port: number): Promise<OwnedPortOutcome> {
+  // No storage directory of our own means no marker we can trust, and a
+  // marker is the only thing that makes either answer below defensible.
+  if (!storageDir) {
+    return { kind: 'none' };
+  }
   const marker = readMarker(key);
   if (!marker || marker.port !== port || !deps.isPidAlive(marker.pid)) {
     return { kind: 'none' };
@@ -633,7 +661,10 @@ async function startTunnel(vpn: VpnOption, key: string, port: number): Promise<T
  * that a port someone else took can never fail the connection outright.
  */
 async function openTunnel(vpn: VpnOption, key: string): Promise<Tunnel> {
-  const explicit = vpn.socksPort && vpn.socksPort > 0 ? vpn.socksPort : undefined;
+  // vpn.socksPort comes straight out of a hand-edited sftp.json, so run it
+  // through the same validity check as every other port here rather than
+  // handing 70000 (or 1.5, or -1) to net.connect and surfacing its raw throw.
+  const explicit = isUsablePort(vpn.socksPort) ? vpn.socksPort : undefined;
   const port =
     explicit !== undefined ? explicit : derivePort(key, parsePortRange(portRangeSetting));
 
@@ -668,16 +699,31 @@ async function openTunnel(vpn: VpnOption, key: string): Promise<Tunnel> {
       } catch (_e) {
         /* already gone */
       }
-      removeMarker(key);
-      if (explicit === undefined && !(await waitForPortFree(port))) {
-        // The signal hasn't freed the port yet (or the process ignored it).
-        // Reaping is best-effort: falling back exactly as if a stranger held
-        // the port keeps the connection working now, at the cost of the
-        // stable derived port until the next successful reap or restart.
+      // Unconditionally, explicit port or not: process.kill() returning says
+      // only that the signal was delivered, not that the socket is closed, so
+      // without this wait the replacement races the corpse for the port and
+      // loses. (Skipping the wait for an explicit port used to be justified
+      // as avoiding a "relocation" -- waiting relocates nothing.)
+      if (!(await waitForPortFree(port))) {
+        // The signal did not free the port: ignored, still shutting down, or
+        // never deliverable at all (EPERM -- not our process after all). The
+        // marker deliberately stays. It is the only handle any future run has
+        // on this process, and dropping it while the process still holds the
+        // port would strand that port anonymously for the rest of the
+        // machine's uptime -- precisely the leak this branch exists to stop.
+        if (explicit !== undefined) {
+          throw new Error(
+            `VPN SOCKS port ${port} is still held after signalling pid ` +
+              `${outcome.marker.pid}, and "vpn.socksPort" pins the tunnel to it. ` +
+              `Free the port, or change "vpn.socksPort" in your sftp.json.`
+          );
+        }
+        // A derived port is a convenience, not a requirement, so step aside.
         return startTunnel(vpn, key, await getFreePort());
       }
-      // Either an explicit port (never silently relocated, so we retry it
-      // below regardless) or the wait confirmed the port is free again.
+      // The port is free again, so the process the marker described is gone
+      // and its claim goes with it.
+      removeMarker(key);
     } else if (explicit === undefined) {
       // Someone else's port. Step aside rather than fight for it -- the
       // deterministic port is a convenience, not a requirement.
@@ -812,14 +858,29 @@ export function release(vpn: VpnOption): void {
     });
 }
 
-/** Kill every tracked tunnel (extension deactivation). */
+/**
+ * Kill every tracked tunnel (extension deactivation).
+ *
+ * With "sftp.vpn.keepAlive" on -- the default -- this is the only teardown in
+ * the normal path, so it kills synchronously. deactivate() returns to a host
+ * that may exit immediately afterwards, and work deferred to a microtask
+ * after that return can simply never run. Only a tunnel still mid-start has
+ * to be waited on, and that one has no pid to signal yet anyway.
+ */
 export function disposeAll(): void {
   tunnels.forEach(entry => {
-    Promise.resolve(entry)
-      .then(killTunnel)
-      .catch(() => {
+    const pending = entry as Promise<Tunnel>;
+    if (typeof pending.then === 'function') {
+      pending.then(killTunnel).catch(() => {
         /* ignore */
       });
+      return;
+    }
+    try {
+      killTunnel(entry as Tunnel);
+    } catch (_e) {
+      /* best effort: one tunnel failing must not skip the rest */
+    }
   });
   tunnels.clear();
 }

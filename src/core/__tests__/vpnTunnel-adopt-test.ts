@@ -260,6 +260,55 @@ describe('tunnel adoption', () => {
     expect(h.state.spawns).toBe(0);
     expect(fs.existsSync(h.mod.markerPathFor(h.vpn))).toBe(false);
   });
+
+  test('an out-of-range vpn.socksPort falls back to the derived port', async () => {
+    // 70000 is not a port. It used to reach net.connect() and surface as a raw
+    // Node throw on the connection path.
+    const h = await harness({});
+    h.vpn.socksPort = 70000;
+
+    await expect(h.mod.acquire(h.vpn)).resolves.toBe(h.derivedPort);
+  });
+});
+
+describe('marker shape validation', () => {
+  // Every row is a marker that parses as JSON but is not a marker. Adoption
+  // requires the marker's port to match and its pid to be a real pid; a shape
+  // check that let any of these through would hand a hand-edited or truncated
+  // file the authority to say "that listener is ours".
+  //
+  // The pid-shaped rows are the ones with teeth: their port *does* match, so
+  // with the shape check gone they reach isPidAlive() and the probe -- both
+  // of which say yes here -- and the tunnel gets adopted.
+  const cases: Array<[string, any]> = [
+    ['a port that is not a number', { port: 'abc', pid: 4242, startedAt: 0 }],
+    ['a negative port', { port: -1, pid: 4242, startedAt: 0 }],
+    ['a fractional port', { port: 1.5, pid: 4242, startedAt: 0 }],
+    ['a port above 65535', { port: 70000, pid: 4242, startedAt: 0 }],
+    ['a pid that is not a number', { pid: 'x' }],
+    ['a negative pid', { pid: -1 }],
+    ['a fractional pid', { pid: 1.5 }],
+    ['a zero pid', { pid: 0 }],
+    ['no fields at all', {}],
+    ['a JSON null', null],
+    ['a JSON array', []],
+  ];
+
+  test.each(cases)('does NOT adopt on %s', async (_name, shape) => {
+    const h = await harness({ isPidAlive: () => true, speaksSocks5: async () => true });
+    await occupy(h.derivedPort);
+    // The pid-shaped rows carry no port of their own, so give them the one
+    // that matches: without it they would be rejected for the wrong reason.
+    const marker =
+      shape && !Array.isArray(shape) && shape.pid !== undefined && shape.port === undefined
+        ? { ...shape, port: h.derivedPort, startedAt: Date.now() }
+        : shape;
+    plantMarker(h, marker);
+
+    const port = await h.mod.acquire(h.vpn);
+    expect(port).not.toBe(h.derivedPort);
+    expect(h.state.spawns).toBe(1);
+  });
 });
 
 describe('ownership marker', () => {
@@ -295,6 +344,48 @@ describe('ownership marker', () => {
 
     expect(killed).toEqual([FAKE_PID]);
     expect(fs.existsSync(h.mod.markerPathFor(h.vpn))).toBe(false);
+  });
+
+  test('releasing an adopted tunnel does not signal a pid the marker no longer names', async () => {
+    // We hold no child handle on an adopted tunnel, only a number someone
+    // wrote down. Re-reading the marker at release time is the last check
+    // before a SIGTERM: if it has changed, the pid we remember may since have
+    // been recycled onto a program that has nothing to do with us.
+    const killed: number[] = [];
+    const h = await harness({
+      isPidAlive: () => true,
+      speaksSocks5: async () => true,
+      killPid: pid => killed.push(pid),
+    });
+    await occupy(h.derivedPort);
+    plantMarker(h, { port: h.derivedPort, pid: FAKE_PID, startedAt: Date.now() });
+
+    await h.mod.acquire(h.vpn);
+    plantMarker(h, { port: h.derivedPort, pid: FAKE_PID + 1, startedAt: Date.now() });
+
+    h.mod.release(h.vpn);
+    await settle();
+
+    expect(killed).toEqual([]);
+  });
+
+  test('releasing an adopted tunnel does not signal once the marker is gone', async () => {
+    const killed: number[] = [];
+    const h = await harness({
+      isPidAlive: () => true,
+      speaksSocks5: async () => true,
+      killPid: pid => killed.push(pid),
+    });
+    await occupy(h.derivedPort);
+    plantMarker(h, { port: h.derivedPort, pid: FAKE_PID, startedAt: Date.now() });
+
+    await h.mod.acquire(h.vpn);
+    fs.unlinkSync(h.mod.markerPathFor(h.vpn));
+
+    h.mod.release(h.vpn);
+    await settle();
+
+    expect(killed).toEqual([]);
   });
 });
 
