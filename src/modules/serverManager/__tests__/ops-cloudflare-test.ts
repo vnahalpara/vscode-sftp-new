@@ -134,6 +134,65 @@ test('a token fragmented by inserted or substituted delimiters is still caught, 
   }
 });
 
+// Re-review finding (HIGH): the exact-match check computed contamination
+// against the RAW (wire-format) body, then built `detail` from the DECODED
+// message text -- two different strings. JSON.stringify escapes control
+// characters (a real newline becomes the two characters '\' and 'n'), so
+// checking the pre-parse body kept those escape-sequence letters where the
+// post-parse text had a real control character instead -- the alignment
+// the whole comparison depends on broke, contamination went undetected,
+// and the decoded message (fully readable, just line-broken) reached the
+// output untouched. The fix builds the exact decoded text first and tests
+// THAT string, so there is no encoding gap left for a bypass to hide in.
+test('a token fragmented by JSON-escaped control-character delimiters is still caught', async () => {
+  const tokenSkeleton = alnumSkeleton(TOKEN);
+  const delimiters = ['\n', '\t', '\r', '\r\n', '\b', '\f'];
+  for (const delimiter of delimiters) {
+    const body = JSON.stringify({
+      success: false,
+      errors: [{ code: 1, message: 'bad token ' + TOKEN.split('-').join(delimiter) }],
+    });
+    const msg = cloudflareError(403, body, TOKEN);
+    expect(msg).not.toContain(TOKEN);
+    expect(alnumSkeleton(msg)).not.toContain(tokenSkeleton);
+    const d = deps(403, body);
+    await expect(purgeEverything(d, 'z1', TOKEN)).rejects.toThrow(
+      expect.not.stringContaining(TOKEN) as any
+    );
+  }
+});
+
+// Re-review finding (MEDIUM): the earlier fix called the skeleton helper on
+// the raw `body` argument outside cloudflareError's try/catch, so a
+// non-string body (null/undefined/a number -- a contract violation this
+// module's TS signature disallows but a JS caller can still commit) crashed
+// with a raw TypeError, breaking the function's own documented "never
+// throws" promise. It must degrade to a status-only message instead.
+test('cloudflareError never throws even when body is not actually a string', () => {
+  expect(() => cloudflareError(500, null as any, TOKEN)).not.toThrow();
+  expect(cloudflareError(500, null as any, TOKEN)).toMatch(/500/);
+  expect(() => cloudflareError(500, undefined as any, TOKEN)).not.toThrow();
+  expect(cloudflareError(500, undefined as any, TOKEN)).toMatch(/500/);
+  expect(() => cloudflareError(500, 12345 as any, TOKEN)).not.toThrow();
+  expect(cloudflareError(500, 12345 as any, TOKEN)).toMatch(/500/);
+});
+
+// Re-review finding (LOW): without a minimum length floor, a short token
+// (as short as a single character) matches almost any English text once
+// reduced to its alphanumeric skeleton, silently blacking out every
+// diagnostic detail Cloudflare sends -- a security guard turning into a
+// diagnostics blackout. Real Cloudflare tokens are 40 characters, far
+// above the floor, so this costs nothing against the real threat.
+test('a degenerate short token does not black out an unrelated diagnostic message', () => {
+  const shortToken = 'x';
+  const body = JSON.stringify({
+    success: false,
+    errors: [{ code: 1, message: 'The zone configuration is invalid, please check your settings' }],
+  });
+  const msg = cloudflareError(403, body, shortToken);
+  expect(msg).toMatch(/zone configuration is invalid/);
+});
+
 // Review finding (LOW): a 200/success:true body missing `result` (e.g. a
 // gateway or proxy rewriting the body while leaving success:true intact)
 // used to throw a raw TypeError from inside zoneInfo, bypassing

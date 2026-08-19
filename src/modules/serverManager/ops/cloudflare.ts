@@ -50,28 +50,52 @@ export function hasCloudflare(config: any): boolean {
 //
 // Layer 1 -- exact match, used whenever the caller has the real token in
 // scope (every caller in this file does; see checkResponse below). Reduce
-// both the token and the response body to their ALPHANUMERIC SKELETON --
-// strip every character that isn't a letter or digit, deliberately
-// including `-` and `_` even though those are themselves valid token
-// characters -- then check whether the token's skeleton appears in the
-// body's skeleton. Stripping `-`/`_` too (not just "everything outside the
-// token charset") is the part that matters: a token's own hyphens/
-// underscores are exactly the characters most likely to get swapped for a
-// delimiter by something reformatting text (e.g. `token.split('-').join('
-// ')`), and keeping them in the "preserved" set would silently break
-// alignment between the two sides the moment that happens -- the token
-// would still be sitting there in the message, fully readable with spaces
-// instead of hyphens, while an exact substring check against the
-// unmodified token quietly reports no match. Reducing to letters-and-
-// digits-only means it doesn't matter whether a separator was *inserted*
-// (a stray space/colon/line-wrap) or *substituted* (a hyphen replaced by
-// something else) -- either way the two skeletons still line up. If the
-// token's skeleton shows up anywhere in the body's skeleton at all -- as a
-// `message` substring, as an unrelated top-level field, as a JSON *key*,
-// nested arbitrarily deep -- the whole body is treated as contaminated and
-// NO text from it is used; only the fixed-vocabulary message for the
-// status code is returned. This is the only layer that makes token leakage
+// both the token and the CANDIDATE OUTPUT TEXT to their ALPHANUMERIC
+// SKELETON -- strip every character that isn't a letter or digit,
+// deliberately including `-` and `_` even though those are themselves valid
+// token characters -- then check whether the token's skeleton appears in
+// the candidate's skeleton.
+//
+// Two things about "candidate output text" matter, both learned from a
+// guard that got defeated twice:
+//
+// 1. Stripping `-`/`_` too (not just "everything outside the token
+//    charset") closes substitution, not just insertion: a token's own
+//    hyphens/underscores are exactly the characters most likely to get
+//    swapped for a delimiter by something reformatting text (e.g.
+//    `token.split('-').join(' ')`), and keeping them in the "preserved"
+//    set would silently break alignment the moment that happens -- the
+//    token would still be sitting there, fully readable with spaces
+//    instead of hyphens, while an exact substring check against the
+//    unmodified token quietly reports no match.
+// 2. The candidate MUST be the exact string this module is about to emit
+//    -- i.e. the DECODED `message` text, built the same way `detail`
+//    below is built -- never the raw wire-format `body`. `JSON.stringify`
+//    escapes control characters (a real newline becomes the two
+//    characters `\` and `n`); checking the pre-parse body let a token
+//    survive that escaping undetected, because the escaped `\n` in the
+//    wire body doesn't line up character-for-character with the real
+//    newline in the decoded string that actually reaches the activity
+//    log/browser -- stripping non-alphanumerics from the *escaped* form
+//    keeps a stray `n`, `t`, `r`, `b` or `f` that the *decoded* form never
+//    had, and the alignment the whole comparison depends on breaks.
+//    `cloudflareError` below builds the exact detail text first, then
+//    tests THAT -- there is no transformation left between "what we
+//    checked" and "what we emit" for a bypass to hide in.
+//
+// If the token's skeleton shows up in that candidate at all, the whole
+// detail is dropped -- only the fixed-vocabulary message for the status
+// code is returned. This is the only layer that makes token leakage
 // structurally impossible rather than merely unlikely.
+//
+// A minimum skeleton length gates the match: without one, a short token
+// (a one- or two-character skeleton) matches almost any English text and
+// silently blacks out every diagnostic detail Cloudflare sends -- fails
+// safe, but destructively. Real Cloudflare API tokens are 40 base64url-ish
+// characters, so a floor far below that (chosen well under the shortest
+// realistic token skeleton, including one built mostly of `-`/`_`) costs
+// nothing against the real threat while ending that over-redaction for
+// short/degenerate inputs such as tests.
 //
 // Layer 2 -- shape-based fallback, used only when no token was supplied
 // (i.e. Layer 1 could not run). A run of 20+ token-charset characters gets
@@ -82,12 +106,20 @@ export function hasCloudflare(config: any): boolean {
 // reason, invoke `cloudflareError` without the token in hand.
 const NON_ALPHANUMERIC_RE = /[^A-Za-z0-9]/g;
 function alphanumericSkeleton(text: string): string {
-  return text.replace(NON_ALPHANUMERIC_RE, '');
+  // Defensive against non-string input (see the guard at the top of
+  // cloudflareError for why that can happen despite the `string` type):
+  // this helper must never throw either, since it is the thing that would
+  // throw first.
+  return typeof text === 'string' ? text.replace(NON_ALPHANUMERIC_RE, '') : '';
 }
 
-function bodyContainsToken(body: string, token: string): boolean {
+const MIN_TOKEN_SKELETON_LENGTH = 12;
+function candidateContainsToken(candidateText: string, token: string): boolean {
   const tokenSkeleton = alphanumericSkeleton(token);
-  return tokenSkeleton.length > 0 && alphanumericSkeleton(body).includes(tokenSkeleton);
+  if (tokenSkeleton.length < MIN_TOKEN_SKELETON_LENGTH) {
+    return false;
+  }
+  return alphanumericSkeleton(candidateText).includes(tokenSkeleton);
 }
 
 const TOKEN_SHAPED_RUN_RE = /[A-Za-z0-9_-]{20,}/g;
@@ -98,7 +130,9 @@ function scrub(text: string): string {
 /**
  * Turn an HTTP status + raw response body into an actionable message.
  *
- * This never throws, and it never interpolates raw response text into the
+ * This never throws -- including when `body` is not actually a string, a
+ * contract violation this module's own types disallow but a JS caller can
+ * still commit -- and it never interpolates raw response text into the
  * result -- every branch below is built from a fixed vocabulary plus
  * Cloudflare's numeric `code`s plus, at most, a `message` detail that has
  * been proven (Layer 1 above) or scrubbed (Layer 2) not to carry the token.
@@ -107,21 +141,26 @@ function scrub(text: string): string {
  * weaker shape-based fallback.
  */
 export function cloudflareError(status: number, body: string, token?: string): string {
+  const safeBody = typeof body === 'string' ? body : '';
   let codes: number[] = [];
   let detail = '';
-  const contaminated = token ? bodyContainsToken(body, token) : false;
   try {
-    const parsed = JSON.parse(body);
+    const parsed = JSON.parse(safeBody);
     if (parsed && Array.isArray(parsed.errors)) {
       codes = parsed.errors
         .map((e: any) => e && e.code)
         .filter((c: any) => typeof c === 'number');
-      if (!contaminated) {
-        const messages = parsed.errors
-          .map((e: any) => e && typeof e.message === 'string' ? e.message : '')
-          .filter(Boolean);
-        if (messages.length) {
-          detail = ` (${scrub(messages.join('; '))})`;
+      const messages = parsed.errors
+        .map((e: any) => e && typeof e.message === 'string' ? e.message : '')
+        .filter(Boolean);
+      if (messages.length) {
+        // This is the exact text that would be emitted below, decoded --
+        // build it, THEN decide whether it's safe. Checking anything else
+        // (the raw body, a differently-derived string) reopens the gap
+        // Layer 1's doc comment above describes.
+        const rawDetailText = messages.join('; ');
+        if (!(token && candidateContainsToken(rawDetailText, token))) {
+          detail = ` (${scrub(rawDetailText)})`;
         }
       }
     }
