@@ -18,7 +18,7 @@ import { buildRoutes, BuiltRoutes } from '../routes';
 import { matchRoute, Route } from '../router';
 import { Ctx, Handler } from '../httpServer';
 import { bridgeLogFollow, LogStream } from '../logFollow';
-import { WsLike } from '../terminal';
+import { WsLike } from '../wsBridge';
 import { LOG_DISCOVERY_TEXT } from '../__fixtures__/ops';
 
 const DISCOVERED = '/var/log/syslog';

@@ -1,4 +1,5 @@
-import { bridgeTerminal, TerminalDeps, WsLike, ShellStream, TerminalSize } from '../terminal';
+import { bridgeTerminal, TerminalDeps, ShellStream, TerminalSize } from '../terminal';
+import { WsLike } from '../wsBridge';
 
 // A minimal EventEmitter-shaped fake -- just enough of `.on(event, cb)` to
 // drive the bridge, with no dependency on Node's real EventEmitter or a live

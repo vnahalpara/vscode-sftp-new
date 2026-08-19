@@ -37,39 +37,25 @@ import {
   journalFollowCommand,
 } from './ops/command';
 import {
+  BridgeStream,
   CLOSE_INTERNAL_ERROR,
   CLOSE_NORMAL,
-  SEND_HIGH_WATER,
-  SEND_LOW_WATER,
+  forwardOutput,
+  releaseStream,
   truncateReason,
   WsLike,
-} from './terminal';
+} from './wsBridge';
 
 export type LogTarget = { kind: 'file'; path: string } | { kind: 'unit'; unit: string };
 
 // The structural subset of a raw ssh2 exec channel this bridge drives -- an
 // interface rather than an import of ssh2's own type, for the same reason
 // terminal.ts's ShellStream is one: tests hand this a plain EventEmitter-
-// shaped fake instead of a live SSH channel. Deliberately narrower than
-// ShellStream: this bridge is read-only (nothing is ever written back to
-// `tail`/`journalctl`'s stdin), so there is no write()/setWindow() here.
-export interface LogStream {
-  on(event: 'data', cb: (chunk: Buffer | string) => void): void;
-  on(event: 'close', cb: () => void): void;
-  on(event: 'error', cb: (err: Error) => void): void;
-  // Sends CHANNEL_EOF only -- NOT enough on its own. See releaseStream below,
-  // and terminal.ts's own releaseStream comment: this is the exact same ssh2
-  // allowHalfOpen hazard, on the exact same pooled connection.
-  end(): void;
-  // Sends CHANNEL_CLOSE and actually gives the channel back.
-  close(): void;
-  // Flow control, same reasoning as ShellStream's: pausing stops the SSH
-  // window reopening, which is what makes the REMOTE `tail`/`journalctl`
-  // actually stop producing rather than just moving the backlog into this
-  // process's heap.
-  pause(): void;
-  resume(): void;
-}
+// shaped fake instead of a live SSH channel. It is exactly wsBridge.ts's
+// BridgeStream (release + flow control + the three events) and nothing more:
+// this bridge is read-only, so unlike ShellStream there is no
+// write()/setWindow() here.
+export interface LogStream extends BridgeStream {}
 
 export interface LogFollowDeps {
   // True when `path` is in the CALLING SESSION's own allowlist. Must be a
@@ -82,38 +68,6 @@ export interface LogFollowDeps {
   // transport, and never a shell/PTY (there is no interactivity here, only a
   // single foreground process to read from).
   execStream(cmd: string): Promise<LogStream>;
-}
-
-// Give the remote channel back. Exactly the same hazard, and exactly the
-// same fix, as terminal.ts's releaseStream: ssh2 builds this exec channel
-// with allowHalfOpen true, so end() alone sends CHANNEL_EOF and deliberately
-// skips CHANNEL_CLOSE, leaving `tail -F`/`journalctl -f` running on the
-// remote host and the channel slot allocated on the connection this feature
-// shares with SFTP and the Terminal tab. A `tail -F` is if anything a WORSE
-// leak than the interactive shell terminal.ts guards against: it has no
-// `exit` a user can type, and no idle timeout of its own -- once it is
-// leaked, it runs until sshd's MaxSessions budget is exhausted or the
-// process on the far end is killed by hand.
-//
-// The two calls are caught independently on purpose, same as
-// terminal.ts's: a throw from end() (an already-dead channel) must not skip
-// close().
-function releaseStream(stream: LogStream): void {
-  try {
-    stream.on('error', () => undefined);
-  } catch (error) {
-    // Nothing to do; the calls below are still worth attempting.
-  }
-  try {
-    stream.end();
-  } catch (error) {
-    // Already gone is exactly what we wanted.
-  }
-  try {
-    stream.close();
-  } catch (error) {
-    // Already gone is exactly what we wanted.
-  }
 }
 
 // Builds the command for `target`, having already proved it authorized to
@@ -216,47 +170,12 @@ export function bridgeLogFollow(deps: LogFollowDeps, socket: WsLike, target: Log
       // afterward would be released with no 'error' listener on it if
       // something here throws first.
       //
-      // Output is forwarded with backpressure, identical mechanism to
-      // terminal.ts's: pausing the ssh2 channel stops it re-opening its SSH
-      // window, which is what actually makes the REMOTE `tail`/`journalctl`
-      // stop producing rather than just moving the backlog into this
-      // process's heap. A busy log is exactly the scenario terminal.ts's own
-      // comment calls out (`cat /dev/urandom`) -- a log file being written
-      // faster than a backgrounded browser tab can read it is the same
-      // shape of hazard, not a different one, so it gets the same fix
-      // rather than a new "drop with a marker" scheme.
-      let paused = false;
-      openedStream.on('data', chunk => {
-        // Teardown already closed this channel; further in-flight data has
-        // nowhere useful to go -- see terminal.ts's identical guard.
-        if (torndown) {
-          return;
-        }
-        try {
-          socket.send(chunk, () => {
-            if (paused && !torndown && socket.bufferedAmount <= SEND_LOW_WATER) {
-              paused = false;
-              try {
-                openedStream.resume();
-              } catch (error) {
-                // A dead channel cannot be resumed, and does not need to be.
-              }
-            }
-          });
-        } catch (error) {
-          // The socket closed a moment before this chunk arrived; teardown()
-          // below (via the stream's own close/error) reaps the rest.
-        }
-        if (!paused && socket.bufferedAmount > SEND_HIGH_WATER) {
-          paused = true;
-          try {
-            openedStream.pause();
-          } catch (error) {
-            // Nothing to fall back to: without pause() this is an unbounded
-            // buffer, but a throw here means the channel is already gone.
-          }
-        }
-      });
+      // Output forwarding and backpressure are wsBridge.ts's forwardOutput,
+      // the identical copy terminal.ts drives -- a log file written faster
+      // than a backgrounded browser tab can read it is the same shape of
+      // hazard as a flooding shell, not a different one, so it gets the same
+      // code rather than a second implementation of it.
+      forwardOutput(openedStream, socket, () => torndown);
       // Unlike an interactive shell, `tail -F`/`journalctl -f` have no
       // `exit` a user types -- the ONLY ways this channel ever closes are
       // this bridge tearing it down (already 1000, via teardown() above,

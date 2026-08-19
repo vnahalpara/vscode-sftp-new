@@ -1,5 +1,5 @@
 import { bridgeLogFollow, LogFollowDeps, LogStream, LogTarget } from '../logFollow';
-import { WsLike } from '../terminal';
+import { WsLike } from '../wsBridge';
 
 // Same minimal EventEmitter-shaped fake terminal-test.ts uses -- no
 // dependency on Node's real EventEmitter or a live socket/SSH connection.
