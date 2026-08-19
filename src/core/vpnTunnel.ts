@@ -25,22 +25,39 @@ export interface VpnOption {
 }
 
 interface Tunnel {
+  key: string;
   port: number;
-  process: ChildProcess;
+  pid: number;
+  // Absent for an adopted tunnel: a previous extension run spawned it, so we
+  // know its pid from the marker but hold no child handle on it.
+  process?: ChildProcess;
   mergedConfPath: string;
   refCount: number;
+}
+
+/**
+ * What a running tunnel leaves behind so the next extension run can recognise
+ * it as ours. See canAdopt() for why recognising it matters.
+ */
+interface TunnelMarker {
+  port: number;
+  pid: number;
+  startedAt: number;
 }
 
 const DEFAULT_HEALTHCHECK_MS = 15000;
 
 // Resolved writable directory for merged configs; set from activate().
 let storageDir = os.tmpdir();
+// The user's port-range setting, as typed. Parsed (and defaulted) per use.
+let portRangeSetting: string | undefined;
 
 // key (resolved config path) -> live tunnel or its pending start promise
 const tunnels = new Map<string, Tunnel | Promise<Tunnel>>();
 
-export function init(dir: string) {
+export function init(dir: string, options: { portRange?: string } = {}) {
   storageDir = dir;
+  portRangeSetting = options.portRange;
 }
 
 function expandHome(p: string): string {
@@ -68,9 +85,14 @@ const MAX_PORT = 65535;
  * must never throw -- that would break every SFTP connection on the machine,
  * not just the VPN ones. Any input that isn't a clean "low-high" pair inside
  * 1024-65535 with low <= high silently falls back to the default range.
+ *
+ * The declared type is `string | undefined`, but the value comes out of a
+ * hand-editable JSON settings file, so `"portRange": 21000` -- quotes and
+ * dash forgotten -- is an ordinary typo that arrives here as a number. Hence
+ * the typeof check rather than trusting the signature.
  */
 export function parsePortRange(value: string | undefined): [number, number] {
-  if (!value) {
+  if (!value || typeof value !== 'string') {
     return DEFAULT_PORT_RANGE;
   }
   const match = /^(\d+)-(\d+)$/.exec(value.trim());
@@ -105,12 +127,26 @@ export function derivePort(key: string, range: [number, number]): number {
 const SOCKS5_GREETING = Buffer.from([0x05, 0x01, 0x00]);
 const DEFAULT_PROBE_TIMEOUT_MS = 300;
 
+// A port we could actually connect to or bind: whole, positive, in range.
+// Deliberately wider than the MIN_PORT..MAX_PORT range setting, since an
+// explicit vpn.socksPort or a marker may legitimately name a low port.
+function isUsablePort(port: number): boolean {
+  return Number.isInteger(port) && port > 0 && port <= MAX_PORT;
+}
+
 /**
  * Ask whether something on `port` actually speaks SOCKS5, by sending the
- * handshake greeting and checking that the reply starts with the SOCKS5
- * version byte. Used to decide whether an already-bound port is a live
+ * handshake greeting and checking that the reply is exactly "version 5,
+ * no-auth selected". Used to decide whether an already-bound port is a live
  * tunnel worth adopting rather than some unrelated service that happens to
  * be sitting on the port we derived.
+ *
+ * Why 0x05 0x00 and not just "first byte is 5": a server that answers
+ * 0x05 0xFF is a real SOCKS5 server refusing every auth method we offered,
+ * and ours never does that -- wireproxy offers and accepts no-auth. So 0xFF
+ * is positive evidence the listener is *not* our tunnel, and this probe
+ * exists to help establish that it is. Do not loosen this back to a version
+ * check.
  *
  * This runs on the connection path, so it must never reject and must never
  * leave a socket (or a pending timer) behind -- either would hang or break
@@ -120,6 +156,15 @@ const DEFAULT_PROBE_TIMEOUT_MS = 300;
  * for the same socket (e.g. 'error' followed by 'close').
  */
 export function probeSocks5(port: number, timeoutMs = DEFAULT_PROBE_TIMEOUT_MS): Promise<boolean> {
+  // net.connect() validates the port synchronously and *throws* for a
+  // negative, fractional, out-of-range or NaN one -- no 'error' event, so the
+  // throw would escape this executor as a rejected promise. Ports get here
+  // from a marker file, which is only JSON on disk: a truncated write or a
+  // hand-edit can leave any of those behind, and -1 or 1.5 are perfectly
+  // valid JSON numbers that no shape check would reject. Answer false.
+  if (!isUsablePort(port)) {
+    return Promise.resolve(false);
+  }
   return new Promise(resolve => {
     let settled = false;
     let received = 0;
@@ -158,7 +203,8 @@ export function probeSocks5(port: number, timeoutMs = DEFAULT_PROBE_TIMEOUT_MS):
       chunks.push(chunk);
       received += chunk.length;
       if (received >= 2) {
-        finish(Buffer.concat(chunks)[0] === 0x05);
+        const reply = Buffer.concat(chunks);
+        finish(reply[0] === 0x05 && reply[1] === 0x00);
       }
     });
 
@@ -175,10 +221,179 @@ export function mergeSocksConfig(userConf: string, port: number): string {
   return `${userConf.replace(/\s+$/, '')}\n\n[Socks5]\nBindAddress = 127.0.0.1:${port}\n`;
 }
 
-function getFreePort(preferred?: number): Promise<number> {
-  if (preferred && preferred > 0) {
-    return Promise.resolve(preferred);
+/**
+ * The pieces of the outside world this module has to touch to decide whether a
+ * port already in use is our own tunnel. They are injectable because every one
+ * of them is otherwise untestable: a real pid check needs a real process, the
+ * probe needs a real listener, and the spawn needs wireproxy installed. The
+ * defaults below are what production always runs.
+ */
+export interface TunnelDeps {
+  isPidAlive(pid: number): boolean;
+  speaksSocks5(port: number): Promise<boolean>;
+  killPid(pid: number): void;
+  spawnProcess(bin: string, args: string[]): ChildProcess;
+}
+
+const defaultDeps: TunnelDeps = {
+  isPidAlive(pid: number): boolean {
+    if (!Number.isInteger(pid) || pid <= 0) {
+      return false;
+    }
+    try {
+      // Signal 0 delivers nothing; it only asks whether the pid exists.
+      process.kill(pid, 0);
+      return true;
+    } catch (_e) {
+      // Includes EPERM, which means the pid exists but belongs to another
+      // user -- so it cannot be the wireproxy we spawned as ourselves.
+      // Reporting "not alive" there is the safe answer: the marker's job is
+      // to prove the listener is our process, and this one demonstrably isn't.
+      return false;
+    }
+  },
+  speaksSocks5: port => probeSocks5(port),
+  killPid: pid => process.kill(pid),
+  spawnProcess: (bin, args) => spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] }),
+};
+
+let deps: TunnelDeps = defaultDeps;
+
+/** Test seam. Production code never calls this. */
+export function __setDeps(overrides: Partial<TunnelDeps>): void {
+  deps = { ...defaultDeps, ...overrides };
+}
+
+/** Test seam. Production code never calls this. */
+export function __resetDeps(): void {
+  deps = defaultDeps;
+}
+
+function vpnDir(): string {
+  return path.join(storageDir, 'vpn');
+}
+
+function keyHash(key: string): string {
+  return crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
+}
+
+function mergedConfPathFor(key: string): string {
+  return path.join(vpnDir(), `${keyHash(key)}.conf`);
+}
+
+function markerPathForKey(key: string): string {
+  return path.join(vpnDir(), `${keyHash(key)}.marker.json`);
+}
+
+/**
+ * Where the ownership marker for a VPN config lives. Exported so tests can
+ * plant and corrupt markers without reaching into module internals.
+ */
+export function markerPathFor(vpn: VpnOption): string {
+  return markerPathForKey(tunnelKey(vpn));
+}
+
+/**
+ * Read the marker for a key, or undefined when there isn't a usable one.
+ * Anything unexpected -- no file, a write truncated by a crash, a hand-edit,
+ * the right JSON with the wrong types -- is reported as "no marker" rather
+ * than thrown. A marker can only ever *permit* adoption, so failing to read
+ * one costs at worst a second wireproxy, while throwing here would fail the
+ * user's connection over a bookkeeping file.
+ */
+function readMarker(key: string): TunnelMarker | undefined {
+  let parsed: any;
+  try {
+    parsed = JSON.parse(fs.readFileSync(markerPathForKey(key), 'utf8'));
+  } catch (_e) {
+    return undefined;
   }
+  if (!parsed || !isUsablePort(parsed.port) || !Number.isInteger(parsed.pid) || parsed.pid <= 0) {
+    return undefined;
+  }
+  return {
+    port: parsed.port,
+    pid: parsed.pid,
+    startedAt: typeof parsed.startedAt === 'number' ? parsed.startedAt : 0,
+  };
+}
+
+/**
+ * Record that this port and pid are ours. Best effort on purpose: if the write
+ * fails we still have a working tunnel, and the only cost is that the next
+ * extension run won't recognise it and will start its own. Failing the
+ * connection over a marker we can live without would be the worse trade.
+ */
+function writeMarker(key: string, marker: TunnelMarker): void {
+  try {
+    fse.ensureDirSync(vpnDir());
+    fs.writeFileSync(markerPathForKey(key), JSON.stringify(marker), { mode: 0o600 });
+  } catch (error) {
+    logger.debug(`VPN: could not record the tunnel marker: ${(error as Error).message}`);
+  }
+}
+
+function removeMarker(key: string): void {
+  try {
+    fs.unlinkSync(markerPathForKey(key));
+  } catch (_e) {
+    /* never written, or already gone */
+  }
+}
+
+/**
+ * Is whatever is listening on `port` provably the tunnel a previous run of
+ * this extension started? All four of these must hold, and the answer is no
+ * if any one of them doesn't.
+ *
+ * The SOCKS5 handshake alone would not do. It proves only that *something*
+ * there speaks the protocol -- any local process can bind a port in our range
+ * and answer correctly. Adopting on that basis would route the user's SSH
+ * session, credentials included, through a proxy chosen by whoever won the
+ * race to the port; on a shared or compromised machine that is a plain MITM.
+ * So the marker (a file only we write, in our own storage directory) is what
+ * establishes ownership.
+ *
+ * And the marker alone would not do either: it is a file that outlives the
+ * process it describes, so a stale one whose pid has been recycled onto an
+ * unrelated program would vouch for a listener that is not a tunnel at all.
+ * The probe is what catches that. Neither check is sufficient; both are.
+ */
+async function adoptableMarker(key: string, port: number): Promise<TunnelMarker | undefined> {
+  const marker = readMarker(key);
+  if (!marker || marker.port !== port) {
+    return undefined;
+  }
+  if (!deps.isPidAlive(marker.pid)) {
+    return undefined;
+  }
+  if (!(await deps.speaksSocks5(port))) {
+    return undefined;
+  }
+  return marker;
+}
+
+/**
+ * Can we have this exact port? Answered by binding rather than connecting: a
+ * refused connection could just be a server that dislikes us, while a
+ * successful bind is proof nothing else holds the port. It is a check with an
+ * inherent race -- something can take the port in the gap before wireproxy
+ * binds it -- but losing that race surfaces as wireproxy failing its health
+ * check, never as traffic silently going somewhere else.
+ */
+function isPortFree(port: number): Promise<boolean> {
+  if (!isUsablePort(port)) {
+    return Promise.resolve(false);
+  }
+  return new Promise(resolve => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.once('error', () => resolve(false));
+    srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)));
+  });
+}
+
+function getFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
     srv.unref();
@@ -221,7 +436,7 @@ function waitForPort(
   });
 }
 
-async function startTunnel(vpn: VpnOption, key: string): Promise<Tunnel> {
+async function startTunnel(vpn: VpnOption, key: string, port: number): Promise<Tunnel> {
   const confPath = expandHome(vpn.configFile);
   let userConf: string;
   try {
@@ -230,18 +445,15 @@ async function startTunnel(vpn: VpnOption, key: string): Promise<Tunnel> {
     throw new Error(`Unable to read VPN config file "${vpn.configFile}": ${(error as Error).message}`);
   }
 
-  const port = await getFreePort(vpn.socksPort);
   const mergedConf = mergeSocksConfig(userConf, port);
 
-  const vpnDir = path.join(storageDir, 'vpn');
-  fse.ensureDirSync(vpnDir);
-  const hash = crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
-  const mergedConfPath = path.join(vpnDir, `${hash}.conf`);
+  fse.ensureDirSync(vpnDir());
+  const mergedConfPath = mergedConfPathFor(key);
   // 0600: the file embeds the WireGuard private key.
   fs.writeFileSync(mergedConfPath, mergedConf, { mode: 0o600 });
 
   const bin = vpn.wireproxyPath || 'wireproxy';
-  const child = spawn(bin, ['-c', mergedConfPath], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = deps.spawnProcess(bin, ['-c', mergedConfPath]);
 
   let exited = false;
   let spawnError: NodeJS.ErrnoException | undefined;
@@ -286,21 +498,86 @@ async function startTunnel(vpn: VpnOption, key: string): Promise<Tunnel> {
     );
   }
 
+  // Stake our claim on the port before anyone waits on it, so a reload that
+  // happens seconds from now can tell this listener apart from a stranger's.
+  writeMarker(key, { port, pid: child.pid, startedAt: Date.now() });
+
   logger.info(`VPN tunnel up (SOCKS5 127.0.0.1:${port}) for ${vpn.configFile}`);
-  return { port, process: child, mergedConfPath, refCount: 1 };
+  return { key, port, pid: child.pid, process: child, mergedConfPath, refCount: 1 };
+}
+
+/**
+ * Decide which port this tunnel gets, and whether one is already running on
+ * it that we may take over. Order matters: an explicit vpn.socksPort is the
+ * user's decision and is never silently moved, the derived port keeps the
+ * SOCKS address stable across restarts, and a free port is the last resort so
+ * that a port someone else took can never fail the connection outright.
+ */
+async function openTunnel(vpn: VpnOption, key: string): Promise<Tunnel> {
+  const explicit = vpn.socksPort && vpn.socksPort > 0 ? vpn.socksPort : undefined;
+  const port =
+    explicit !== undefined ? explicit : derivePort(key, parsePortRange(portRangeSetting));
+
+  if (!(await isPortFree(port))) {
+    const marker = await adoptableMarker(key, port);
+    if (marker) {
+      logger.info(
+        `VPN tunnel adopted (SOCKS5 127.0.0.1:${port}, pid ${marker.pid}) for ${vpn.configFile}`
+      );
+      return {
+        key,
+        port,
+        pid: marker.pid,
+        mergedConfPath: mergedConfPathFor(key),
+        refCount: 1,
+      };
+    }
+    if (explicit === undefined) {
+      // Someone else's port. Step aside rather than fight for it -- the
+      // deterministic port is a convenience, not a requirement.
+      return startTunnel(vpn, key, await getFreePort());
+    }
+    // An explicit port that is taken by something we can't prove is ours is
+    // left alone deliberately: moving a port the user pinned would silently
+    // break whatever they pinned it for. wireproxy fails to bind and says so.
+  }
+  return startTunnel(vpn, key, port);
 }
 
 function killTunnel(tunnel: Tunnel) {
-  try {
-    tunnel.process.kill();
-  } catch (_e) {
-    /* ignore */
+  if (tunnel.process) {
+    try {
+      tunnel.process.kill();
+    } catch (_e) {
+      /* ignore */
+    }
+  } else {
+    // An adopted tunnel: no child handle, only a recorded pid. Re-read the
+    // marker and require it to still name this exact pid and port before
+    // signalling, so a pid recycled since we adopted is not our problem to
+    // kill. That is pidfile-grade certainty -- the recycle could in principle
+    // happen inside this window too -- but it is the strongest check
+    // available without a handle, and the alternative (never killing) leaks
+    // the process for the rest of the machine's uptime.
+    const marker = readMarker(tunnel.key);
+    const stillOurs =
+      marker !== undefined && marker.pid === tunnel.pid && marker.port === tunnel.port;
+    if (stillOurs && deps.isPidAlive(tunnel.pid)) {
+      try {
+        deps.killPid(tunnel.pid);
+      } catch (_e) {
+        /* already gone */
+      }
+    }
   }
   try {
     fs.unlinkSync(tunnel.mergedConfPath);
   } catch (_e) {
     /* ignore */
   }
+  // The claim dies with the process it described; leaving it would invite the
+  // next run to adopt whatever lands on the port next.
+  removeMarker(tunnel.key);
 }
 
 /**
@@ -316,7 +593,7 @@ export async function acquire(vpn: VpnOption): Promise<number> {
     return tunnel.port;
   }
 
-  const startPromise = startTunnel(vpn, key);
+  const startPromise = openTunnel(vpn, key);
   tunnels.set(key, startPromise);
   try {
     const tunnel = await startPromise;
@@ -326,6 +603,18 @@ export async function acquire(vpn: VpnOption): Promise<number> {
     tunnels.delete(key);
     throw error;
   }
+}
+
+/**
+ * The SOCKS port of this VPN's running tunnel, or undefined when none is up.
+ * A tunnel still starting counts as not running: it has no port to report yet.
+ */
+export function portFor(vpn: VpnOption): number | undefined {
+  const entry = tunnels.get(tunnelKey(vpn));
+  if (!entry || typeof (entry as Tunnel).port !== 'number') {
+    return undefined;
+  }
+  return (entry as Tunnel).port;
 }
 
 /**

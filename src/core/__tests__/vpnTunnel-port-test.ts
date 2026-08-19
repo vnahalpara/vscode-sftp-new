@@ -42,3 +42,16 @@ test('parsePortRange falls back to the default on nonsense', () => {
   expect(parsePortRange('-1--5')).toEqual(def);
   expect(parsePortRange('21000')).toEqual(def); // not a range
 });
+
+test('parsePortRange survives a setting that is not a string at all', () => {
+  const def: [number, number] = [21000, 21999];
+  // The declared type says string, but the value arrives from a hand-edited
+  // JSON settings file, where "portRange": 21000 (quotes and dash forgotten)
+  // is an ordinary typo. Anything without .trim() must fall back, not throw:
+  // throwing here breaks every SFTP connection on the machine.
+  expect(parsePortRange(21000 as any)).toEqual(def);
+  expect(parsePortRange(true as any)).toEqual(def);
+  expect(parsePortRange({} as any)).toEqual(def);
+  expect(parsePortRange([] as any)).toEqual(def);
+  expect(parsePortRange([21000, 21999] as any)).toEqual(def);
+});

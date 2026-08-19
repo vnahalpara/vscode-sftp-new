@@ -20,10 +20,12 @@ function portOf(server: net.Server): number {
 }
 
 // Every scenario the probe has to survive: a real SOCKS5 reply, a wrong
-// version, silence, an immediate close, and a reply split mid-handshake.
+// version, a refused auth method, silence, an immediate close, and a reply
+// split mid-handshake.
 const scenarios: Array<[string, (socket: net.Socket) => void]> = [
   ['answers a proper SOCKS5 greeting', socket => socket.on('data', () => socket.write(Buffer.from([0x05, 0x00])))],
   ['replies with the wrong version', socket => socket.on('data', () => socket.write(Buffer.from([0x04, 0x00])))],
+  ['refuses every offered auth method', socket => socket.on('data', () => socket.write(Buffer.from([0x05, 0xff])))],
   ['accepts and stays silent', socket => {
     // Resume (but ignore) input so the OS-level close from the probe's own
     // timeout teardown is actually observed -- an unread socket never sees
@@ -58,6 +60,24 @@ describe('probeSocks5', () => {
   test('resolves false for a server that replies with the wrong version', async () => {
     const server = await startServer(socket => socket.on('data', () => socket.write(Buffer.from([0x04, 0x00]))));
     await expect(probeSocks5(portOf(server))).resolves.toBe(false);
+  });
+
+  test('resolves false for a SOCKS5 server that refuses every offered auth method', async () => {
+    // 0x05 0xFF is a real SOCKS5 server, but one that will not take our
+    // no-auth offer -- and ours always does. It is therefore not our tunnel.
+    const server = await startServer(socket => socket.on('data', () => socket.write(Buffer.from([0x05, 0xff]))));
+    await expect(probeSocks5(portOf(server))).resolves.toBe(false);
+  });
+
+  test('resolves false for a malformed port instead of rejecting', async () => {
+    // These reach the probe from a marker file, which is just JSON on disk: a
+    // truncated write or a hand-edit can leave a negative, fractional or NaN
+    // port behind. net.connect() validates the port synchronously and throws,
+    // so without a guard the throw would escape as a rejected promise from a
+    // call site that only ever handles a boolean.
+    for (const port of [-1, 70000, NaN, 1.5, 0]) {
+      await expect(probeSocks5(port, 50)).resolves.toBe(false);
+    }
   });
 
   test('resolves false for a server that accepts and says nothing (times out)', async () => {
