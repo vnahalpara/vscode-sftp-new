@@ -41,6 +41,15 @@ export interface RouteDeps {
   // per-token state below wants to hear about it. Optional because
   // RouteDeps predates this hook; a caller that doesn't wire it keeps the
   // pre-existing behaviour of never pruning allowedFiles.
+  //
+  // INVARIANT, and the reason index.ts's implementation is safe: buildRoutes
+  // calls this SYNCHRONOUSLY, during construction, exactly once. index.ts's
+  // wiring resets its listener list immediately before calling buildRoutes
+  // and adds this listener during that call, so a rebuild cannot drop the
+  // listener the new routes instance just registered. An implementation that
+  // deferred the call (or a buildRoutes that registered lazily, from inside a
+  // handler) would register into whatever list existed at that later moment
+  // -- which after a server restart is a different one. Register eagerly.
   onTokenDisposed?(listener: (token: string) => void): void;
 }
 

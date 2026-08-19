@@ -634,6 +634,205 @@ const FILE_CONTENTS = {
   ].join('\n'),
 };
 
+/* ------------------------------------------------------------------ logs -- */
+// Shaped like GET /api/logs's response (routes.ts): { files: LogFile[],
+// units: string[] }, LogFile = { path, bytes: number | null } (ops/logs.ts).
+// Deliberately awkward, matching this file's own stated fixture philosophy
+// (see the header comment): a null byte size (stat raced a logrotate rename
+// -- see logDiscoveryCommand's own comment on that exact race), a genuine
+// zero-byte file, a rotated log, a rotated-AND-compressed log, and a binary
+// login-accounting log (`wtmp`) that `tail`/`sed` render as garbage --
+// exactly the shapes Task 7's picker has to deprioritise rather than
+// present as ordinary tailable text.
+const LOG_FILES = [
+  { path: '/var/log/syslog', bytes: 2_384_912 },
+  { path: '/var/log/auth.log', bytes: 184_204 },
+  { path: '/var/log/nginx/access.log', bytes: 942_112 },
+  // Genuinely empty -- must render "0 B", never the em dash `bytes: null`
+  // gets. See format.ts's fmtBytes / the Task 7 brief's hard requirement 3.
+  { path: '/var/log/nginx/error.log', bytes: 0 },
+  // `stat` raced `logrotate` between `find` listing this file and
+  // `stat -c%s` reading it -- `sz` came back empty, so this is `null`, not
+  // `0`. Must render as an em dash, never `0`.
+  { path: '/var/log/mysql/slow-query.log', bytes: null },
+  // Rotated.
+  { path: '/var/log/syslog.1', bytes: 1_884_002 },
+  // Rotated AND compressed.
+  { path: '/var/log/syslog.2.gz', bytes: 384_213 },
+  // Binary login-accounting log.
+  { path: '/var/log/wtmp', bytes: 292_872 },
+];
+
+const LOG_UNITS = ['ssh.service', 'nginx.service', 'cron.service'];
+
+// GET /api/file content for the LOG_FILES paths above, merged into the
+// existing /api/file handler alongside FILE_CONTENTS (the vhost config
+// viewer's own map) below. readFileCommand (ops/command.ts) is
+// `sed -n '1,Np'` -- the FIRST N lines of the file, not the last N -- so
+// this is written head-first, matching what a real host actually returns
+// from this route (Task 7's snapshot view), not what the name "tail" would
+// suggest. See the Task 7 report for that conflict between the brief's
+// wording and the route's real behaviour.
+const LOG_FILE_CONTENTS = {
+  '/var/log/syslog': [
+    'Aug 17 08:58:01 mock-fixture-host CRON[1401]: (root) CMD (/usr/lib/php/sessionclean)',
+    'Aug 17 08:59:12 mock-fixture-host systemd[1]: Starting Daily apt download activities...',
+    'Aug 17 08:59:14 mock-fixture-host systemd[1]: apt-daily.service: Deactivated successfully.',
+    'Aug 17 09:00:01 mock-fixture-host CRON[1522]: (mysql) CMD (/etc/mysql/debian-start.sh)',
+    'Aug 17 09:00:03 mock-fixture-host sshd[1601]: Accepted publickey for mockuser from 192.0.2.44 port 51422 ssh2',
+    'Aug 17 09:00:03 mock-fixture-host sshd[1601]: pam_unix(sshd:session): session opened for user mockuser',
+    'Aug 17 09:01:47 mock-fixture-host kernel: [123456.789012] eth0: link becomes ready',
+    'Aug 17 09:02:10 mock-fixture-host systemd[1]: Started Session 42 of user mockuser.',
+  ].join('\n'),
+  '/var/log/auth.log': [
+    'Aug 17 09:00:03 mock-fixture-host sshd[1601]: Accepted publickey for mockuser from 192.0.2.44 port 51422 ssh2',
+    'Aug 17 09:00:03 mock-fixture-host sshd[1601]: pam_unix(sshd:session): session opened for user mockuser by (uid=0)',
+    'Aug 17 08:41:19 mock-fixture-host sudo: mockuser : TTY=pts/0 ; PWD=/home/mockuser ; USER=root ; COMMAND=/usr/bin/systemctl restart nginx',
+    'Aug 17 08:12:07 mock-fixture-host sshd[1188]: Failed password for invalid user admin from 192.0.2.77 port 40110 ssh2',
+    'Aug 17 08:12:11 mock-fixture-host sshd[1188]: Connection closed by invalid user admin 192.0.2.77 port 40110 [preauth]',
+  ].join('\n'),
+  '/var/log/nginx/access.log': [
+    '192.0.2.10 - - [17/Aug/2026:09:00:01 +0000] "GET / HTTP/1.1" 200 1843',
+    '192.0.2.11 - - [17/Aug/2026:09:00:02 +0000] "GET /api/status HTTP/1.1" 200 87',
+    '192.0.2.12 - - [17/Aug/2026:09:00:04 +0000] "GET /favicon.ico HTTP/1.1" 404 571',
+    '192.0.2.13 - - [17/Aug/2026:09:00:06 +0000] "POST /api/login HTTP/1.1" 401 112',
+    '192.0.2.14 - - [17/Aug/2026:09:00:09 +0000] "GET /health HTTP/1.1" 200 15',
+  ].join('\n'),
+  // Genuinely empty.
+  '/var/log/nginx/error.log': '',
+  '/var/log/mysql/slow-query.log': [
+    '# Time: 2026-08-17T08:41:03.112233Z',
+    '# User@Host: appuser[appuser] @ localhost []',
+    '# Query_time: 4.812340  Lock_time: 0.000102 Rows_sent: 1  Rows_examined: 890213',
+    'SELECT * FROM orders WHERE customer_id = 44201 ORDER BY created_at DESC;',
+  ].join('\n'),
+  '/var/log/syslog.1': [
+    'Aug 16 23:58:41 mock-fixture-host systemd[1]: Starting Daily apt-get upgrade and clean activities...',
+    'Aug 16 23:59:02 mock-fixture-host systemd[1]: apt-daily-upgrade.service: Deactivated successfully.',
+    'Aug 17 00:00:01 mock-fixture-host CRON[998]: (root) CMD (/usr/lib/php/sessionclean)',
+  ].join('\n'),
+  // Rotated AND gzip-compressed -- a real `sed -n '1,Np'` against a `.gz`
+  // file emits the compressed bytes verbatim, not decompressed text. This
+  // string is not meant to be a byte-exact gzip stream, only to visibly NOT
+  // look like a log line, the same way real compressed-log garbage doesn't.
+  '/var/log/syslog.2.gz': '      ÍNÃ0ï  ìYó  ±',
+  // Binary login-accounting log -- same reasoning as the `.gz` entry above.
+  '/var/log/wtmp': '     tty1    reboot    system boot  5.15.0-91-generic    ',
+};
+
+const LOG_FOLLOW_REFUSAL = 'That file was not returned by a log discovery scan for this session.';
+
+let logSeq = 0;
+
+// "Aug 17 09:03:41"-shaped -- close enough to syslog's own timestamp format
+// for a dev fixture, not trying to be byte-exact.
+function syslogStamp() {
+  return new Date().toString().slice(4, 24).replace(/ \d{4}$/, '');
+}
+
+function nextSyslogLine() {
+  logSeq++;
+  const procs = ['CRON', 'systemd', 'sshd', 'kernel'];
+  const proc = procs[logSeq % procs.length];
+  return `${syslogStamp()} mock-fixture-host ${proc}[${1000 + (logSeq % 500)}]: tick ${logSeq}`;
+}
+
+function nextAccessLine() {
+  logSeq++;
+  const paths = ['/', '/health', '/api/status', '/favicon.ico'];
+  const p = paths[logSeq % paths.length];
+  return `192.0.2.${1 + (logSeq % 200)} - - [${new Date().toISOString()}] "GET ${p} HTTP/1.1" 200 ${100 + (logSeq % 900)}`;
+}
+
+function nextJournalLine(unit) {
+  logSeq++;
+  return `${syslogStamp()} mock-fixture-host ${unit.replace(/\.service$/, '')}[${2000 + (logSeq % 500)}]: heartbeat ${logSeq}`;
+}
+
+// nginx's access.log is deliberately the "busy" fixture here -- fast enough
+// (every 4ms) that Task 7's client-side buffer cap (2000 rendered lines) is
+// reachable within a few seconds of Follow, the same way a real
+// high-traffic access log would exhaust it in practice. Every other file
+// and unit follows at a pace a human can actually watch scroll.
+const FOLLOW_INTERVAL_MS = {
+  '/var/log/nginx/access.log': 4,
+};
+
+// A dev-only twin of logFollow.ts's bridge (see handleTerminalSocket above
+// for the same pattern on /ws/terminal): streams synthetic lines for a
+// requested `path=`/`unit=`, and honours the SAME two-code close convention
+// (1000 clean stop, 1011 any failure, with a reason) logFollow.ts's own
+// teardown() uses, so Terminal.jsx's/Logs.jsx's close-code handling is
+// exercised identically against either mock.
+//
+// `?fail=` on the socket URL mirrors this file's existing convention
+// (handleTerminalSocket's `?fail=1`, the HTTP routes' `?fail=sudo`), so
+// every failure/refusal shape is reachable without editing this file:
+//   `fail=refuse` -- the exact "not in this session's allowlist" reason
+//                    logFollow.ts's buildCommand refuses an unauthorized
+//                    path with (routes.ts's isLogPathAllowed check).
+//   `fail=unit`   -- the exact "Unsafe unit name." refusal.
+//   any other truthy `fail` -- a generic 1011 failure.
+// With no `fail`, a path/unit not in LOG_FILES/LOG_UNITS is refused the
+// same way a real stale/forged request would be -- the picker itself never
+// offers such a target, so reaching this without `?fail=` would mean the
+// client asked for something it was never shown.
+function handleLogsSocket(ws, req) {
+  const query = new URL(req.url, 'http://127.0.0.1').searchParams;
+  const fail = query.get('fail');
+  if (fail === 'refuse') {
+    ws.close(1011, LOG_FOLLOW_REFUSAL);
+    return;
+  }
+  if (fail === 'unit') {
+    ws.close(1011, 'Unsafe unit name.');
+    return;
+  }
+  if (fail) {
+    ws.close(1011, 'mock: failed to open log stream (ssh exec error)');
+    return;
+  }
+
+  const path = query.get('path');
+  const unit = query.get('unit');
+
+  if (path) {
+    if (!LOG_FILES.some(f => f.path === path)) {
+      ws.close(1011, LOG_FOLLOW_REFUSAL);
+      return;
+    }
+    const interval = FOLLOW_INTERVAL_MS[path] || 500;
+    const timer = setInterval(() => {
+      if (ws.readyState !== ws.OPEN) {
+        return;
+      }
+      const line = path === '/var/log/nginx/access.log' ? nextAccessLine() : nextSyslogLine();
+      ws.send(`${line}\n`);
+    }, interval);
+    ws.on('close', () => clearInterval(timer));
+    return;
+  }
+
+  if (unit) {
+    if (!LOG_UNITS.includes(unit)) {
+      ws.close(1011, 'Unsafe unit name.');
+      return;
+    }
+    const timer = setInterval(() => {
+      if (ws.readyState !== ws.OPEN) {
+        return;
+      }
+      ws.send(`${nextJournalLine(unit)}\n`);
+    }, 500);
+    ws.on('close', () => clearInterval(timer));
+    return;
+  }
+
+  // Neither path nor unit -- logTargetFromRequest (index.ts) treats this
+  // the same way: not a request this bridge knows how to serve.
+  ws.close();
+}
+
 function testConfigOutput(kind) {
   return kind === 'nginx'
     ? 'nginx: the configuration file /etc/nginx/nginx.conf syntax is ok\nnginx: configuration file /etc/nginx/nginx.conf test is successful'

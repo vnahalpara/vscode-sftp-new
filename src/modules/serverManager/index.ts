@@ -18,6 +18,7 @@ import { closeServer, closeSessionSockets, createServer, listen } from './httpSe
 import { parseSafe } from './wsServer';
 import { CLOSE_INTERNAL_ERROR } from './wsBridge';
 import { bootstrapHtml } from './bootstrap';
+import { createFanout } from './fanout';
 import { buildRoutes } from './routes';
 import { browserCommand, BrowserKind } from './browser';
 import { bridgeTerminal } from './terminal';
@@ -249,28 +250,27 @@ export function createSessionRegistry(hooks: SessionRegistryHooks = {}) {
 // seeds every regular file under /var/log per scan, so without this the set
 // grows for the extension host's whole lifetime. The registry takes a single
 // onTokenDisposed hook at construction, but routes are built later and rebuilt
-// on every start, so the one hook fans out to a list of listeners. The list is
-// reset each time a server is built; otherwise a restart would leave the
-// previous routes instance's listener attached to a map nobody reads again.
-let tokenDisposedListeners: Array<(token: string) => void> = [];
+// on every start, so the one hook fans out to a list of listeners, reset each
+// time a server is built.
+//
+// createFanout (fanout.ts) rather than an array and a for-loop inline here:
+// the reset-on-rebuild and the don't-let-one-throw-stop-the-rest rules are
+// load-bearing on a privileged-read allowlist, and as three lines of
+// composition they were untested. As a primitive they are three identifier
+// lookups over something with its own tests.
+const tokenDisposed = createFanout<string>(error =>
+  logger.error(`serverManager: token-disposed listener failed: ${error.message}`, 'serverManager')
+);
 
 const registry = createSessionRegistry({
   onTokenDisposed: token => {
     if (running) {
       closeSessionSockets(running.server, token);
     }
-    // A listener that throws must not stop the others, and must not stop the
-    // socket teardown above from having happened.
-    for (const listener of tokenDisposedListeners) {
-      try {
-        listener(token);
-      } catch (error) {
-        logger.error(
-          `serverManager: token-disposed listener failed: ${(error as Error).message}`,
-          'serverManager'
-        );
-      }
-    }
+    // fire() swallows a listener's throw (reporting it through the callback
+    // above), so one bad listener stops neither the others nor the socket
+    // teardown that already happened.
+    tokenDisposed.fire(token);
   },
 });
 
@@ -439,14 +439,14 @@ async function ensureServer(): Promise<Running> {
       ? path.join(extensionRoot, 'media', 'webui')
       : path.join(__filename, 'media', 'webui');
     // Drop any listener registered by a previous server's routes before the
-    // new buildRoutes below registers its own -- see tokenDisposedListeners.
-    tokenDisposedListeners = [];
+    // new buildRoutes below registers its own -- see tokenDisposed.
+    tokenDisposed.reset();
     const built = buildRoutes({
       sessions: { get: token => registry.lookupSession(token) },
       pingMs: PING_MS,
       schedule: (fn, ms) => setInterval(fn, ms),
       cancel: handle => clearInterval(handle),
-      onTokenDisposed: listener => tokenDisposedListeners.push(listener),
+      onTokenDisposed: listener => tokenDisposed.add(listener),
     });
     const server = createServer({
       root,
@@ -590,6 +590,12 @@ export async function openInBrowser(target: string): Promise<void> {
 
 export function disposeAll(): void {
   registry.disposeAll();
+  // After the registry has finished disposing (its hook fires these), drop
+  // the listeners the torn-down routes instance registered. They only prune
+  // a map nobody will read again, so this is hygiene rather than a leak of
+  // consequence -- but a disposed manager should hold no callbacks into
+  // objects it has thrown away.
+  tokenDisposed.reset();
   // Clear the latch too, so a dispose racing a start cannot leave a stale
   // in-flight promise that later invocations would join. Bumping the
   // generation orphans any start still binding: it will close its own server
