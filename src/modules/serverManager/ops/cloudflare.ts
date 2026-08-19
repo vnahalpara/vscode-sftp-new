@@ -46,17 +46,50 @@ export function hasCloudflare(config: any): boolean {
   return Boolean(config && config.CLOUDFLARE_ZONE_ID && config.CLOUDFLARE_API_TOKEN);
 }
 
-// Any run of 20+ characters drawn from the token charset (letters, digits,
-// `_`, `-`) is scrubbed out of a Cloudflare-supplied message before that
-// message is allowed anywhere near an error string. Cloudflare API tokens
-// are 40 base64url-ish characters, but the exact length is not a contract
-// Cloudflare has made to us, and their error payloads occasionally echo
-// back request context (see the "load-bearing" test in
-// ops-cloudflare-test.ts, which feeds the token back inside a `message`
-// field and inside an unrelated top-level `token` field). Scrubbing by
-// shape rather than by exact match means a token-shaped substring is
-// removed even if Cloudflare echoes it back mangled, truncated-differently,
-// or under a field name we did not anticipate.
+// Two independent layers, in order of strength:
+//
+// Layer 1 -- exact match, used whenever the caller has the real token in
+// scope (every caller in this file does; see checkResponse below). Reduce
+// both the token and the response body to their ALPHANUMERIC SKELETON --
+// strip every character that isn't a letter or digit, deliberately
+// including `-` and `_` even though those are themselves valid token
+// characters -- then check whether the token's skeleton appears in the
+// body's skeleton. Stripping `-`/`_` too (not just "everything outside the
+// token charset") is the part that matters: a token's own hyphens/
+// underscores are exactly the characters most likely to get swapped for a
+// delimiter by something reformatting text (e.g. `token.split('-').join('
+// ')`), and keeping them in the "preserved" set would silently break
+// alignment between the two sides the moment that happens -- the token
+// would still be sitting there in the message, fully readable with spaces
+// instead of hyphens, while an exact substring check against the
+// unmodified token quietly reports no match. Reducing to letters-and-
+// digits-only means it doesn't matter whether a separator was *inserted*
+// (a stray space/colon/line-wrap) or *substituted* (a hyphen replaced by
+// something else) -- either way the two skeletons still line up. If the
+// token's skeleton shows up anywhere in the body's skeleton at all -- as a
+// `message` substring, as an unrelated top-level field, as a JSON *key*,
+// nested arbitrarily deep -- the whole body is treated as contaminated and
+// NO text from it is used; only the fixed-vocabulary message for the
+// status code is returned. This is the only layer that makes token leakage
+// structurally impossible rather than merely unlikely.
+//
+// Layer 2 -- shape-based fallback, used only when no token was supplied
+// (i.e. Layer 1 could not run). A run of 20+ token-charset characters gets
+// redacted before a Cloudflare `message` is allowed into the output. This
+// is strictly weaker: a token broken up by inserted or substituted
+// delimiters defeats it, which is exactly the failure Layer 1 exists to
+// close. It is kept only as a defense for callers that, for whatever
+// reason, invoke `cloudflareError` without the token in hand.
+const NON_ALPHANUMERIC_RE = /[^A-Za-z0-9]/g;
+function alphanumericSkeleton(text: string): string {
+  return text.replace(NON_ALPHANUMERIC_RE, '');
+}
+
+function bodyContainsToken(body: string, token: string): boolean {
+  const tokenSkeleton = alphanumericSkeleton(token);
+  return tokenSkeleton.length > 0 && alphanumericSkeleton(body).includes(tokenSkeleton);
+}
+
 const TOKEN_SHAPED_RUN_RE = /[A-Za-z0-9_-]{20,}/g;
 function scrub(text: string): string {
   return text.replace(TOKEN_SHAPED_RUN_RE, '[redacted]');
@@ -67,26 +100,29 @@ function scrub(text: string): string {
  *
  * This never throws, and it never interpolates raw response text into the
  * result -- every branch below is built from a fixed vocabulary plus
- * Cloudflare's numeric `code`s. That is what makes token leakage
- * structurally impossible rather than merely unlikely: even if Cloudflare's
- * `message` field echoes back the token (it has, see above), that field is
- * only ever included after the scrub pass, and only as a scrubbed
- * secondary detail -- never as the message itself.
+ * Cloudflare's numeric `code`s plus, at most, a `message` detail that has
+ * been proven (Layer 1 above) or scrubbed (Layer 2) not to carry the token.
+ * Pass `token` whenever it is available -- every caller in this file does --
+ * so Layer 1's exact-match, fragmentation-proof check runs instead of the
+ * weaker shape-based fallback.
  */
-export function cloudflareError(status: number, body: string): string {
+export function cloudflareError(status: number, body: string, token?: string): string {
   let codes: number[] = [];
   let detail = '';
+  const contaminated = token ? bodyContainsToken(body, token) : false;
   try {
     const parsed = JSON.parse(body);
     if (parsed && Array.isArray(parsed.errors)) {
       codes = parsed.errors
         .map((e: any) => e && e.code)
         .filter((c: any) => typeof c === 'number');
-      const messages = parsed.errors
-        .map((e: any) => e && typeof e.message === 'string' ? e.message : '')
-        .filter(Boolean);
-      if (messages.length) {
-        detail = ` (${scrub(messages.join('; '))})`;
+      if (!contaminated) {
+        const messages = parsed.errors
+          .map((e: any) => e && typeof e.message === 'string' ? e.message : '')
+          .filter(Boolean);
+        if (messages.length) {
+          detail = ` (${scrub(messages.join('; '))})`;
+        }
       }
     }
   } catch {
@@ -115,7 +151,12 @@ export function cloudflareError(status: number, body: string): string {
 // for instance when a request is malformed in a way that does not map to
 // an HTTP error status. Route it through cloudflareError the same as a
 // non-2xx status so the token-safety guarantees above cover it too.
-function checkResponse(res: CfResponse): any {
+//
+// `token` is threaded through from the caller (both callers below hold it)
+// so cloudflareError can run its exact-match, fragmentation-proof
+// contamination check instead of falling back to the weaker shape-based
+// scrub.
+function checkResponse(res: CfResponse, token: string): any {
   let parsed: any = null;
   try {
     parsed = JSON.parse(res.body);
@@ -123,14 +164,22 @@ function checkResponse(res: CfResponse): any {
     parsed = null;
   }
   if (res.status < 200 || res.status >= 300 || !parsed || parsed.success !== true) {
-    throw new Error(cloudflareError(res.status, res.body));
+    throw new Error(cloudflareError(res.status, res.body, token));
   }
   return parsed;
 }
 
 export async function zoneInfo(deps: CloudflareDeps, zoneId: string, token: string): Promise<{ id: string; name: string }> {
   const res = await deps.request({ method: 'GET', path: `/client/v4/zones/${zoneId}`, token, body: null });
-  const parsed = checkResponse(res);
+  const parsed = checkResponse(res, token);
+  // `success: true` promises a `result` object, but a proxy or gateway
+  // between us and Cloudflare could rewrite/truncate the body and leave
+  // `success: true` while dropping `result` -- degrade through the normal
+  // error path instead of letting a raw TypeError (`Cannot read properties
+  // of undefined`) escape past checkResponse/cloudflareError.
+  if (!parsed.result || typeof parsed.result.id !== 'string' || typeof parsed.result.name !== 'string') {
+    throw new Error(cloudflareError(res.status, res.body, token));
+  }
   return { id: parsed.result.id, name: parsed.result.name };
 }
 
@@ -141,7 +190,7 @@ export async function purgeEverything(deps: CloudflareDeps, zoneId: string, toke
     token,
     body: JSON.stringify({ purge_everything: true }),
   });
-  checkResponse(res);
+  checkResponse(res, token);
   return { purged: true };
 }
 

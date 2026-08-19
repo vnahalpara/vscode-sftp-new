@@ -76,3 +76,69 @@ test('the token never appears in any thrown error message', async () => {
     );
   }
 });
+
+// Review finding (HIGH): the shape-based scrub only redacts a CONTIGUOUS
+// run of 20+ token-charset characters, so a single non-charset delimiter
+// inserted anywhere in the token defeats it -- the fragments each fall
+// under the length threshold and pass through untouched. The fix threads
+// the real token into cloudflareError (every caller here has it) so it can
+// reduce both sides to their alphanumeric skeleton (see the Layer 1 doc
+// comment in ops/cloudflare.ts for why `-`/`_` must be stripped too, not
+// just "everything outside the token charset") and drop the entire message
+// the moment the token's skeleton is found anywhere in the body's, rather
+// than trying to redact just the matched piece.
+//
+// The `.not.toContain(TOKEN)` check alone is not sufficient here: a naive
+// fix that preserves `-`/`_` while stripping other punctuation would pass
+// that check even while leaking the token in fully human-readable form
+// with hyphens turned to spaces (verified against an intermediate version
+// of this file, which did exactly that). `alnumSkeleton` below applies the
+// same alphanumeric-only reduction to the assertion itself, so the test
+// actually fails on that kind of reformatted-but-readable leak.
+function alnumSkeleton(s: string): string {
+  return s.replace(/[^A-Za-z0-9]/g, '');
+}
+
+test('a token fragmented by inserted or substituted delimiters is still caught, not leaked piecemeal', async () => {
+  const midpoint = Math.floor(TOKEN.length / 2);
+  const tokenSkeleton = alnumSkeleton(TOKEN);
+  const bodies = [
+    // Every internal '-' replaced with a space: no single run of 20+
+    // token-charset characters survives, so the old shape-based regex
+    // alone would miss this entirely and leak the token verbatim (with
+    // spaces instead of hyphens) -- and a naive "strip everything outside
+    // the token charset" fix would too, since it preserves `-` on the
+    // token side while the body side never had it in the first place.
+    JSON.stringify({ success: false, errors: [{ code: 1, message: 'bad token ' + TOKEN.split('-').join(' ') }] }),
+    // A single delimiter inserted mid-token -- the review's concrete
+    // example: this used to leak a real prefix of the secret because the
+    // first fragment fell under the 20-char threshold.
+    JSON.stringify({ success: false, errors: [{ code: 1, message: 'bad token ' + TOKEN.slice(0, midpoint) + ' ' + TOKEN.slice(midpoint) }] }),
+    // The token used as a JSON object KEY rather than a value.
+    JSON.stringify({ success: false, errors: [{ code: 1, message: 'x' }], [TOKEN]: 'unrelated' }),
+    // The token nested several levels deep in an unrelated object.
+    JSON.stringify({ success: false, errors: [{ code: 1, message: 'x' }], meta: { nested: { deep: TOKEN } } }),
+  ];
+  for (const body of bodies) {
+    // Passing the token lets cloudflareError run its exact-match check --
+    // this is how every real caller (zoneInfo/purgeEverything) invokes it.
+    const msg = cloudflareError(403, body, TOKEN);
+    expect(msg).not.toContain(TOKEN);
+    // The stronger assertion: no reformatted-but-readable rendering of the
+    // secret survives either, not just the exact original string.
+    expect(alnumSkeleton(msg)).not.toContain(tokenSkeleton);
+    const d = deps(403, body);
+    await expect(purgeEverything(d, 'z1', TOKEN)).rejects.toThrow(
+      expect.not.stringContaining(TOKEN) as any
+    );
+  }
+});
+
+// Review finding (LOW): a 200/success:true body missing `result` (e.g. a
+// gateway or proxy rewriting the body while leaving success:true intact)
+// used to throw a raw TypeError from inside zoneInfo, bypassing
+// cloudflareError entirely instead of degrading to an actionable message.
+test('zoneInfo degrades to an actionable error instead of throwing a raw TypeError when result is missing', async () => {
+  const d = deps(200, JSON.stringify({ success: true }));
+  await expect(zoneInfo(d, 'z1', TOKEN)).rejects.toThrow(/Cloudflare/);
+});
