@@ -238,6 +238,24 @@ describe('tunnel adoption', () => {
     expect(port).not.toBe(h.derivedPort);
     expect(h.state.spawns).toBe(1);
   });
+
+  test('fails loudly when an explicit vpn.socksPort is held by something not ours', async () => {
+    // The dangerous case. There is no marker, so the listener is a stranger's,
+    // and the port is pinned so we cannot step aside. Spawning wireproxy
+    // anyway is what the old code did, on the belief that it would fail to
+    // bind and say so -- it does not say so anywhere we look. The health check
+    // is a bare TCP connect, which the stranger answers, so we would report
+    // "VPN tunnel up", write an ownership marker for a port we never bound,
+    // and hand the SSH handshake to whoever is on the other end.
+    const h = await harness({ isPidAlive: () => true, speaksSocks5: async () => true });
+    const pinned = await anotherFreePort(h.derivedPort);
+    h.vpn.socksPort = pinned;
+    await occupy(pinned);
+
+    await expect(h.mod.acquire(h.vpn)).rejects.toThrow(/already in use/);
+    expect(h.state.spawns).toBe(0);
+    expect(fs.existsSync(h.mod.markerPathFor(h.vpn))).toBe(false);
+  });
 });
 
 describe('ownership marker', () => {

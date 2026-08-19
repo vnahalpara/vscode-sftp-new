@@ -509,6 +509,18 @@ async function startTunnel(vpn: VpnOption, key: string, port: number): Promise<T
   const timeout = vpn.healthCheckTimeout || DEFAULT_HEALTHCHECK_MS;
   try {
     await waitForPort(port, timeout, () => exited);
+    // waitForPort's only evidence is that *something* accepted a TCP
+    // connection on the port: it makes no ownership or protocol check, and its
+    // first attempt runs synchronously after spawn, before any 'error' or
+    // 'exit' has had a chance to fire. So a process that was already squatting
+    // the port answers it instantly, and without the check below we would go
+    // on to log "VPN tunnel up" and -- far worse -- write an ownership marker
+    // for a port we never bound, forging the very proof adoption depends on.
+    // Yielding first lets an already-queued exit land before we ask.
+    await new Promise(resolve => setImmediate(resolve));
+    if (exited) {
+      throw new Error('wireproxy exited before the SOCKS port was ready');
+    }
   } catch (error) {
     try {
       child.kill();
@@ -597,11 +609,21 @@ async function openTunnel(vpn: VpnOption, key: string): Promise<Tunnel> {
       // Someone else's port. Step aside rather than fight for it -- the
       // deterministic port is a convenience, not a requirement.
       return startTunnel(vpn, key, await getFreePort());
+    } else {
+      // An explicit port, held by something we cannot prove is ours and
+      // cannot claim as a hung tunnel to reap. Both alternatives are wrong:
+      // moving off the port would silently break whatever the user pinned it
+      // for, and going ahead would be worse still. wireproxy does not, as an
+      // earlier comment here claimed, reliably fail loudly -- the health
+      // check is a bare TCP connect, so the squatter answers it, and we would
+      // report a tunnel that is up, write an ownership marker for a port we
+      // never bound, and hand the SSH session to a stranger. Fail instead.
+      throw new Error(
+        `VPN SOCKS port ${port} is already in use by something this extension did not ` +
+          `start, and "vpn.socksPort" pins the tunnel to it. Stop whatever is holding ` +
+          `127.0.0.1:${port}, or change "vpn.socksPort" in your sftp.json.`
+      );
     }
-    // An explicit port held by something we can't prove is ours, and isn't a
-    // hung tunnel of ours to reap, is left alone deliberately: moving a port
-    // the user pinned would silently break whatever they pinned it for.
-    // wireproxy fails to bind and says so.
   }
   return startTunnel(vpn, key, port);
 }
