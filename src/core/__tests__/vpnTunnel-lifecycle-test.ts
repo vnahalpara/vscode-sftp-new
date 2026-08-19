@@ -236,6 +236,68 @@ describe('reaping a hung tunnel', () => {
     expect(marker.pid).not.toBe(OLD_PID);
   });
 
+  test('a tunnel that misses a single probe is adopted, not killed', async () => {
+    // A healthy wireproxy that loses one 300ms loopback round trip to a busy
+    // machine. Killing it would take down a tunnel another window may be
+    // transferring over, so the reap path has to ask again before escalating.
+    const killed: number[] = [];
+    let probes = 0;
+    const h = await harness({
+      isPidAlive: () => true,
+      speaksSocks5: async () => {
+        probes += 1;
+        return probes > 1;
+      },
+      killPid: pid => killed.push(pid),
+    });
+    await occupy(h.derivedPort);
+    plantMarker(h, { port: h.derivedPort, pid: OLD_PID, startedAt: Date.now() });
+
+    const port = await h.mod.acquire(h.vpn);
+
+    expect(killed).toEqual([]);
+    expect(port).toBe(h.derivedPort);
+    expect(h.state.spawns).toBe(0); // adopted, not replaced
+    expect(probes).toBeGreaterThan(1);
+  });
+
+  test('a marker written before this boot is never reaped', async () => {
+    // Force-quit VS Code and the marker outlives the reboot. The pid it names
+    // is definitionally recycled by now -- pids restart from scratch every
+    // boot -- so whatever is alive under it is an unrelated program, and its
+    // failure to answer SOCKS5 is exactly what we should expect, not evidence
+    // that a tunnel of ours is wedged.
+    const killed: number[] = [];
+    const h = await harness({
+      isPidAlive: () => true,
+      speaksSocks5: async () => false,
+      killPid: pid => killed.push(pid),
+    });
+    await occupy(h.derivedPort);
+    // 1970: earlier than any machine's boot, however long its uptime.
+    plantMarker(h, { port: h.derivedPort, pid: OLD_PID, startedAt: 1 });
+
+    const port = await h.mod.acquire(h.vpn);
+
+    expect(killed).toEqual([]);
+    expect(port).not.toBe(h.derivedPort);
+    expect(h.state.spawns).toBe(1);
+  });
+
+  test('a marker written before this boot is not adopted either', async () => {
+    // Same reasoning in the other direction: the marker cannot prove the
+    // listener is ours, and adopting a stranger's SOCKS5 proxy hands it the
+    // user's SSH session.
+    const h = await harness({ isPidAlive: () => true, speaksSocks5: async () => true });
+    await occupy(h.derivedPort);
+    plantMarker(h, { port: h.derivedPort, pid: OLD_PID, startedAt: 1 });
+
+    const port = await h.mod.acquire(h.vpn);
+
+    expect(port).not.toBe(h.derivedPort);
+    expect(h.state.spawns).toBe(1);
+  });
+
   test('a marker naming a dead pid is left alone -- no kill attempted', async () => {
     const killed: number[] = [];
     const h = await harness({

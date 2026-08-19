@@ -138,11 +138,27 @@ export function derivePort(key: string, range: [number, number]): number {
 const SOCKS5_GREETING = Buffer.from([0x05, 0x01, 0x00]);
 const DEFAULT_PROBE_TIMEOUT_MS = 300;
 
+// Before concluding that a tunnel of ours is wedged -- the one conclusion in
+// this file that ends in a SIGTERM -- the probe is repeated, with a timeout
+// several times the 300ms the adopt path is happy with. Adopting wrongly
+// costs one extra wireproxy; killing wrongly can take down another window's
+// tunnel mid-transfer, so the two decisions do not deserve the same
+// confidence. A healthy wireproxy that misses one 300ms loopback round trip
+// -- a saturated CPU, a swapping machine, a laptop a second out of sleep --
+// must not be mistaken for a dead one.
+const REAP_PROBE_ATTEMPTS = 3;
+const REAP_PROBE_TIMEOUT_MS = 2000;
+const REAP_PROBE_DELAY_MS = 100;
+
 // A port we could actually connect to or bind: whole, positive, in range.
 // Deliberately wider than the MIN_PORT..MAX_PORT range setting, since an
 // explicit vpn.socksPort or a marker may legitimately name a low port.
 function isUsablePort(port: number): boolean {
   return Number.isInteger(port) && port > 0 && port <= MAX_PORT;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**
@@ -241,7 +257,7 @@ export function mergeSocksConfig(userConf: string, port: number): string {
  */
 export interface TunnelDeps {
   isPidAlive(pid: number): boolean;
-  speaksSocks5(port: number): Promise<boolean>;
+  speaksSocks5(port: number, timeoutMs?: number): Promise<boolean>;
   killPid(pid: number): void;
   spawnProcess(bin: string, args: string[]): ChildProcess;
 }
@@ -263,7 +279,7 @@ const defaultDeps: TunnelDeps = {
       return false;
     }
   },
-  speaksSocks5: port => probeSocks5(port),
+  speaksSocks5: (port, timeoutMs) => probeSocks5(port, timeoutMs),
   killPid: pid => process.kill(pid),
   spawnProcess: (bin, args) => spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] }),
 };
@@ -385,7 +401,50 @@ async function classifyOwnedPort(key: string, port: number): Promise<OwnedPortOu
   if (!marker || marker.port !== port || !deps.isPidAlive(marker.pid)) {
     return { kind: 'none' };
   }
-  return (await deps.speaksSocks5(port)) ? { kind: 'adopt', marker } : { kind: 'hung', marker };
+  // The pid check above asks "is *a* process alive under this number", which
+  // is a different question from "is it still the process the marker meant".
+  // Across a reboot the answer is definitively no, so a marker predating the
+  // current boot is disqualified outright, however alive its pid looks now.
+  if (!markerIsFromThisBoot(marker)) {
+    return { kind: 'none' };
+  }
+  if (await deps.speaksSocks5(port)) {
+    return { kind: 'adopt', marker };
+  }
+  // One missed probe is not grounds for a SIGTERM. Re-ask, patiently, and let
+  // a slow-but-healthy tunnel talk its way back into 'adopt'; only a listener
+  // that stays silent across every attempt is called hung.
+  for (let attempt = 0; attempt < REAP_PROBE_ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      await delay(REAP_PROBE_DELAY_MS);
+    }
+    if (await deps.speaksSocks5(port, REAP_PROBE_TIMEOUT_MS)) {
+      return { kind: 'adopt', marker };
+    }
+  }
+  return { kind: 'hung', marker };
+}
+
+/**
+ * Was this marker written during the current boot?
+ *
+ * os.uptime() is seconds since boot, so boot happened at roughly
+ * `Date.now() - uptime * 1000`. A marker older than that describes a process
+ * from a previous boot -- and pids are handed out afresh every boot, so
+ * whatever is alive under that pid now is, with certainty rather than
+ * probability, some unrelated program. Force-quitting VS Code leaves exactly
+ * such a marker behind; without this check the next run after a reboot would
+ * find it, find *a* live pid, find a listener that does not answer SOCKS5,
+ * and SIGTERM a stranger.
+ *
+ * The comparison is deliberately not padded with slack in the permissive
+ * direction. Slack there buys nothing except a wider window in which a
+ * pre-boot marker passes for a current one, and the cost of the two mistakes
+ * is not symmetric: judging a real marker stale leaks one wireproxy, while
+ * judging a stale marker real signals a process we know nothing about.
+ */
+function markerIsFromThisBoot(marker: TunnelMarker): boolean {
+  return marker.startedAt >= Date.now() - os.uptime() * 1000;
 }
 
 /**
