@@ -715,9 +715,9 @@ const LOG_FILE_CONTENTS = {
   // file emits the compressed bytes verbatim, not decompressed text. This
   // string is not meant to be a byte-exact gzip stream, only to visibly NOT
   // look like a log line, the same way real compressed-log garbage doesn't.
-  '/var/log/syslog.2.gz': '      ÍNÃ0ï  ìYó  ±',
+  '/var/log/syslog.2.gz': '\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x8d\x91\x4dN\x830\x10\x86\xef\x00\x00\xecY\xf3\x1a\x00\x00\xb1\x8c',
   // Binary login-accounting log -- same reasoning as the `.gz` entry above.
-  '/var/log/wtmp': '     tty1    reboot    system boot  5.15.0-91-generic    ',
+  '/var/log/wtmp': '\x00\x00\x00\x02\x00\x00tty1\x00\x00\x00\x00reboot\x00\x00\x00\x00system boot  5.15.0-91-generic\x00\x00\x00\x00',
 };
 
 const LOG_FOLLOW_REFUSAL = 'That file was not returned by a log discovery scan for this session.';
