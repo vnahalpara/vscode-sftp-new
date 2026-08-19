@@ -1,3 +1,16 @@
+## 1.27.0 - 2026-08-20
+* New Feature : the Web server tab now shows a **Cloudflare** card with a **Purge everything**
+  button, for any profile whose `sftp.json` entry carries both `CLOUDFLARE_ZONE_ID` and
+  `CLOUDFLARE_API_TOKEN` -- one field alone is treated as not configured, on purpose, so a
+  half-finished edit can never leave the button live. The card fetches the zone's name first, so
+  the confirmation names the domain rather than a bare zone id, and states plainly that purging
+  evicts the whole zone cache and sends every subsequent request to your origin until it refills.
+* Note : the purge call is made from your own machine over HTTPS directly to Cloudflare's API --
+  never from the managed server, so the token never touches that host's process table. The token
+  needs only the **Zone.Cache Purge** permission; scope it to a single zone. Like every other
+  credential this extension reads, `CLOUDFLARE_ZONE_ID`/`CLOUDFLARE_API_TOKEN` are stored in
+  cleartext in `sftp.json` -- keep that file out of a shared repository.
+
 ## 1.26.1 - 2026-08-19
 * Fix : the **Terminal** tab no longer resets when you switch to another tab and back. Switching tabs unmounted the tab's component, which disposed the terminal and closed its connection, so the remote shell exited -- taking the working directory, any running command and the scrollback with it. The Terminal and **Logs** tabs now stay mounted once opened, so a shell session and a live log Follow both survive tab switching. Leaving the server view entirely still closes them, as before.
 

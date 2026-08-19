@@ -143,6 +143,45 @@ remaining. A **Test config** button runs `nginx -t` or `apachectl configtest`/`h
 the raw output. A view button on each vhost row shows the actual config file text as read from
 the server.
 
+### Cloudflare cache purge
+
+If a connection profile carries **both** `CLOUDFLARE_ZONE_ID` and `CLOUDFLARE_API_TOKEN`, the Web
+server tab shows a **Cloudflare** card with a **Purge everything** button for that zone. Both
+fields are required — a profile with only one of the two is treated as not configured, on purpose,
+so a half-finished edit (a token pasted in without its zone, or vice versa) can never leave a
+destructive button live by accident.
+
+```json
+{
+  "name": "prod",
+  "host": "example.com",
+  "username": "deploy",
+  "password": "…",
+  "CLOUDFLARE_ZONE_ID": "023e105f4ecef8ad9ca31a8372d0c353",
+  "CLOUDFLARE_API_TOKEN": "…"
+}
+```
+
+The token needs the **Zone.Cache Purge** permission. Scope it to exactly that permission on
+exactly the one zone this profile purges — a token that can do nothing else and reach nothing else
+caps the damage if it ever leaks.
+
+The purge call is made **from your own machine over HTTPS directly to Cloudflare's API — never
+from the managed server.** Running the equivalent `curl -H "Authorization: Bearer …"` on the
+server would put the token in that host's process table, readable by any other user on the box via
+`ps`; your own machine's extension process is not shared with anyone else.
+
+The card fetches the zone's name first (so the confirmation dialog names the domain you're about
+to purge instead of showing you a bare zone id) and asks for confirmation before purging. **Purging
+is not cheap on a busy site:** it evicts the *entire* zone cache, and every request behind
+Cloudflare falls through to your origin until the cache refills — a real load spike, not a
+formality the confirmation dialog is exaggerating.
+
+`CLOUDFLARE_ZONE_ID` and `CLOUDFLARE_API_TOKEN` are stored **in cleartext** in `sftp.json`, exactly
+like every other credential this extension reads (the SSH `password`, `root_password`, database
+passwords). Keep that file out of a shared repository. A token scoped to cache-purge on a single
+zone, as recommended above, is what limits the blast radius if the file leaks anyway.
+
 ### Sudo requirement for Services and Web server
 
 Every command that changes state or reads a protected file is wrapped in `sudo -n`
