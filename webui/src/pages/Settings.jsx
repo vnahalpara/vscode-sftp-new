@@ -59,6 +59,15 @@ export default function Settings({ profile, session }) {
             />
             <Row label="VPN configured" value={profile.hasVpn ? 'Yes' : 'No'} />
             <Row label="Database configured" value={profile.hasDatabase ? 'Yes' : 'No'} />
+            {/* The zone id, never the token -- the same thing the Cloudflare
+                card falls back to naming when the zone-name lookup fails.
+                Worth surfacing here for the same reason the other two are:
+                this page is where a user checks what the profile was
+                actually read as. */}
+            <Row
+              label="Cloudflare configured"
+              value={profile.hasCloudflare ? `Yes — zone ${profile.cloudflareZoneId}` : 'No'}
+            />
             <div className="muted" style={{ fontSize: 11.5, marginTop: 10 }}>
               Service actions, config reads and certificate checks are wrapped in{' '}
               <span className="mono">sudo -n</span> and run as that account

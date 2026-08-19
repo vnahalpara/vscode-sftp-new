@@ -280,6 +280,52 @@ export function cloudflareError(status: number, body: string, token?: string): s
   return '';
 }
 
+/**
+ * The other half of the failure space: a rejection from the HTTP client
+ * itself, before any response exists to map. `cloudflareError` only ever sees
+ * a status and a body, so nothing it does covers httpsRequest's 15s timeout,
+ * a DNS or TLS failure, or `https.request`'s synchronous
+ * ERR_UNESCAPED_CHARACTERS throw (a zone id with a stray space in it). Those
+ * used to propagate as raw Node messages -- a DNS failure surfaced to the
+ * user, and into the activity log, as a bare
+ * `getaddrinfo ENOTFOUND api.cloudflare.com` with nothing saying it was
+ * Cloudflare we could not reach, or why that mattered.
+ *
+ * Node does not put a request header's value into any of these messages, so
+ * the token is not expected in one. "Not expected" is not the guarantee this
+ * module makes elsewhere, though, so this runs the same ladder
+ * `cloudflareError` does: every rung is a fully assembled string that is
+ * itself tested for the token, and the first clean one is returned.
+ */
+export function cloudflareTransportError(error: any, token?: string): string {
+  const raw = error && typeof error.message === 'string' ? error.message : '';
+  const candidates = [
+    raw ? `Could not reach Cloudflare's API: ${scrub(raw)}` : `Could not reach Cloudflare's API.`,
+    `Could not reach Cloudflare's API.`,
+  ];
+  for (const candidate of candidates) {
+    if (!token || !candidateContainsToken(candidate, token)) {
+      return candidate;
+    }
+  }
+  return '';
+}
+
+// The single door every Cloudflare HTTP call goes through, so that a
+// rejection from the injected client is mapped exactly like a failed
+// response. `deps.request` is called ONLY from here -- calling it directly
+// anywhere below would reopen the raw-Node-message path this closes.
+async function request(deps: CloudflareDeps, opts: CfRequest): Promise<CfResponse> {
+  try {
+    return await deps.request(opts);
+  } catch (error) {
+    // A synchronous throw inside httpsRequest's promise executor (the
+    // ERR_UNESCAPED_CHARACTERS case) rejects the promise rather than
+    // escaping it, so `await` inside this try catches that too.
+    throw new Error(cloudflareTransportError(error, opts.token));
+  }
+}
+
 // A 200 with `success: false` is still an error -- Cloudflare does that,
 // for instance when a request is malformed in a way that does not map to
 // an HTTP error status. Route it through cloudflareError the same as a
@@ -303,7 +349,7 @@ function checkResponse(res: CfResponse, token: string): any {
 }
 
 export async function zoneInfo(deps: CloudflareDeps, zoneId: string, token: string): Promise<{ id: string; name: string }> {
-  const res = await deps.request({ method: 'GET', path: `/client/v4/zones/${zoneId}`, token, body: null });
+  const res = await request(deps, { method: 'GET', path: `/client/v4/zones/${zoneId}`, token, body: null });
   const parsed = checkResponse(res, token);
   // `success: true` promises a `result` object, but a proxy or gateway
   // between us and Cloudflare could rewrite/truncate the body and leave
@@ -317,7 +363,7 @@ export async function zoneInfo(deps: CloudflareDeps, zoneId: string, token: stri
 }
 
 export async function purgeEverything(deps: CloudflareDeps, zoneId: string, token: string): Promise<{ purged: true }> {
-  const res = await deps.request({
+  const res = await request(deps, {
     method: 'POST',
     path: `/client/v4/zones/${zoneId}/purge_cache`,
     token,

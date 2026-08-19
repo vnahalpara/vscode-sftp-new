@@ -86,8 +86,12 @@ Right-click a connection root in the Remote Explorer → **Manage Server** (or r
 
 VS Code starts a small HTTP server on `127.0.0.1` — loopback only, never exposed to your
 network — and opens Chrome on a token-authenticated page for that one connection. Everything it
-shows is collected over the connection's existing SSH channel: no agent is installed on the
-server, and no new service runs there.
+shows about the server is collected over the connection's existing SSH channel: no agent is
+installed on the server, and no new service runs there. The one thing that leaves your machine for
+anywhere other than that SSH connection is the optional **Cloudflare** card — if, and only if, a
+profile carries `CLOUDFLARE_ZONE_ID` and `CLOUDFLARE_API_TOKEN`, opening the Web server tab makes
+an HTTPS call from your machine to `api.cloudflare.com` carrying that token. See
+[Cloudflare cache purge](#cloudflare-cache-purge) below.
 
 The dashboard streams live metrics over the connection's SSH channel and renders an **Overview**
 tab: five stat cards (CPU, Memory, Disk, Load (1m), Uptime), charts for CPU usage, per-core usage,

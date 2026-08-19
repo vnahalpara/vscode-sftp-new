@@ -71,6 +71,18 @@ const CAPABILITIES = {
   logs: true,
   terminal: true,
   database: false,
+  // DELIBERATELY UNCONSUMED, and it must stay that way. Every other key here
+  // is a TAB name -- App.jsx and Dashboard.jsx look each tab up by key to
+  // decide whether to grey it out. Cloudflare is not a tab; it is a card
+  // inside Web server, and whether it renders is a PER-PROFILE question
+  // (`profile.hasCloudflare`, i.e. does THIS profile carry both
+  // CLOUDFLARE_* fields), not a per-build one. This flag only says the build
+  // carries the feature at all, which is true of every build that contains
+  // this line.
+  //
+  // Gating the card on this instead would render it for profiles with no
+  // Cloudflare config, whose every request then 404s on the routes below.
+  // If you are adding a consumer: use profile.hasCloudflare, not this.
   cloudflare: true,
 };
 
@@ -195,12 +207,25 @@ async function runConfigTest(
 // runPrivileged: the entry is pushed regardless of outcome, before the
 // caller below turns a rejection into a response.
 //
-// The message on a rejection is never Cloudflare's raw response body --
-// zoneInfo/purgeEverything already route every failure (a bad HTTP status,
-// or a 200 with `success: false`) through cloudflareError, which is what
-// guarantees the token cannot appear in it even if Cloudflare's own error
-// payload echoes it back. This function does not call cloudflareError a
-// second time; it only relays the message that call already produced.
+// The message on a rejection is never Cloudflare's raw response body, and
+// never a raw Node error either. zoneInfo/purgeEverything map BOTH halves of
+// the failure space before it reaches here:
+//
+//   - a RESPONSE failure (a bad HTTP status, or a 200 with `success: false`)
+//     through cloudflareError;
+//   - a TRANSPORT rejection from the injected client -- httpsRequest's 15s
+//     timeout, a DNS/TLS error, `https.request`'s synchronous
+//     ERR_UNESCAPED_CHARACTERS throw -- through cloudflareTransportError,
+//     which ops/cloudflare.ts's internal `request()` wrapper applies to every
+//     call it makes.
+//
+// Both run the same token-contamination ladder, which is what guarantees the
+// token cannot appear in the message even if Cloudflare's own error payload
+// echoes it back. This function does not call either mapper a second time; it
+// only relays the message the call already produced. (An earlier version of
+// this comment claimed cloudflareError covered "every error path" -- it
+// covered only the response half, and the transport half reached the 502 body
+// and the activity entry as a bare `getaddrinfo ENOTFOUND api.cloudflare.com`.)
 async function runCloudflare<T>(
   session: ManagedSession,
   label: string,

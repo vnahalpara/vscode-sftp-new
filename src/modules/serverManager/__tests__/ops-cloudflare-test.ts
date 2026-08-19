@@ -1,5 +1,5 @@
 import {
-  hasCloudflare, zoneInfo, purgeEverything, cloudflareError, CloudflareDeps,
+  hasCloudflare, zoneInfo, purgeEverything, cloudflareError, cloudflareTransportError, CloudflareDeps,
 } from '../ops/cloudflare';
 
 const TOKEN = 'cf-secret-token-value';
@@ -7,6 +7,18 @@ const TOKEN = 'cf-secret-token-value';
 function deps(status: number, body: string): CloudflareDeps & { seen: any[] } {
   const seen: any[] = [];
   return { seen, request: (o: any) => { seen.push(o); return Promise.resolve({ status, body }); } };
+}
+
+// A client that fails the way the transport fails -- no response ever exists,
+// so nothing cloudflareError does applies.
+function rejectingDeps(error: any): CloudflareDeps {
+  return { request: () => Promise.reject(error) };
+}
+
+// A client that throws SYNCHRONOUSLY, the shape https.request takes when the
+// path contains an unescaped character (a zone id with a stray space).
+function throwingDeps(error: any): CloudflareDeps {
+  return { request: () => { throw error; } };
 }
 
 test('hasCloudflare requires BOTH fields', () => {
@@ -310,4 +322,61 @@ test('a degenerate short token does not black out an unrelated diagnostic messag
 test('zoneInfo degrades to an actionable error instead of throwing a raw TypeError when result is missing', async () => {
   const d = deps(200, JSON.stringify({ success: true }));
   await expect(zoneInfo(d, 'z1', TOKEN)).rejects.toThrow(/Cloudflare/);
+});
+
+// Final-review finding (LOW): routes.ts claimed no error path bypassed
+// cloudflareError. Response failures all routed through it -- transport
+// rejections did not, and reached the 502 body and the activity entry as raw
+// Node text with nothing framing it as Cloudflare.
+describe('transport failures (no response ever exists)', () => {
+  it('frames a DNS failure as a Cloudflare reachability problem, keeping the cause', async () => {
+    const d = rejectingDeps(new Error('getaddrinfo ENOTFOUND api.cloudflare.com'));
+    await expect(zoneInfo(d, 'z1', TOKEN)).rejects.toThrow(/Could not reach Cloudflare's API/);
+    await expect(zoneInfo(d, 'z1', TOKEN)).rejects.toThrow(/ENOTFOUND api\.cloudflare\.com/);
+  });
+
+  it('frames a timeout on the purge call too', async () => {
+    const d = rejectingDeps(new Error('Cloudflare request timed out after 15000ms'));
+    await expect(purgeEverything(d, 'z1', TOKEN)).rejects.toThrow(/Could not reach Cloudflare's API/);
+  });
+
+  it('frames a SYNCHRONOUS throw from the client (ERR_UNESCAPED_CHARACTERS)', async () => {
+    const err: any = new TypeError('Request path contains unescaped characters');
+    err.code = 'ERR_UNESCAPED_CHARACTERS';
+    await expect(purgeEverything(throwingDeps(err), 'bad zone id', TOKEN)).rejects.toThrow(
+      /Could not reach Cloudflare's API/
+    );
+  });
+
+  it('survives a rejection that is not an Error at all', () => {
+    expect(cloudflareTransportError(null)).toBe("Could not reach Cloudflare's API.");
+    expect(cloudflareTransportError({})).toBe("Could not reach Cloudflare's API.");
+    expect(cloudflareTransportError('a bare string')).toBe("Could not reach Cloudflare's API.");
+  });
+
+  it('never emits the token in the cause, dropping the whole cause if it has to', () => {
+    // Node is not expected to put a header value in one of these, but the
+    // guarantee is structural, not a prediction: what is returned is a string
+    // that was itself tested. Here Layer 2's shape scrub already removes the
+    // contiguous token, so the framed message survives with the secret gone.
+    const scrubbed = cloudflareTransportError(new Error(`connect failed for Bearer ${TOKEN}`), TOKEN);
+    expect(scrubbed).not.toContain(TOKEN);
+    expect(scrubbed).toMatch(/Could not reach Cloudflare's API/);
+
+    // A cause the scrub CANNOT clean (the token fragmented past the
+    // shape regex) falls to the next rung -- the cause is dropped whole
+    // rather than emitted with the secret still in it.
+    const fragmented = TOKEN.split('-').join(' ');
+    const dropped = cloudflareTransportError(new Error(`connect failed for ${fragmented}`), TOKEN);
+    expect(foldedSkeleton(dropped)).not.toContain(foldedSkeleton(TOKEN));
+    expect(dropped).toBe("Could not reach Cloudflare's API.");
+  });
+
+  it('does not leak the token through the same fragmentation Layer 1 exists to close', async () => {
+    const echo = TOKEN.toUpperCase().split('-').join(' ');
+    const d = rejectingDeps(new Error(`socket hang up while sending ${echo}`));
+    await expect(purgeEverything(d, 'z1', TOKEN)).rejects.toThrow(
+      expect.not.stringContaining(echo) as any
+    );
+  });
 });
