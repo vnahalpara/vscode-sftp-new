@@ -56,8 +56,23 @@ class FakeSocket extends FakeEmitter implements WsLike {
 
 // A stand-in for ssh2's separate stderr readable -- the channel's stderr is
 // NOT interleaved into 'data', so a bridge that never reads it cannot see
-// why `sudo -n tail` died.
-class FakeStderr extends FakeEmitter {}
+// why `sudo -n tail` died. pause()/resume() are tracked the same way
+// FakeStream's are: ssh2 shares one flow-control window between stdout and
+// stderr, so forwardOutput must pause/resume this alongside the channel.
+class FakeStderr extends FakeEmitter {
+  paused = false;
+  pauses = 0;
+  resumes = 0;
+
+  pause(): void {
+    this.paused = true;
+    this.pauses++;
+  }
+  resume(): void {
+    this.paused = false;
+    this.resumes++;
+  }
+}
 
 class FakeStream extends FakeEmitter implements LogStream {
   ended = false;
@@ -506,6 +521,60 @@ describe('backpressure', () => {
     socket.drain();
 
     expect(stream.resumes).toBe(0);
+  });
+
+  // ssh2 shares ONE flow-control window and one _waitChanDrain flag between
+  // a channel's stdout and stderr (client.js's exec()), and
+  // ClientStderr._read re-opens that window on the CHANNEL itself, not on
+  // stderr alone. Pausing only stdout leaves the channel free to reopen
+  // every time the remote writes a line to stderr -- a `tail -F` warning
+  // like "file has been replaced; following new file" -- so each such line
+  // would admit one more packet of stdout outside SEND_HIGH_WATER's
+  // accounting. Without stderr paused alongside the channel, a steady
+  // stderr trickle turns a bounded backlog into a slow, unbounded one.
+  test('pauses stderr alongside the channel when the high-water mark is crossed', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    const { deps: d } = deps({ stream: Promise.resolve(stream) });
+    bridgeLogFollow(d, socket, fileTarget());
+    await flush();
+
+    socket.bufferedAmount = 4 * 1024 * 1024;
+    stream.emit('data', Buffer.from('flood'));
+
+    expect(stream.stderr.paused).toBe(true);
+    expect(stream.stderr.pauses).toBe(1);
+  });
+
+  test('resumes stderr alongside the channel once the socket buffer has drained', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    const { deps: d } = deps({ stream: Promise.resolve(stream) });
+    bridgeLogFollow(d, socket, fileTarget());
+    await flush();
+
+    socket.bufferedAmount = 4 * 1024 * 1024;
+    stream.emit('data', Buffer.from('flood'));
+    expect(stream.stderr.paused).toBe(true);
+
+    socket.bufferedAmount = 0;
+    socket.drain();
+
+    expect(stream.stderr.paused).toBe(false);
+    expect(stream.stderr.resumes).toBe(1);
+  });
+
+  test('a channel with no stderr readable is paused without throwing', async () => {
+    const stream = new FakeStream();
+    delete (stream as any).stderr;
+    const socket = new FakeSocket();
+    const { deps: d } = deps({ stream: Promise.resolve(stream) });
+    bridgeLogFollow(d, socket, fileTarget());
+    await flush();
+
+    socket.bufferedAmount = 4 * 1024 * 1024;
+    expect(() => stream.emit('data', Buffer.from('flood'))).not.toThrow();
+    expect(stream.paused).toBe(true);
   });
 });
 

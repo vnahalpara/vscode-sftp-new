@@ -68,6 +68,14 @@ export interface LogStream extends BridgeStream {
 export interface LogStderr {
   on(event: 'data', cb: (chunk: Buffer | string) => void): void;
   on(event: 'error', cb: (err: Error) => void): void;
+  // ssh2 shares ONE flow-control window between a channel's stdout and
+  // stderr, and ClientStderr._read re-opens that window on the CHANNEL, not
+  // on stderr alone -- so forwardOutput (wsBridge.ts) pauses/resumes this
+  // alongside the channel itself, or a stderr trickle quietly defeats
+  // SEND_HIGH_WATER's accounting one packet at a time. Every real channel
+  // has these -- ClientStderr is a plain Readable.
+  pause(): void;
+  resume(): void;
 }
 
 export interface LogFollowDeps {
@@ -371,8 +379,11 @@ export function bridgeLogFollow(deps: LogFollowDeps, socket: WsLike, target: Log
       // the identical copy terminal.ts drives -- a log file written faster
       // than a backgrounded browser tab can read it is the same shape of
       // hazard as a flooding shell, not a different one, so it gets the same
-      // code rather than a second implementation of it.
-      forwardOutput(openedStream, socket, () => torndown);
+      // code rather than a second implementation of it. The stderr readable
+      // is passed through so forwardOutput can pause/resume it alongside the
+      // channel -- see PausableStderr's comment in wsBridge.ts for why an
+      // unpaused stderr defeats SEND_HIGH_WATER on its own.
+      forwardOutput(openedStream, socket, () => torndown, openedStream.stderr);
       // Sliced on every append rather than "stop appending once over the
       // limit": a single ssh2 chunk can be tens of KB, so the looser form
       // would keep MAX_STDERR_CHARS plus one whole chunk, which is not the

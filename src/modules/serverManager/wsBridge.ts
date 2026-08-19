@@ -153,6 +153,14 @@ export function releaseStream(stream: BridgeStream): void {
   }
 }
 
+// The structural subset of ssh2's ClientStderr this needs: enough to pause
+// and resume it alongside the channel. See forwardOutput's `stderr` param
+// for why a bridge with a stderr readable must pass it here.
+export interface PausableStderr {
+  pause(): void;
+  resume(): void;
+}
+
 // Forward remote output to the socket with backpressure, and nothing else.
 // The browser is the slow end here -- a throttled background tab reads at a
 // trickle while a shell or a busy log can produce megabytes a second -- and
@@ -164,7 +172,25 @@ export function releaseStream(stream: BridgeStream): void {
 // `isTornDown` is a callback, not a boolean, precisely because it is read
 // again on every chunk and inside the drain callback -- both of which run
 // long after this function has returned.
-export function forwardOutput(stream: BridgeStream, socket: WsLike, isTornDown: () => boolean): void {
+//
+// `stderr` is optional and, when supplied, is paused/resumed in lockstep
+// with `stream`. ssh2 shares ONE flow-control window and one _waitChanDrain
+// flag between a channel's stdout and stderr (client.js's exec()), and
+// ClientStderr._read (ssh2's Channel.js) clears _waitChanDrain and calls
+// windowAdjust on the CHANNEL, not on stderr alone -- so pausing only stdout
+// leaves stderr free to reopen the shared window every time the remote
+// writes a line to it. Each such line admits one more packet of stdout
+// outside SEND_HIGH_WATER's accounting: a steady stderr trickle (a `tail -F`
+// warning like "file has been replaced; following new file") turns a
+// supposedly bounded backlog into a slow, unbounded one. terminal.ts's
+// ShellStream has no stderr, so it never passes this argument and its
+// behaviour is unchanged.
+export function forwardOutput(
+  stream: BridgeStream,
+  socket: WsLike,
+  isTornDown: () => boolean,
+  stderr?: PausableStderr
+): void {
   let paused = false;
   stream.on('data', chunk => {
     // Teardown already closed this channel; further in-flight data has
@@ -187,6 +213,11 @@ export function forwardOutput(stream: BridgeStream, socket: WsLike, isTornDown: 
           } catch (error) {
             // A dead channel cannot be resumed, and does not need to be.
           }
+          try {
+            stderr?.resume();
+          } catch (error) {
+            // Same reasoning as stream.resume()'s catch above.
+          }
         }
       });
     } catch (error) {
@@ -200,6 +231,11 @@ export function forwardOutput(stream: BridgeStream, socket: WsLike, isTornDown: 
       } catch (error) {
         // Nothing to fall back to: without pause() this is an unbounded
         // buffer, but a throw here means the channel is already gone.
+      }
+      try {
+        stderr?.pause();
+      } catch (error) {
+        // Same reasoning as stream.pause()'s catch above.
       }
     }
   });
