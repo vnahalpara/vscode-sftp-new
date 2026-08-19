@@ -32,7 +32,6 @@ interface Tunnel {
   // know its pid from the marker but hold no child handle on it.
   process?: ChildProcess;
   mergedConfPath: string;
-  refCount: number;
 }
 
 /**
@@ -73,6 +72,35 @@ let keepAliveSetting = true;
 
 // key (resolved config path) -> live tunnel or its pending start promise
 const tunnels = new Map<string, Tunnel | Promise<Tunnel>>();
+
+/**
+ * key -> outstanding acquire() references.
+ *
+ * Kept per key rather than on the Tunnel because a tunnel can die and be
+ * replaced while consumers are still holding the old one, and those consumers
+ * release() by config path -- the only handle they have -- so their release
+ * lands on the replacement. Counted on the tunnel object, the replacement
+ * would start at one, the first stale release would take it to zero, and with
+ * keepAlive off we would kill the tunnel its actual user is transferring over.
+ * Counted per key, the replacement simply inherits the references the dead
+ * tunnel still owed, and dies only once every one of them is given back.
+ */
+const refCounts = new Map<string, number>();
+
+function addRef(key: string): void {
+  refCounts.set(key, (refCounts.get(key) || 0) + 1);
+}
+
+/** Drop one reference and report how many are left. Never goes negative. */
+function dropRef(key: string): number {
+  const remaining = (refCounts.get(key) || 0) - 1;
+  if (remaining <= 0) {
+    refCounts.delete(key);
+    return 0;
+  }
+  refCounts.set(key, remaining);
+  return remaining;
+}
 
 export function init(dir: string, options: { portRange?: string; keepAlive?: boolean } = {}) {
   storageDir = typeof dir === 'string' && dir.length > 0 ? dir : undefined;
@@ -649,7 +677,7 @@ async function startTunnel(vpn: VpnOption, key: string, port: number): Promise<T
   writeMarker(key, { port, pid: child.pid, startedAt: Date.now() });
 
   logger.info(`VPN tunnel up (SOCKS5 127.0.0.1:${port}) for ${vpn.configFile}`);
-  started = { key, port, pid: child.pid, process: child, mergedConfPath, refCount: 1 };
+  started = { key, port, pid: child.pid, process: child, mergedConfPath };
   return started;
 }
 
@@ -679,7 +707,6 @@ async function openTunnel(vpn: VpnOption, key: string): Promise<Tunnel> {
         port,
         pid: outcome.marker.pid,
         mergedConfPath: mergedConfPathFor(key),
-        refCount: 1,
       };
     }
     if (outcome.kind === 'hung') {
@@ -809,7 +836,7 @@ export async function acquire(vpn: VpnOption): Promise<number> {
     // has bound it since -- so ask before reusing, and fall through to a
     // fresh start when the answer is no.
     if (deps.isPidAlive(tunnel.pid)) {
-      tunnel.refCount += 1;
+      addRef(key);
       return tunnel.port;
     }
     if (tunnels.get(key) !== tunnel) {
@@ -830,6 +857,7 @@ export async function acquire(vpn: VpnOption): Promise<number> {
   try {
     const tunnel = await startPromise;
     tunnels.set(key, tunnel);
+    addRef(key);
     return tunnel.port;
   } catch (error) {
     tunnels.delete(key);
@@ -852,24 +880,35 @@ export function portFor(vpn: VpnOption): number | undefined {
 /**
  * Drop one reference to the VPN config's tunnel; kill wireproxy when the last
  * user disconnects -- unless "sftp.vpn.keepAlive" says to leave it running.
- * In that case the tunnel entry (and its process) stay exactly as they are,
- * refCount included, so the next acquire() finds it via the `existing` branch
- * and bumps it straight back up rather than starting or adopting anything.
+ * In that case the tunnel entry (and its process) stay exactly as they are, so
+ * the next acquire() finds it via the `existing` branch and takes a reference
+ * straight back out rather than starting or adopting anything.
  */
 export function release(vpn: VpnOption): void {
   const key = tunnelKey(vpn);
   const entry = tunnels.get(key);
   if (!entry) {
+    // The tunnel this consumer held has already gone -- its wireproxy died and
+    // the exit handler evicted it. The reference still has to come off the
+    // books: left behind, it would be inherited by whatever tunnel takes this
+    // key next and keep that one alive after its own last user let go.
+    dropRef(key);
     return;
   }
   Promise.resolve(entry)
     .then(tunnel => {
-      tunnel.refCount -= 1;
-      if (tunnel.refCount <= 0 && !keepAliveSetting) {
-        tunnels.delete(key);
-        killTunnel(tunnel);
-        logger.info(`VPN tunnel closed for ${vpn.configFile}`);
+      const remaining = dropRef(key);
+      if (remaining > 0 || keepAliveSetting) {
+        return;
       }
+      // Awaiting a still-starting tunnel is another gap in which the map can
+      // move on. Kill only what is actually tracked right now.
+      if (tunnels.get(key) !== tunnel) {
+        return;
+      }
+      tunnels.delete(key);
+      killTunnel(tunnel);
+      logger.info(`VPN tunnel closed for ${vpn.configFile}`);
     })
     .catch(() => {
       // start failed; acquire() already cleaned up the map entry.
@@ -901,4 +940,7 @@ export function disposeAll(): void {
     }
   });
   tunnels.clear();
+  // Every tunnel these counted is dead; carrying the numbers forward would
+  // only inflate whatever a re-activated extension starts next.
+  refCounts.clear();
 }

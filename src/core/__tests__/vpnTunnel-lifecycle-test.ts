@@ -297,6 +297,64 @@ describe('keepAlive', () => {
     expect(h.state.spawns).toBe(1); // one replacement, not two
   });
 
+  test('a tunnel with two consumers survives the first release', async () => {
+    // The plain refcounting case, which nothing else here covers: two
+    // connections over one VPN config share a single wireproxy, so the first
+    // one to disconnect must not take the tunnel with it.
+    const h = await harness({}, { keepAlive: false });
+
+    const port = await h.mod.acquire(h.vpn);
+    expect(await h.mod.acquire(h.vpn)).toBe(port);
+    expect(h.state.spawns).toBe(1);
+
+    h.mod.release(h.vpn);
+    await settle();
+    expect(h.mod.portFor(h.vpn)).toBe(port);
+
+    h.mod.release(h.vpn);
+    await settle();
+    expect(h.mod.portFor(h.vpn)).toBeUndefined();
+  });
+
+  test('a consumer of a dead tunnel does not release the replacement out from under its user', async () => {
+    // release() finds the tunnel by config path, not by handle, so a consumer
+    // still holding a tunnel that has since been evicted releases against
+    // whatever took its place. Counting references on the tunnel object made
+    // that fatal: the replacement starts at one, the stale release drops it to
+    // zero, and with keepAlive off the tunnel its actual user is transferring
+    // over gets killed.
+    const h = await harness({}, { keepAlive: false });
+
+    const first = await h.mod.acquire(h.vpn); // consumer A
+
+    // wireproxy dies -- crash, OOM kill, someone's pkill. The exit handler
+    // evicts the entry, and A is none the wiser.
+    const child = h.state.children[0];
+    await new Promise<void>(resolve => child.server.close(() => resolve()));
+    child.emit('exit', 1);
+    await settle();
+    expect(h.mod.portFor(h.vpn)).toBeUndefined();
+
+    const second = await h.mod.acquire(h.vpn); // consumer B gets a new tunnel
+    expect(h.state.spawns).toBe(2);
+    expect(second).toBe(first); // the port was free again, so it came back
+
+    // A finally disconnects and releases the tunnel it acquired, which no
+    // longer exists.
+    h.mod.release(h.vpn);
+    await settle();
+
+    // B is still using its own tunnel, so it has to survive that.
+    expect(h.mod.portFor(h.vpn)).toBe(second);
+    expect(fs.existsSync(h.mod.markerPathFor(h.vpn))).toBe(true);
+
+    // And once B releases too, it goes away as keepAlive: false demands.
+    h.mod.release(h.vpn);
+    await settle();
+    expect(h.mod.portFor(h.vpn)).toBeUndefined();
+    expect(fs.existsSync(h.mod.markerPathFor(h.vpn))).toBe(false);
+  });
+
   test('disposeAll() kills the tunnel even when keepAlive is true', async () => {
     const h = await harness({}, { keepAlive: true });
 
