@@ -51,13 +51,24 @@ const DEFAULT_HEALTHCHECK_MS = 15000;
 let storageDir = os.tmpdir();
 // The user's port-range setting, as typed. Parsed (and defaulted) per use.
 let portRangeSetting: string | undefined;
+// Mirrors "sftp.vpn.keepAlive": leave the process running across a release()
+// that drops the refcount to zero, so the next acquire() reuses it instead of
+// paying the wireproxy startup cost (and health-check wait) again. The
+// setting's own default (in package.json) is true; this module-internal
+// default is deliberately the opposite, false, so that anything which starts
+// a tunnel without ever calling init() with an explicit choice -- there is no
+// such caller in production, since extension.ts always resolves the real
+// setting -- gets the conservative, leak-averse behaviour rather than
+// silently inheriting a background process it never asked to keep.
+let keepAliveSetting = false;
 
 // key (resolved config path) -> live tunnel or its pending start promise
 const tunnels = new Map<string, Tunnel | Promise<Tunnel>>();
 
-export function init(dir: string, options: { portRange?: string } = {}) {
+export function init(dir: string, options: { portRange?: string; keepAlive?: boolean } = {}) {
   storageDir = dir;
   portRangeSetting = options.portRange;
+  keepAliveSetting = options.keepAlive === true;
 }
 
 function expandHome(p: string): string {
@@ -341,36 +352,40 @@ function removeMarker(key: string): void {
   }
 }
 
+// What a marker naming a live pid on `port` turns out to be once probed.
+// 'none' also covers "not ours to judge" -- no marker, wrong port, dead pid --
+// so callers never have to re-derive that from the marker's fields themselves.
+type OwnedPortOutcome =
+  | { kind: 'adopt'; marker: TunnelMarker }
+  | { kind: 'hung'; marker: TunnelMarker }
+  | { kind: 'none' };
+
 /**
  * Is whatever is listening on `port` provably the tunnel a previous run of
- * this extension started? All four of these must hold, and the answer is no
- * if any one of them doesn't.
+ * this extension started -- and if it is, is it actually working?
  *
- * The SOCKS5 handshake alone would not do. It proves only that *something*
- * there speaks the protocol -- any local process can bind a port in our range
- * and answer correctly. Adopting on that basis would route the user's SSH
+ * The SOCKS5 handshake alone would not decide ownership: it proves only that
+ * *something* there speaks the protocol -- any local process can bind a port
+ * in our range and answer correctly. Trusting that would route the user's SSH
  * session, credentials included, through a proxy chosen by whoever won the
  * race to the port; on a shared or compromised machine that is a plain MITM.
  * So the marker (a file only we write, in our own storage directory) is what
- * establishes ownership.
+ * establishes ownership, and 'none' covers every way it can fail to: absent,
+ * naming a different port, naming a pid that is no longer alive.
  *
- * And the marker alone would not do either: it is a file that outlives the
+ * The marker alone would not decide it either: it is a file that outlives the
  * process it describes, so a stale one whose pid has been recycled onto an
  * unrelated program would vouch for a listener that is not a tunnel at all.
- * The probe is what catches that. Neither check is sufficient; both are.
+ * Given a marker that clears the ownership bar, the probe is what tells adopt
+ * ('yes, and it works') apart from hung ('yes, but it has stopped answering')
+ * -- the latter is ours to clean up rather than route around.
  */
-async function adoptableMarker(key: string, port: number): Promise<TunnelMarker | undefined> {
+async function classifyOwnedPort(key: string, port: number): Promise<OwnedPortOutcome> {
   const marker = readMarker(key);
-  if (!marker || marker.port !== port) {
-    return undefined;
+  if (!marker || marker.port !== port || !deps.isPidAlive(marker.pid)) {
+    return { kind: 'none' };
   }
-  if (!deps.isPidAlive(marker.pid)) {
-    return undefined;
-  }
-  if (!(await deps.speaksSocks5(port))) {
-    return undefined;
-  }
-  return marker;
+  return (await deps.speaksSocks5(port)) ? { kind: 'adopt', marker } : { kind: 'hung', marker };
 }
 
 /**
@@ -391,6 +406,25 @@ function isPortFree(port: number): Promise<boolean> {
     srv.once('error', () => resolve(false));
     srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)));
   });
+}
+
+// Short poll for the OS to actually release a port after we've signalled the
+// process holding it. A killed process closes its listening socket as part of
+// normal teardown, which is near-instant -- but "near" is not "synchronous
+// with process.kill() returning", so a single isPortFree() check right after
+// killPid() would be racy. Five tries at 20ms is generous for that teardown
+// and still short enough that a lagging or ignored signal fails fast into the
+// caller's own fallback rather than stalling the connection.
+async function waitForPortFree(port: number, attempts = 5, delayMs = 20): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    if (await isPortFree(port)) {
+      return true;
+    }
+    if (i < attempts - 1) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  return false;
 }
 
 function getFreePort(): Promise<number> {
@@ -519,27 +553,55 @@ async function openTunnel(vpn: VpnOption, key: string): Promise<Tunnel> {
     explicit !== undefined ? explicit : derivePort(key, parsePortRange(portRangeSetting));
 
   if (!(await isPortFree(port))) {
-    const marker = await adoptableMarker(key, port);
-    if (marker) {
+    const outcome = await classifyOwnedPort(key, port);
+    if (outcome.kind === 'adopt') {
       logger.info(
-        `VPN tunnel adopted (SOCKS5 127.0.0.1:${port}, pid ${marker.pid}) for ${vpn.configFile}`
+        `VPN tunnel adopted (SOCKS5 127.0.0.1:${port}, pid ${outcome.marker.pid}) for ${vpn.configFile}`
       );
       return {
         key,
         port,
-        pid: marker.pid,
+        pid: outcome.marker.pid,
         mergedConfPath: mergedConfPathFor(key),
         refCount: 1,
       };
     }
-    if (explicit === undefined) {
+    if (outcome.kind === 'hung') {
+      // Ours, but wedged: it holds the port yet answers nothing, so it can
+      // never again be adopted (a live marker pointed at a pid that fails the
+      // probe never yields 'adopt') and, once we step aside to a free port,
+      // nothing will ever re-read this marker to kill it either. Left alone
+      // it would sit on the port for the rest of the machine's uptime, and
+      // every reload after this one would leak one more. Killing it here --
+      // before starting its replacement -- is what stops that.
+      logger.warn(
+        `VPN tunnel on 127.0.0.1:${port} (pid ${outcome.marker.pid}) stopped answering ` +
+          `SOCKS5 for ${vpn.configFile}; replacing it`
+      );
+      try {
+        deps.killPid(outcome.marker.pid);
+      } catch (_e) {
+        /* already gone */
+      }
+      removeMarker(key);
+      if (explicit === undefined && !(await waitForPortFree(port))) {
+        // The signal hasn't freed the port yet (or the process ignored it).
+        // Reaping is best-effort: falling back exactly as if a stranger held
+        // the port keeps the connection working now, at the cost of the
+        // stable derived port until the next successful reap or restart.
+        return startTunnel(vpn, key, await getFreePort());
+      }
+      // Either an explicit port (never silently relocated, so we retry it
+      // below regardless) or the wait confirmed the port is free again.
+    } else if (explicit === undefined) {
       // Someone else's port. Step aside rather than fight for it -- the
       // deterministic port is a convenience, not a requirement.
       return startTunnel(vpn, key, await getFreePort());
     }
-    // An explicit port that is taken by something we can't prove is ours is
-    // left alone deliberately: moving a port the user pinned would silently
-    // break whatever they pinned it for. wireproxy fails to bind and says so.
+    // An explicit port held by something we can't prove is ours, and isn't a
+    // hung tunnel of ours to reap, is left alone deliberately: moving a port
+    // the user pinned would silently break whatever they pinned it for.
+    // wireproxy fails to bind and says so.
   }
   return startTunnel(vpn, key, port);
 }
@@ -619,7 +681,10 @@ export function portFor(vpn: VpnOption): number | undefined {
 
 /**
  * Drop one reference to the VPN config's tunnel; kill wireproxy when the last
- * user disconnects.
+ * user disconnects -- unless "sftp.vpn.keepAlive" says to leave it running.
+ * In that case the tunnel entry (and its process) stay exactly as they are,
+ * refCount included, so the next acquire() finds it via the `existing` branch
+ * and bumps it straight back up rather than starting or adopting anything.
  */
 export function release(vpn: VpnOption): void {
   const key = tunnelKey(vpn);
@@ -630,7 +695,7 @@ export function release(vpn: VpnOption): void {
   Promise.resolve(entry)
     .then(tunnel => {
       tunnel.refCount -= 1;
-      if (tunnel.refCount <= 0) {
+      if (tunnel.refCount <= 0 && !keepAliveSetting) {
         tunnels.delete(key);
         killTunnel(tunnel);
         logger.info(`VPN tunnel closed for ${vpn.configFile}`);

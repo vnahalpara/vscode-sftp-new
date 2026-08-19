@@ -114,6 +114,17 @@ export default checkCommand({
     const terminal = vscode.window.createTerminal(remoteConfig.name);
 
     // Release the tunnel reference when this terminal is closed.
+    //
+    // This is not the only way the extension stops running: closing the whole
+    // VS Code window (rather than just this terminal) never fires
+    // onDidCloseTerminal, so this handler simply never runs. That is fine --
+    // vpnTunnel.disposeAll() on deactivate() kills every tracked tunnel
+    // unconditionally, refcount and "sftp.vpn.keepAlive" included, so the
+    // window-close path is covered there instead. Do not "fix" the apparent
+    // leak by adding a release() on deactivate/window-close too: acquire() is
+    // only ever called once per terminal, so a second release() here would
+    // double-release and prematurely kill a tunnel a still-open terminal
+    // elsewhere is relying on.
     if (remoteConfig.vpn) {
       const sub = vscode.window.onDidCloseTerminal(closed => {
         if (closed === terminal) {

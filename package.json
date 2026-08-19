@@ -153,6 +153,16 @@
             }
           },
           "description": "Default local MySQL connection used when importing cloned databases."
+        },
+        "sftp.vpn.portRange": {
+          "type": "string",
+          "default": "21000-21999",
+          "description": "Port range the VPN SOCKS proxy picks a deterministic port from."
+        },
+        "sftp.vpn.keepAlive": {
+          "type": "boolean",
+          "default": true,
+          "description": "Leave the tunnel running when the last consumer releases it, so the next connection reuses it."
         }
       }
     },

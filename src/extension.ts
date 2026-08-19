@@ -54,7 +54,14 @@ export async function activate(context: vscode.ExtensionContext) {
   }
 
   // Writable location for generated VPN tunnel configs (contains private keys).
-  vpnTunnel.init(context.globalStoragePath);
+  // "sftp.vpn.*" is read once here rather than on every acquire()/release(),
+  // matching how sftp.printDebugLog/sftp.debug are documented: change it, then
+  // reload window.
+  const vpnSettings = vscode.workspace.getConfiguration('sftp.vpn');
+  vpnTunnel.init(context.globalStoragePath, {
+    portRange: vpnSettings.get<string>('portRange'),
+    keepAlive: vpnSettings.get<boolean>('keepAlive', true),
+  });
   serverManager.init(context.extensionPath);
 
   const workspaceFolders = getWorkspaceFolders();
