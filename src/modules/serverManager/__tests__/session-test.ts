@@ -2,6 +2,7 @@ import { ManagedSession, CollectorLike, SessionDeps } from '../session';
 import { RedactedProfile } from '../registry';
 import { SseSink } from '../sse';
 import { HostFacts, Snapshot, SlowData } from '../../monitor/types';
+import { createDbAccess } from '../dbAccess';
 
 const PROFILE: RedactedProfile = {
   id: 'abc123',
@@ -500,5 +501,45 @@ describe('ManagedSession cloudflareConfig', () => {
     expect(json).not.toContain('cf-token-value');
     expect(json).not.toContain('CLOUDFLARE_API_TOKEN');
     expect(json).not.toContain('cloudflareConfig');
+  });
+});
+
+// Parallel to the cloudflareConfig block above: `db` is a DbAccess closing
+// over real database credentials (see the doc comment on ManagedSession.db),
+// and state() is what /api/session and /api/host serialise straight to the
+// browser.
+describe('ManagedSession db', () => {
+  const deps: SessionDeps = {
+    transport: { openSampler: async () => ({} as any), exec: async () => ({ stdout: '', stderr: '', code: 0 }) },
+    privilegedTransport: {
+      openSampler: async () => ({} as any),
+      exec: async () => ({ stdout: '', stderr: '', code: 0 }),
+    },
+    readFacts: async () => FACTS,
+    makeCollector: () => new FakeCollector(),
+    schedule: () => 0,
+    cancel: () => undefined,
+    now: () => 1234,
+  };
+
+  test('never appears in state(), which is serialised to the browser', () => {
+    // Deliberately distinctive, not "password": a generic value could pass
+    // this assertion by accident even if it leaked through some other field.
+    const FAKE_PASSWORD = 'zx-not-a-real-secret-9f3c1a';
+    const db = createDbAccess(
+      [{ username: 'u1', password: FAKE_PASSWORD, name: 'shop' }],
+      () => ({} as any)
+    );
+    const session = new ManagedSession(
+      PROFILE,
+      'tok',
+      deps,
+      { graceMs: 1, interval: 1 },
+      {},
+      db
+    );
+    const json = JSON.stringify(session.state());
+    expect(json).not.toContain(FAKE_PASSWORD);
+    expect(json).not.toContain('"db":');
   });
 });
