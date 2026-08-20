@@ -18,23 +18,33 @@ export interface DbDescriptor {
 }
 
 export interface DbAccess {
-  // Browser-safe surface: nothing these return may carry a credential.
+  // Browser-safe: the only method on this interface whose return value may
+  // be serialised to the browser (it is what GET /api/db answers with).
   list(): DbDescriptor[];
-  client(id: string): DbClient | null;
-  tables(id: string): Promise<string[]>;
-  columns(id: string, table: string): Promise<ColumnInfo[]>;
 
-  // Credential-bearing. `config(id)` returns the raw DatabaseConfig,
-  // PASSWORD INCLUDED. It exists only for server-side code that has to build
-  // an out-of-process invocation from the real credentials -- e.g. a future
-  // export route shelling out to `mysqldump` -- where a DbClient's own
-  // in-process connection is not what's needed. Its return value must never
-  // be serialised to the browser, written to the activity log, or passed to
+  // Credential-bearing -- BOTH of these. Neither return value may be
+  // serialised to the browser, written to the activity log, or passed to
   // anything that logs its argument (see global-constraints.md #1: activity
   // entries are a description, never a command string, for exactly this
-  // reason). Contrast with list(), which is the one method above this line
-  // that is actually safe to hand to a route that answers the browser.
+  // reason).
+  //   - config(id) returns the raw DatabaseConfig, PASSWORD INCLUDED, as a
+  //     plaintext field. It exists only for server-side code that has to
+  //     build an out-of-process invocation from the real credentials --
+  //     e.g. a future export route shelling out to `mysqldump` -- where a
+  //     DbClient's own in-process connection is not what's needed.
+  //   - client(id) LOOKS safe -- it returns an object, not a string -- but
+  //     is not: DbClient's `dbConfig` field is TypeScript-`private`, which
+  //     is compile-time only. At runtime it is a normal enumerable
+  //     property, so JSON.stringify(client(id)) prints the password exactly
+  //     as config(id) would. Treat its return value with the same care.
+  client(id: string): DbClient | null;
   config(id: string): DatabaseConfig | null;
+
+  // Browser-safe result shapes (table/column names, not credentials) --
+  // reached through client(id) above, whose own return value is still not
+  // safe to pass around.
+  tables(id: string): Promise<string[]>;
+  columns(id: string, table: string): Promise<ColumnInfo[]>;
 }
 
 // Ids are positional (`db0`, `db1`, ...) and match the FILTERED `database[]`
@@ -114,11 +124,7 @@ export function createDbAccess(
         name: dbConfig.name,
         label: dbConfig.label || dbConfig.name,
       })),
-    // Returns a DbClient, not a plain value. TypeScript's `private` on
-    // DbClient.dbConfig is compile-time only -- it is a normal enumerable
-    // runtime property -- so JSON.stringify(access.client(id)) prints the
-    // password same as config() would. Never serialise, log, or otherwise
-    // stringify what this returns.
+    // Credential-bearing -- see the doc comment on DbAccess.client above.
     client: clientFor,
     tables: async id => require(id).listTables(),
     columns: async (id, table) => require(id).listColumns(table),

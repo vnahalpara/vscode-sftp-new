@@ -538,6 +538,15 @@ describe('ManagedSession db', () => {
       {},
       db
     );
+
+    // Prove the credential genuinely reached session.db first. Without this,
+    // "the password is absent from state()" is true whether or not `db` was
+    // ever wired up at all (state() never mentions db under any
+    // circumstances), so the test would pass even if `this.db = db` were
+    // deleted from the constructor. Do not remove this half to "simplify"
+    // the test -- it is what makes the second assertion mean anything.
+    expect(session.db.config('db0')?.password).toBe(FAKE_PASSWORD);
+
     const json = JSON.stringify(session.state());
     expect(json).not.toContain(FAKE_PASSWORD);
     expect(json).not.toContain('"db":');
