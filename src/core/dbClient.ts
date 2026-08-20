@@ -1,6 +1,6 @@
 import * as mysql from 'mysql2/promise';
 import logger from '../logger';
-import { buildMysqlCommand, parseMysqlBatch, mysqlError } from './dbExec';
+import { buildMysqlCommand, parseMysqlBatch, mysqlError, sqlLiteral } from './dbExec';
 
 export interface DatabaseConfig {
   // resolved from the remote server's perspective (localhost = MySQL on the SSH host)
@@ -195,22 +195,16 @@ export class DbClient {
     );
   }
 
-  // Inline ? placeholders with escaped literals for the exec (CLI) transport.
+  // Inline ? placeholders for the exec (CLI) transport, which has no parameter
+  // binding. sqlLiteral (dbExec.ts) renders every value as a hex literal, which
+  // parses identically under NO_BACKSLASH_ESCAPES and the default sql_mode --
+  // the quoted-string escaping this used to do did not.
   private _inline(sql: string, params?: any[]): string {
     if (!params || params.length === 0) {
       return sql;
     }
     let i = 0;
-    return sql.replace(/\?/g, () => {
-      const v = params[i++];
-      if (v === null || v === undefined) {
-        return 'NULL';
-      }
-      if (typeof v === 'number') {
-        return String(v);
-      }
-      return `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, `\\'`)}'`;
-    });
+    return sql.replace(/\?/g, () => sqlLiteral(params[i++]));
   }
 
   async listTables(): Promise<string[]> {

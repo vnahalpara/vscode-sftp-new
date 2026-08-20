@@ -1,6 +1,6 @@
 import { splitStatements, applyDefaultLimit, isMutating, hasWhere } from '../dbSql';
 import { quoteId, buildTableSearchSql } from '../dbSearch';
-import { buildMysqlCommand, buildTableDumpCommand, parseMysqlBatch, shellSingle } from '../dbExec';
+import { buildMysqlCommand, buildTableDumpCommand, parseMysqlBatch, shellSingle, sqlLiteral } from '../dbExec';
 import { buildWhere, buildOrderBy, buildSelect, buildCount, buildUpdate, buildDelete } from '../dbQuery';
 import { DbClient } from '../dbClient';
 
@@ -198,5 +198,74 @@ describe('DbClient auto-reconnect', () => {
     const res = await client.query('SELECT 1 AS n');
     expect(res.rows).toEqual([['1']]);
     expect(providerCalls).toBe(2); // reconnected with a fresh ssh client
+  });
+});
+
+describe('sqlLiteral', () => {
+  it('renders null as the NULL keyword', () => {
+    expect(sqlLiteral(null)).toBe('NULL');
+    expect(sqlLiteral(undefined)).toBe('NULL');
+  });
+
+  it('renders a finite number bare', () => {
+    expect(sqlLiteral(42)).toBe('42');
+    expect(sqlLiteral(-1.5)).toBe('-1.5');
+  });
+
+  // NaN/Infinity are not MySQL literals; emitting them bare would be a syntax
+  // error, so they go through the string path like any other value.
+  it('does not emit NaN or Infinity as bare numbers', () => {
+    expect(sqlLiteral(NaN)).not.toBe('NaN');
+    expect(sqlLiteral(Infinity)).not.toBe('Infinity');
+  });
+
+  it('renders a string as an introduced hex literal', () => {
+    expect(sqlLiteral('ab')).toBe("_utf8mb4 X'6162'");
+  });
+
+  // The whole point: under NO_BACKSLASH_ESCAPES a backslash-escaped quote is
+  // not an escape at all. A hex literal has no quoting to subvert.
+  it('is unaffected by quotes and backslashes in the value', () => {
+    const evil = "' OR 1=1 -- \\";
+    const out = sqlLiteral(evil);
+    expect(out).toBe("_utf8mb4 X'" + Buffer.from(evil, 'utf8').toString('hex') + "'");
+    // The only quotes in the output are the two delimiting the hex literal --
+    // nothing from the value itself survives as syntax.
+    expect(out.split("'")).toHaveLength(3);
+  });
+
+  it('renders the empty string as a valid empty hex literal', () => {
+    expect(sqlLiteral('')).toBe("_utf8mb4 X''");
+  });
+
+  it('renders a Buffer as a binary hex literal with no character-set introducer', () => {
+    expect(sqlLiteral(Buffer.from([0x00, 0xff]))).toBe("X'00ff'");
+  });
+
+  it('renders a boolean as 1 or 0', () => {
+    expect(sqlLiteral(true)).toBe('1');
+    expect(sqlLiteral(false)).toBe('0');
+  });
+});
+
+describe('DbClient exec transport inlining', () => {
+  it('inlines parameters as hex literals rather than quoted strings', async () => {
+    const seen: string[] = [];
+    const ssh = {
+      openForwardStream: async () => {
+        throw new Error('forwarding disabled');
+      },
+      exec: async (_cmd: string, input?: string) => {
+        seen.push(input || '');
+        return { stdout: 'a\n1\n', stderr: '', code: 0 };
+      },
+    };
+    const client = new DbClient(
+      { username: 'u', password: 'p', name: 'db' },
+      async () => ssh as any
+    );
+    await client.query('SELECT * FROM t WHERE c = ?', ["it's"]);
+    expect(seen[0]).toContain("_utf8mb4 X'" + Buffer.from("it's", 'utf8').toString('hex') + "'");
+    expect(seen[0]).not.toContain("\\'");
   });
 });

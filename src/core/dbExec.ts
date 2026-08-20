@@ -5,6 +5,37 @@ export function shellSingle(value: string): string {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
+// Render a JS value as a MySQL literal for the exec (CLI) transport, which has
+// no parameter binding.
+//
+// Strings become `_utf8mb4 X'<hex>'` rather than a quoted string. A quoted
+// string has to escape the quote character, and the ONLY two ways to do that
+// disagree across server configurations: `\'` is an escape under the default
+// sql_mode and an ordinary backslash followed by a string terminator under
+// NO_BACKSLASH_ESCAPES, while doubling (`''`) is right in both but leaves the
+// backslash itself needing mode-dependent treatment. A hex literal has no
+// quoting inside it to subvert, so it is exact under every mode.
+//
+// The `_utf8mb4` introducer matters: a bare X'..' is a BINARY string, and
+// comparing one against a utf8mb4 column raises "Illegal mix of collations".
+// A Buffer is genuinely binary and deliberately gets no introducer.
+export function sqlLiteral(value: any): string {
+  if (value === null || value === undefined) {
+    return 'NULL';
+  }
+  if (typeof value === 'boolean') {
+    return value ? '1' : '0';
+  }
+  // isFinite excludes NaN and Infinity, neither of which is a MySQL literal.
+  if (typeof value === 'number' && isFinite(value)) {
+    return String(value);
+  }
+  if (Buffer.isBuffer(value)) {
+    return `X'${value.toString('hex')}'`;
+  }
+  return `_utf8mb4 X'${Buffer.from(String(value), 'utf8').toString('hex')}'`;
+}
+
 // Build the `mysql` CLI invocation (password via MYSQL_PWD so it stays out of argv).
 // SQL is piped to stdin by the caller, so it never needs shell-escaping.
 export function buildMysqlCommand(dbConfig: DatabaseConfig): string {
