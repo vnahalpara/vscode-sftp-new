@@ -1,5 +1,6 @@
 import { buildRoutes } from '../routes';
-import { matchRoute } from '../router';
+import { matchRoute, Route } from '../router';
+import { Handler } from '../httpServer';
 
 const COLUMNS = [
   { name: 'id', type: 'int(11)', nullable: false, key: 'PRI' },
@@ -63,7 +64,10 @@ function fakeCtx(token: string, opts: any = {}) {
   return ctx;
 }
 
-function run(routes: any[], method: string, path: string, ctx: any) {
+// Route<Handler>[], not any[]: matchRoute is generic, so an `any[]` argument
+// infers Route<unknown> and makes `matched.handler` uncallable under tsc --
+// which webpack's ts-loader enforces even though ts-jest does not.
+function run(routes: Route<Handler>[], method: string, path: string, ctx: any) {
   const matched = matchRoute(routes, method, path);
   expect(matched).toBeTruthy();
   ctx.params = matched!.params;

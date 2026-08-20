@@ -97,6 +97,11 @@ function fakeCtx(token: string, query: any = {}): { ctx: Ctx; res: any } {
     params: {},
     query,
     token,
+    // Ctx.body became required when the server learned to parse JSON request
+    // bodies. These tests construct a Ctx directly rather than going through
+    // the server, so they have to supply it -- and `{}` is exactly what the
+    // real pipeline hands a handler for a request that carried no body.
+    body: {},
     json(status, body) {
       res.status = status;
       res.body = JSON.stringify(body);

@@ -13,6 +13,19 @@ const SHORT_IDLE_TIMEOUT_MS = 50;
 // hand-built Ctx, since the parsing happens in the request pipeline itself
 // (between matchRoute and the handler call), not in anything a directly
 // constructed Ctx would touch.
+// This repo pins @types/node at v9, where http.OutgoingMessage is typed
+// `destroy(error: Error): void` -- the argument is REQUIRED by the type,
+// though it has been optional at runtime since Node 8. A bare `req.destroy()`
+// therefore passes `npm test` (ts-jest does not typecheck) and then fails
+// webpack's ts-loader, which is what actually gates `vsce package`.
+//
+// Cast at the one place it matters rather than passing a throwaway Error:
+// destroy(err) makes the request emit 'error', which would change what these
+// tests observe about the teardown they are asserting on.
+function destroyRequest(req: http.ClientRequest): void {
+  (req as unknown as { destroy(): void }).destroy();
+}
+
 describe('createServer request body parsing', () => {
   let server: http.Server;
   let port: number;
@@ -306,7 +319,7 @@ describe('createServer request body parsing', () => {
             let body = '';
             res.on('data', chunk => (body += chunk));
             res.on('end', () => {
-              req.destroy();
+              destroyRequest(req);
               resolve({ status: res.statusCode || 0, body });
             });
           }
@@ -342,7 +355,7 @@ describe('createServer request body parsing', () => {
             let body = '';
             res.on('data', chunk => (body += chunk));
             res.on('end', () => {
-              req.destroy();
+              destroyRequest(req);
               resolve({ status: res.statusCode || 0, body });
             });
           }
