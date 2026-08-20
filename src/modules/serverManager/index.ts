@@ -8,12 +8,14 @@ import { WebSocket } from 'ws';
 import logger from '../../logger';
 import { getHostInfo } from '../../core/fileService';
 import { removeRemoteFs, hashOption } from '../../core/remoteFs';
+import { getDbClient } from '../../core/dbConnectionManager';
 import { Collector, MonitorTransport } from '../monitor/collector';
 import { sshTransport, readFacts } from '../monitor/transport';
 import { HostFacts } from '../monitor/types';
 import { profileId, redactProfile } from './registry';
 import { targetOption, hasRootCreds } from './privilege';
 import { ManagedSession } from './session';
+import { createDbAccess, normaliseDatabases } from './dbAccess';
 import { closeServer, closeSessionSockets, createServer, listen } from './httpServer';
 import { parseSafe } from './wsServer';
 import { CLOSE_INTERNAL_ERROR } from './wsBridge';
@@ -519,6 +521,13 @@ export async function ensureSession(fileService: any, config: any): Promise<stri
   // privileged command (systemctl, nginx -t, openssl) does that.
   const privileged = sshTransport(fileService, privilegedConfig(config));
   const token = crypto.randomBytes(32).toString('hex');
+  // Closes over fileService and config so no database password becomes a field
+  // on the session object. getDbClient pools one client per (connection,
+  // database), so the dashboard and the VS Code panel share a connection
+  // rather than opening a second one per database.
+  const dbAccess = createDbAccess(normaliseDatabases(config), dbConfig =>
+    getDbClient(fileService, config, dbConfig)
+  );
   const session = new ManagedSession(
     redactProfile(fileService.workspace, config),
     token,
@@ -544,7 +553,8 @@ export async function ensureSession(fileService: any, config: any): Promise<stri
     // on a hop profile, the target's root_password). See the field's doc
     // comment on ManagedSession: it is read by routes.ts's
     // /api/cloudflare/* handlers and must never reach state()/the browser.
-    { CLOUDFLARE_ZONE_ID: config.CLOUDFLARE_ZONE_ID, CLOUDFLARE_API_TOKEN: config.CLOUDFLARE_API_TOKEN }
+    { CLOUDFLARE_ZONE_ID: config.CLOUDFLARE_ZONE_ID, CLOUDFLARE_API_TOKEN: config.CLOUDFLARE_API_TOKEN },
+    dbAccess
   );
 
   session.activity.onEntry = entry =>

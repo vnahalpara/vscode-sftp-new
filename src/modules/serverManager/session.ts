@@ -3,6 +3,7 @@ import { HostFacts, Snapshot, SlowData, LoadPoint } from '../monitor/types';
 import { RedactedProfile } from './registry';
 import { SseChannel, SseSink } from './sse';
 import { ActivityLog } from './activity';
+import { DbAccess, NO_DATABASES } from './dbAccess';
 
 export type SessionStatus = 'idle' | 'connecting' | 'online' | 'offline' | 'unsupported';
 
@@ -57,6 +58,14 @@ export class ManagedSession {
   // serialised straight to the browser over GET /api/session and
   // GET /api/host, the same contract RedactedProfile exists to uphold.
   readonly cloudflareConfig: { CLOUDFLARE_ZONE_ID?: string; CLOUDFLARE_API_TOKEN?: string };
+  // How the /api/db/* routes reach this profile's databases. A FUNCTION-shaped
+  // adapter, deliberately, not the raw `database[]` array: the array carries a
+  // username and password per entry, and this object lives for as long as the
+  // dashboard stays open. DbAccess closes over the credentials inside
+  // index.ts's ensureSession instead, so they are reachable only from the code
+  // that opens a connection. Like cloudflareConfig, this must never be added
+  // to state()/SessionState -- that object goes straight to the browser.
+  readonly db: DbAccess;
   readonly sse = new SseChannel();
   readonly activity = new ActivityLog();
 
@@ -87,7 +96,8 @@ export class ManagedSession {
     token: string,
     deps: SessionDeps,
     opts: SessionOpts,
-    cloudflareConfig: { CLOUDFLARE_ZONE_ID?: string; CLOUDFLARE_API_TOKEN?: string } = {}
+    cloudflareConfig: { CLOUDFLARE_ZONE_ID?: string; CLOUDFLARE_API_TOKEN?: string } = {},
+    db: DbAccess = NO_DATABASES
   ) {
     this.id = profile.id;
     this.token = token;
@@ -95,6 +105,7 @@ export class ManagedSession {
     this._deps = deps;
     this._opts = opts;
     this.cloudflareConfig = cloudflareConfig;
+    this.db = db;
   }
 
   // Public on purpose: the ops layer (routes.ts, readOpsFor) runs this
