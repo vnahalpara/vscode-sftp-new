@@ -26,6 +26,16 @@ export type Handler = (ctx: Ctx) => void | Promise<void>;
 // much a single request can hold in memory before it is rejected.
 export const MAX_BODY_BYTES = 1048576;
 
+// A loopback caller is the extension's own webview, on the same machine --
+// there is no network hop to be slow on. 15s is generous headroom for a
+// slow/contended local machine (a big JSON edit encoded on a throttled CPU)
+// while still bounding the leak an idle client causes to a short window
+// rather than forever: a client that sends headers with a Content-Length
+// and then goes quiet fires neither 'data', 'end', nor 'error', so without
+// this timer the request, response and accumulated buffer would sit alive
+// until the process exits.
+export const BODY_IDLE_TIMEOUT_MS = 15000;
+
 // A signal, not a real Error subclass: readJsonBody's caller only needs the
 // status code to answer with, never a stack trace (these are all client
 // input problems, not bugs).
@@ -39,13 +49,20 @@ class BodyError extends Error {
 // matchRoute -- see the isApi branch below for why. Resolves to {} for a
 // route that expects a body but the caller sent none, so callers never have
 // to distinguish "no body" from "empty object". Takes res (rather than
-// leaving all responding to the caller) only for the size-cap case below,
-// where the response must be written *before* the socket is torn down.
-function readJsonBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<any> {
+// leaving all responding to the caller) so the size-cap and idle-timeout
+// paths below can write their own response *before* the socket is torn
+// down.
+function readJsonBody(req: http.IncomingMessage, res: http.ServerResponse, idleTimeoutMs: number): Promise<any> {
   return new Promise((resolve, reject) => {
-    const contentType = req.headers['content-type'];
-    const isJson = typeof contentType === 'string' && /^application\/json(\s*;.*)?$/i.test(contentType.trim());
-    if (contentType && !isJson) {
+    const contentTypeHeader = req.headers['content-type'];
+    const hasContentType = typeof contentTypeHeader === 'string' && contentTypeHeader.length > 0;
+    const isJson = hasContentType && /^application\/json(\s*;.*)?$/i.test((contentTypeHeader as string).trim());
+    // A declared-but-wrong type is rejected up front, before waiting on any
+    // bytes: the header alone already tells us this request cannot be
+    // satisfied. An *absent* type is not rejected here -- see onData below,
+    // which is the only place that can tell whether the body turned out to
+    // be empty (allowed, per the brief) or not (still a 415).
+    if (hasContentType && !isJson) {
       reject(new BodyError(415, 'Unsupported content type'));
       return;
     }
@@ -53,33 +70,71 @@ function readJsonBody(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const chunks: Buffer[] = [];
     let total = 0;
     let settled = false;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // Answer first, then destroy once the response has actually finished
+    // flushing to the socket: res.end() is asynchronous with respect to the
+    // underlying write, so destroying in the same tick can truncate the
+    // response that was just sent. This has already bitten this function
+    // once (the size cap below); the idle-timeout path a few lines down
+    // hits the exact same hazard, which is why both paths share this
+    // helper instead of each inlining their own ordering.
+    const respondThenDestroy = (status: number, message: string) => {
+      if (res.headersSent) {
+        req.destroy();
+        return;
+      }
+      res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(message, () => req.destroy());
+    };
 
     const finish = (fn: () => void) => {
       if (settled) {
         return;
       }
       settled = true;
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
       req.removeListener('data', onData);
       req.removeListener('end', onEnd);
       req.removeListener('error', onError);
       fn();
     };
 
+    // Idle, not total-duration: reset on every chunk so a legitimately slow
+    // but *progressing* upload is never killed, only a connection that has
+    // gone silent.
+    const resetIdleTimer = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      idleTimer = setTimeout(() => {
+        finish(() => {
+          respondThenDestroy(408, 'Request body idle timeout');
+          reject(new BodyError(408, 'Request body idle timeout'));
+        });
+      }, idleTimeoutMs);
+    };
+
     const onData = (chunk: Buffer) => {
+      if (!hasContentType && total === 0) {
+        // First byte of a body that never declared a type. The brief's
+        // exception for a missing content-type is scoped to a zero-length
+        // body (resolved in onEnd below, which this never reaches); actual
+        // bytes with no declared type are exactly as unsupported as bytes
+        // with the wrong declared type.
+        finish(() => reject(new BodyError(415, 'Unsupported content type')));
+        return;
+      }
+      resetIdleTimer();
       total += chunk.length;
       if (total > MAX_BODY_BYTES) {
+        // Stop accumulating and answer immediately rather than draining the
+        // rest of a payload already decided to be too big.
         finish(() => {
-          // Answer first, then destroy: draining the rest of a payload
-          // already decided to be too big is exactly what destroy() exists
-          // to avoid, but the client still needs the 413 to actually reach
-          // it before the connection goes away. Writing headers here also
-          // marks res.headersSent, so the dispatch catch below (running in
-          // a later microtask) knows not to answer a second time.
-          if (!res.headersSent) {
-            res.writeHead(413, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
-            res.end('Request body too large');
-          }
-          req.destroy();
+          respondThenDestroy(413, 'Request body too large');
           reject(new BodyError(413, 'Request body too large'));
         });
         return;
@@ -120,6 +175,12 @@ function readJsonBody(req: http.IncomingMessage, res: http.ServerResponse): Prom
     req.on('data', onData);
     req.on('end', onEnd);
     req.on('error', onError);
+
+    // Covers the silent-client case where 'data' never fires at all (headers
+    // arrive with a Content-Length, then nothing): without this, the timer
+    // would never even start, since resetIdleTimer() above is otherwise
+    // only reached from inside onData.
+    resetIdleTimer();
   });
 }
 
@@ -139,6 +200,10 @@ export interface ServerDeps {
   // authenticated upgrade to /ws/logs is accepted and then immediately
   // closed, never left open with nothing driving it.
   onLogs?: WsOpts['onLogs'];
+  // Overrides BODY_IDLE_TIMEOUT_MS for readJsonBody. Production code never
+  // sets this; it exists so a test can inject a short timeout instead of
+  // making the suite actually wait out the real one.
+  bodyIdleTimeoutMs?: number;
 }
 
 const TYPES: { [ext: string]: string } = {
@@ -270,7 +335,9 @@ export function createServer(deps: ServerDeps): http.Server {
         // an unauthenticated caller stream a megabyte into this process for
         // a path that might not even be a real route.
         if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
-          ctx.body = await readJsonBody(req, res);
+          const idleTimeoutMs =
+            typeof deps.bodyIdleTimeoutMs === 'number' ? deps.bodyIdleTimeoutMs : BODY_IDLE_TIMEOUT_MS;
+          ctx.body = await readJsonBody(req, res, idleTimeoutMs);
         }
         await match.handler(ctx);
       };
