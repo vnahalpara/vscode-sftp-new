@@ -246,6 +246,15 @@ describe('sqlLiteral', () => {
     expect(sqlLiteral(true)).toBe('1');
     expect(sqlLiteral(false)).toBe('0');
   });
+
+  // The motivating case for hex-literal inlining under LIKE: a wildcarded
+  // search term must survive as bytes inside the hex payload, with no literal
+  // "%" character left in the output for LIKE to (mis)parse as syntax.
+  it('renders a LIKE wildcard term as hex bytes, with no literal % in the output', () => {
+    const out = sqlLiteral('%term%');
+    expect(out).toBe("_utf8mb4 X'" + Buffer.from('%term%', 'utf8').toString('hex') + "'");
+    expect(out).not.toContain('%');
+  });
 });
 
 describe('DbClient exec transport inlining', () => {
@@ -267,5 +276,52 @@ describe('DbClient exec transport inlining', () => {
     await client.query('SELECT * FROM t WHERE c = ?', ["it's"]);
     expect(seen[0]).toContain("_utf8mb4 X'" + Buffer.from("it's", 'utf8').toString('hex') + "'");
     expect(seen[0]).not.toContain("\\'");
+  });
+
+  // End-to-end: a LIKE wildcard param must decode back to "%term%" via the hex
+  // literal, so LIKE still matches -- this is the regression a wrong-direction
+  // encoding of "%" would cause.
+  it('inlines a LIKE wildcard parameter as a hex literal that decodes to the wildcarded string', async () => {
+    const seen: string[] = [];
+    const ssh = {
+      openForwardStream: async () => {
+        throw new Error('forwarding disabled');
+      },
+      exec: async (_cmd: string, input?: string) => {
+        seen.push(input || '');
+        return { stdout: 'a\n1\n', stderr: '', code: 0 };
+      },
+    };
+    const client = new DbClient(
+      { username: 'u', password: 'p', name: 'db' },
+      async () => ssh as any
+    );
+    await client.query('SELECT a FROM t WHERE a LIKE ?', ['%term%']);
+    expect(seen[0]).toContain("LIKE _utf8mb4 X'" + Buffer.from('%term%', 'utf8').toString('hex') + "'");
+    expect(seen[0]).not.toContain("'%term%'");
+  });
+
+  // The real call path: buildTableSearchSql (dbSearch.ts) builds a multi-column
+  // OR-LIKE query with one placeholder per column; both must get substituted.
+  it('inlines every placeholder from a buildTableSearchSql query with multiple columns', async () => {
+    const seen: string[] = [];
+    const ssh = {
+      openForwardStream: async () => {
+        throw new Error('forwarding disabled');
+      },
+      exec: async (_cmd: string, input?: string) => {
+        seen.push(input || '');
+        return { stdout: 'a\tb\n1\t2\n', stderr: '', code: 0 };
+      },
+    };
+    const client = new DbClient(
+      { username: 'u', password: 'p', name: 'db' },
+      async () => ssh as any
+    );
+    const sql = buildTableSearchSql('wp_posts', ['post_title', 'post_content'], 50);
+    await client.query(sql, ['%t%', '%t%']);
+    const hex = "_utf8mb4 X'" + Buffer.from('%t%', 'utf8').toString('hex') + "'";
+    expect(seen[0].split(hex).length - 1).toBe(2); // both placeholders substituted
+    expect(seen[0]).not.toContain('?');
   });
 });
