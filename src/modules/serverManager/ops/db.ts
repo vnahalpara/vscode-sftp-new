@@ -254,15 +254,27 @@ export function truncateCell(value: any): { value: any; truncated: boolean } {
 // therefore the wrong layer -- it cannot tell "the source really had this
 // character" from "decoding produced this because we cut mid-sequence", and
 // so can silently delete real data. Working on bytes avoids the ambiguity.
-function completeUtf8Prefix(buf: Buffer): number {
+//
+// Exported (rather than kept private) purely so the malformed-input path
+// below can be unit tested directly: truncateCell can never actually feed it
+// malformed bytes, because its input always comes from
+// Buffer.from(text, 'utf8'), which is well-formed by construction. The
+// guard exists because this function reads as a general-purpose byte
+// helper, not because that path is reachable today.
+export function completeUtf8Prefix(buf: Buffer): number {
   let i = buf.length - 1;
   // Walk back over continuation bytes (10xxxxxx) to find the lead byte of
-  // whatever sequence ends at (or was cut off at) the buffer's end.
+  // whatever sequence ends at (or was cut off at) the buffer's end. Bounded
+  // by `i >= 0` so this can never walk past the start of the buffer.
   while (i >= 0 && (buf[i] & 0xc0) === 0x80) {
     i--;
   }
   if (i < 0) {
-    return buf.length; // buffer is empty, or ASCII to the end -- nothing to trim
+    // Either `buf` is empty, or it is nothing BUT continuation bytes (no
+    // lead byte anywhere) -- malformed UTF-8 with no complete sequence in
+    // it at all, so the complete prefix is deliberately empty rather than
+    // the whole (garbage) buffer.
+    return 0;
   }
   const lead = buf[i];
   const seqLen = (lead & 0xf8) === 0xf0 ? 4 : (lead & 0xf0) === 0xe0 ? 3 : (lead & 0xe0) === 0xc0 ? 2 : 1;

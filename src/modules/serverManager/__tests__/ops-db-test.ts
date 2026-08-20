@@ -14,6 +14,7 @@ import {
   confirmationNeeded,
   truncateCell,
   truncateRows,
+  completeUtf8Prefix,
 } from '../ops/db';
 import { ColumnInfo } from '../../../core/dbClient';
 
@@ -290,9 +291,15 @@ describe('truncateCell', () => {
   });
 
   // '€' is 3 bytes in UTF-8 and MAX_CELL_BYTES is not a multiple of 3, so the
-  // byte cut lands mid-character -- a splitter that merely sliced bytes
-  // without trimming the partial sequence would still pass a length-only
-  // assertion, so this also checks the decoded text carries no U+FFFD.
+  // byte cut lands mid-character. NOTE what this does and does not prove:
+  // it pins that no PARTIAL code point is ever emitted at the cut. It does
+  // NOT distinguish this implementation from the old regex-based one
+  // (slice -> toString('utf8') -> replace(/\uFFFD$/, '')) -- on a genuine
+  // mid-sequence cut like this one, decoding the byte-exact slice produces a
+  // single trailing U+FFFD and the old regex stripped it too, so both
+  // implementations give byte-identical output here. The
+  // "keeps a replacement character..." test below is the one that actually
+  // discriminates the two.
   it('measures bytes, not characters, so multi-byte text is capped correctly', () => {
     const out = truncateCell('€'.repeat(MAX_CELL_BYTES));
     expect(out.truncated).toBe(true);
@@ -300,15 +307,36 @@ describe('truncateCell', () => {
     expect(out.value).not.toContain('�');
   });
 
-  // A leading ASCII byte shifts every 4-byte emoji off the 4-byte alignment
-  // MAX_CELL_BYTES would otherwise land on, forcing the cut mid-character and
-  // exercising the 4-byte lead-byte branch of the trim separately from the
-  // 3-byte case above.
+  // Same caveat as above: a leading ASCII byte shifts every 4-byte emoji off
+  // the 4-byte alignment MAX_CELL_BYTES would otherwise land on, forcing the
+  // cut mid-character and exercising the 4-byte lead-byte branch of the trim
+  // separately from the 3-byte case -- but it still does not discriminate
+  // this implementation from the old regex-based one, for the same reason.
   it('trims a partial 4-byte code point at the cut without corrupting it', () => {
     const out = truncateCell('x' + '😀'.repeat(MAX_CELL_BYTES));
     expect(out.truncated).toBe(true);
     expect(Buffer.byteLength(out.value, 'utf8')).toBeLessThanOrEqual(MAX_CELL_BYTES);
     expect(out.value).not.toContain('�');
+  });
+
+  // THIS is the test that discriminates the byte-level trim from the old
+  // regex-based one. The value is built so the first MAX_CELL_BYTES bytes
+  // end with a genuine, COMPLETE U+FFFD (0xEF 0xBF 0xBD) that really is part
+  // of the source data, with more data still following so truncation fires.
+  // Decoding that byte-exact slice is well-formed UTF-8 (the sequence is
+  // complete), so it decodes straight to a trailing U+FFFD with nothing left
+  // over to signal "this was a cut, not real data". The old implementation
+  // then blindly stripped any trailing U+FFFD with a regex, deleting this
+  // real character and returning a string ONE CHARACTER SHORTER than the
+  // correct answer. The byte-level trim only drops a sequence that is
+  // actually incomplete, so it leaves this one alone.
+  it('keeps a replacement character that was really in the data, where the old regex stripped it', () => {
+    const padding = 'a'.repeat(MAX_CELL_BYTES - 3);
+    const value = padding + '\uFFFD' + 'more data past the cap so truncation fires';
+    const out = truncateCell(value);
+    expect(out.truncated).toBe(true);
+    expect(Buffer.byteLength(out.value, 'utf8')).toBeLessThanOrEqual(MAX_CELL_BYTES);
+    expect(out.value.endsWith('\uFFFD')).toBe(true);
   });
 
   it('renders a Buffer as a hex string it can also truncate', () => {
@@ -333,5 +361,20 @@ describe('truncateRows', () => {
 
   it('reports no truncation for small rows', () => {
     expect(truncateRows([['a', 1, null]]).truncated).toBe(false);
+  });
+});
+
+describe('completeUtf8Prefix', () => {
+  // truncateCell can never actually feed this malformed bytes -- its input
+  // always comes from Buffer.from(text, 'utf8'), which is well-formed by
+  // construction -- but the walk-back loop looks like a general-purpose byte
+  // helper, so its guard against malformed input is tested directly here.
+  it('treats an all-continuation-byte buffer as having no complete prefix', () => {
+    const buf = Buffer.from([0x80, 0x81, 0x82]);
+    expect(completeUtf8Prefix(buf)).toBe(0);
+  });
+
+  it('treats an empty buffer as having no bytes to trim', () => {
+    expect(completeUtf8Prefix(Buffer.alloc(0))).toBe(0);
   });
 });
