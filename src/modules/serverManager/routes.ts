@@ -23,6 +23,8 @@ import { parseUnits, parseUnitFiles, mergeServices, sortServices } from './ops/s
 import { parseDetect, parseNginxVhosts, parseApacheVhosts, parseCertInfo, CertInfo } from './ops/webserver';
 import { parseLogDiscovery } from './ops/logs';
 import { hasCloudflare, zoneInfo, purgeEverything, CloudflareDeps } from './ops/cloudflare';
+import { BadRequest, planRows, requireTable, truncateRows } from './ops/db';
+import { ColumnInfo, DbClient } from '../../core/dbClient';
 
 export interface SessionLookup {
   get(token: string): ManagedSession | undefined;
@@ -256,6 +258,92 @@ async function runCloudflare<T>(
     });
     return { ok: false, message };
   }
+}
+
+// The DB equivalent of runPrivileged -- with one deliberate difference that is
+// the whole reason it is a separate function rather than a reuse.
+//
+// runPrivileged records the COMMAND STRING it ran. For a database operation
+// that string would be built by buildMysqlCommand/buildMysqldumpCommand, both
+// of which embed `MYSQL_PWD='<password>'` literally. The activity log is
+// serialised to the browser over GET /api/activity AND written to the VS Code
+// output channel, so logging the command would put the database password in
+// both -- the same class of leak as the Cloudflare token leak fixed in 1.27.0.
+// `label`/`description` are written by US, from the table and operation names,
+// and never from a credential-bearing string.
+async function runDb<T>(
+  session: ManagedSession,
+  label: string,
+  description: string,
+  call: () => Promise<T>
+): Promise<{ ok: true; value: T } | { ok: false; error: Error }> {
+  const start = Date.now();
+  try {
+    const value = await call();
+    session.activity.push({
+      at: Date.now(),
+      label,
+      command: description,
+      code: 0,
+      ms: Date.now() - start,
+      error: null,
+    });
+    return { ok: true, value };
+  } catch (error) {
+    session.activity.push({
+      at: Date.now(),
+      label,
+      command: description,
+      code: 1,
+      ms: Date.now() - start,
+      error: (error as Error).message,
+    });
+    return { ok: false, error: error as Error };
+  }
+}
+
+// Resolve the session and the DbClient together. A missing session is the
+// existing 404; a database id this profile does not carry is also a 404 (the
+// resource genuinely does not exist), which is distinct from the 400 an
+// unknown TABLE gets (the resource exists; the request about it is wrong).
+function resolveDb(
+  deps: RouteDeps,
+  ctx: Ctx
+): { session: ManagedSession; client: DbClient } | null {
+  const session = resolve(deps, ctx);
+  if (!session) {
+    return null;
+  }
+  const client = session.db.client(ctx.params.id);
+  if (!client) {
+    ctx.text(404, `No database "${ctx.params.id}" is configured for this profile.`);
+    return null;
+  }
+  return { session, client };
+}
+
+// BadRequest (ops/db.ts) is caller error and maps to 400. Anything else is a
+// genuine fault -- a dead SSH channel, a driver error -- and keeps its 500.
+// Distinguishing by TYPE rather than by inspecting the message is what stops a
+// real server fault from being reported to the user as their own mistake.
+function dbError(ctx: Ctx, error: Error): void {
+  if (error instanceof BadRequest) {
+    ctx.text(400, error.message);
+    return;
+  }
+  ctx.text(500, error.message);
+}
+
+// Resolve a table name against the live listing for THIS database -- Global
+// Constraint 2 -- and hand back its columns, which every plan* function needs
+// for its own allowlist checks.
+async function tableContext(
+  client: DbClient,
+  table: string
+): Promise<{ table: string; columns: ColumnInfo[] }> {
+  const known = await client.listTables();
+  const resolved = requireTable(table, known);
+  return { table: resolved, columns: await client.listColumns(resolved) };
 }
 
 // What buildRoutes hands back: the handlers, plus read-only access to the
@@ -691,6 +779,90 @@ export function buildRoutes(deps: RouteDeps): BuiltRoutes {
         );
         if (!result.ok) {
           ctx.text(502, result.message);
+          return;
+        }
+        ctx.json(200, result.value);
+      },
+    },
+    {
+      method: 'GET',
+      path: '/api/db',
+      handler: ctx => {
+        const session = resolve(deps, ctx);
+        if (!session) {
+          return;
+        }
+        // Descriptors only -- id, name and label. dbAccess.list() builds them
+        // fresh from named fields, so no credential can ride along.
+        ctx.json(200, { databases: session.db.list() });
+      },
+    },
+    {
+      method: 'GET',
+      path: '/api/db/:id/tables',
+      handler: async ctx => {
+        const resolved = resolveDb(deps, ctx);
+        if (!resolved) {
+          return;
+        }
+        const result = await runDb(resolved.session, 'list tables', `database ${ctx.params.id}`, () =>
+          resolved.client.listTables()
+        );
+        if (!result.ok) {
+          dbError(ctx, result.error);
+          return;
+        }
+        ctx.json(200, { tables: result.value });
+      },
+    },
+    {
+      method: 'GET',
+      path: '/api/db/:id/tables/:table/columns',
+      handler: async ctx => {
+        const resolved = resolveDb(deps, ctx);
+        if (!resolved) {
+          return;
+        }
+        const result = await runDb(
+          resolved.session,
+          'read table structure',
+          `${ctx.params.table} structure`,
+          () => tableContext(resolved.client, ctx.params.table)
+        );
+        if (!result.ok) {
+          dbError(ctx, result.error);
+          return;
+        }
+        ctx.json(200, { columns: result.value.columns });
+      },
+    },
+    {
+      method: 'POST',
+      path: '/api/db/:id/tables/:table/rows',
+      handler: async ctx => {
+        const resolved = resolveDb(deps, ctx);
+        if (!resolved) {
+          return;
+        }
+        const result = await runDb(resolved.session, 'select rows', `select from ${ctx.params.table}`, async () => {
+          const context = await tableContext(resolved.client, ctx.params.table);
+          const plan = planRows(context.table, context.columns, ctx.body);
+          const page = await resolved.client.query(plan.select.sql, plan.select.params);
+          const counted = await resolved.client.query(plan.count.sql, plan.count.params);
+          const capped = truncateRows(page.rows);
+          return {
+            columns: page.columns,
+            rows: capped.rows,
+            truncated: capped.truncated,
+            // COUNT(*) comes back as a number over the stream transport and a
+            // string over the CLI one; normalise so the client's arithmetic
+            // works on both.
+            total: counted.rows.length ? Number(counted.rows[0][0]) : 0,
+            durationMs: page.durationMs,
+          };
+        });
+        if (!result.ok) {
+          dbError(ctx, result.error);
           return;
         }
         ctx.json(200, result.value);
