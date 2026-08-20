@@ -77,6 +77,28 @@ describe('parsePaging', () => {
   it('rejects a fractional limit', () => {
     expect(() => parsePaging({ limit: 2.5 })).toThrow(BadRequest);
   });
+
+  // Constraint 5 [finding]: only a number or a plain-digit string is a whole
+  // number here -- not whatever `Number(...)` happens to coerce.
+  it('rejects a boolean limit', () => {
+    expect(() => parsePaging({ limit: true })).toThrow(BadRequest);
+  });
+
+  it('rejects an array limit', () => {
+    expect(() => parsePaging({ limit: [10] })).toThrow(BadRequest);
+  });
+
+  it('rejects an object limit', () => {
+    expect(() => parsePaging({ limit: { value: 10 } })).toThrow(BadRequest);
+  });
+
+  it('rejects a hex-string limit rather than reinterpreting it', () => {
+    expect(() => parsePaging({ limit: '0x10' })).toThrow(BadRequest);
+  });
+
+  it('rejects an exponential-notation limit rather than reinterpreting it', () => {
+    expect(() => parsePaging({ limit: '1e3' })).toThrow(BadRequest);
+  });
 });
 
 describe('parseSort', () => {
@@ -267,15 +289,39 @@ describe('truncateCell', () => {
     expect(Buffer.byteLength(out.value, 'utf8')).toBeLessThanOrEqual(MAX_CELL_BYTES);
   });
 
+  // '€' is 3 bytes in UTF-8 and MAX_CELL_BYTES is not a multiple of 3, so the
+  // byte cut lands mid-character -- a splitter that merely sliced bytes
+  // without trimming the partial sequence would still pass a length-only
+  // assertion, so this also checks the decoded text carries no U+FFFD.
   it('measures bytes, not characters, so multi-byte text is capped correctly', () => {
-    const out = truncateCell('é'.repeat(MAX_CELL_BYTES));
+    const out = truncateCell('€'.repeat(MAX_CELL_BYTES));
     expect(out.truncated).toBe(true);
     expect(Buffer.byteLength(out.value, 'utf8')).toBeLessThanOrEqual(MAX_CELL_BYTES);
+    expect(out.value).not.toContain('�');
+  });
+
+  // A leading ASCII byte shifts every 4-byte emoji off the 4-byte alignment
+  // MAX_CELL_BYTES would otherwise land on, forcing the cut mid-character and
+  // exercising the 4-byte lead-byte branch of the trim separately from the
+  // 3-byte case above.
+  it('trims a partial 4-byte code point at the cut without corrupting it', () => {
+    const out = truncateCell('x' + '😀'.repeat(MAX_CELL_BYTES));
+    expect(out.truncated).toBe(true);
+    expect(Buffer.byteLength(out.value, 'utf8')).toBeLessThanOrEqual(MAX_CELL_BYTES);
+    expect(out.value).not.toContain('�');
   });
 
   it('renders a Buffer as a hex string it can also truncate', () => {
     const out = truncateCell(Buffer.from([0xde, 0xad]));
     expect(out.value).toBe('dead');
+  });
+
+  // Hex rendering is 2 chars per byte, so a Buffer well under MAX_CELL_BYTES
+  // in its own right can still overflow the cap once rendered.
+  it('truncates a large Buffer once its hex rendering exceeds MAX_CELL_BYTES', () => {
+    const out = truncateCell(Buffer.alloc(MAX_CELL_BYTES, 0xab));
+    expect(out.truncated).toBe(true);
+    expect(Buffer.byteLength(out.value, 'utf8')).toBeLessThanOrEqual(MAX_CELL_BYTES);
   });
 });
 

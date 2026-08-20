@@ -30,7 +30,10 @@ export class BadRequest extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'BadRequest';
-    // Restores the prototype chain under the repo's ES5 target, without which
+    // TypeScript's `extends Error` loses the prototype chain when the
+    // compiled target's `super(message)` goes through the plain ES `Error`
+    // constructor (the repo targets es6, not es5 -- this is TS's built-in
+    // extends quirk, not a target-specific one). Without this,
     // `instanceof BadRequest` is false and every caller error becomes a 500.
     Object.setPrototypeOf(this, BadRequest.prototype);
   }
@@ -61,11 +64,23 @@ export function requireColumns(names: string[], columns: ColumnInfo[]): void {
 // (MySQL will not accept a placeholder for LIMIT/OFFSET in a prepared
 // statement), so anything that is not a plain non-negative integer is refused
 // here rather than coerced.
+// Only a `number`, or a string of plain decimal digits, is accepted -- not
+// whatever `Number(...)` happens to parse. `Number('0x10')`, `Number('1e3')`,
+// `Number(true)` and `Number([])` all produce safe non-negative integers
+// today, but accepting them means the meaning of a value silently depends on
+// JS coercion rules rather than on what the client actually sent.
 function wholeNumber(value: any, label: string, fallback: number): number {
   if (value === undefined || value === null || value === '') {
     return fallback;
   }
-  const n = typeof value === 'number' ? value : Number(value);
+  let n: number;
+  if (typeof value === 'number') {
+    n = value;
+  } else if (typeof value === 'string' && /^\d+$/.test(value)) {
+    n = Number(value);
+  } else {
+    throw new BadRequest(`${label} must be a whole number, not ${JSON.stringify(value)}.`);
+  }
   if (!isFinite(n) || Math.floor(n) !== n || n < 0) {
     throw new BadRequest(`${label} must be a whole number, not ${JSON.stringify(value)}.`);
   }
@@ -222,11 +237,39 @@ export function truncateCell(value: any): { value: any; truncated: boolean } {
   if (Buffer.byteLength(text, 'utf8') <= MAX_CELL_BYTES) {
     return { value: text, truncated: false };
   }
-  // Slice by BYTES, then drop a trailing partial code point: a naive
-  // text.slice(MAX_CELL_BYTES) counts UTF-16 units and would still exceed the
-  // byte cap for any multi-byte content.
+  // Slice by BYTES -- a naive text.slice(MAX_CELL_BYTES) counts UTF-16 units
+  // and would still exceed the byte cap for any multi-byte content.
   const buf = Buffer.from(text, 'utf8').slice(0, MAX_CELL_BYTES);
-  return { value: buf.toString('utf8').replace(/�$/, ''), truncated: true };
+  return { value: buf.slice(0, completeUtf8Prefix(buf)).toString('utf8'), truncated: true };
+}
+
+// Finds how many leading bytes of `buf` form complete UTF-8 code points,
+// dropping a lead byte's sequence whole if the cut fell before it finished.
+//
+// This has to work on the raw BYTES, not on the decoded string: once
+// buf.toString('utf8') has run, Node has already replaced any incomplete
+// trailing sequence with U+FFFD, and a genuine U+FFFD that was present in
+// the SOURCE data looks identical to that replacement. A regex trimming a
+// trailing U+FFFD off the decoded string (the previous approach here) is
+// therefore the wrong layer -- it cannot tell "the source really had this
+// character" from "decoding produced this because we cut mid-sequence", and
+// so can silently delete real data. Working on bytes avoids the ambiguity.
+function completeUtf8Prefix(buf: Buffer): number {
+  let i = buf.length - 1;
+  // Walk back over continuation bytes (10xxxxxx) to find the lead byte of
+  // whatever sequence ends at (or was cut off at) the buffer's end.
+  while (i >= 0 && (buf[i] & 0xc0) === 0x80) {
+    i--;
+  }
+  if (i < 0) {
+    return buf.length; // buffer is empty, or ASCII to the end -- nothing to trim
+  }
+  const lead = buf[i];
+  const seqLen = (lead & 0xf8) === 0xf0 ? 4 : (lead & 0xf0) === 0xe0 ? 3 : (lead & 0xe0) === 0xc0 ? 2 : 1;
+  // The lead byte's declared sequence length reaches past the end of the
+  // buffer, so its continuation bytes were cut off -- drop the whole
+  // incomplete sequence rather than decode a partial one.
+  return i + seqLen > buf.length ? i : buf.length;
 }
 
 export function truncateRows(rows: any[][]): { rows: any[][]; truncated: boolean } {
