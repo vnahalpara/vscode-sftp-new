@@ -11,11 +11,117 @@ export interface Ctx {
   params: RouteParams;
   query: any;
   token: string;
+  // Always an object, even for a body-less GET or a POST with no body at
+  // all ({}). Consumers index into it by key and must never have to
+  // null-check it.
+  body: any;
   json(status: number, body: any): void;
   text(status: number, body: string, type?: string): void;
 }
 
 export type Handler = (ctx: Ctx) => void | Promise<void>;
+
+// 1 MiB. Generous for the JSON payloads this surface carries (table/column
+// names, WHERE clauses, small result-set edits) while still bounding how
+// much a single request can hold in memory before it is rejected.
+export const MAX_BODY_BYTES = 1048576;
+
+// A signal, not a real Error subclass: readJsonBody's caller only needs the
+// status code to answer with, never a stack trace (these are all client
+// input problems, not bugs).
+class BodyError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
+// Only ever called for POST/PUT/PATCH, after the token check and after
+// matchRoute -- see the isApi branch below for why. Resolves to {} for a
+// route that expects a body but the caller sent none, so callers never have
+// to distinguish "no body" from "empty object". Takes res (rather than
+// leaving all responding to the caller) only for the size-cap case below,
+// where the response must be written *before* the socket is torn down.
+function readJsonBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const contentType = req.headers['content-type'];
+    const isJson = typeof contentType === 'string' && /^application\/json(\s*;.*)?$/i.test(contentType.trim());
+    if (contentType && !isJson) {
+      reject(new BodyError(415, 'Unsupported content type'));
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
+
+    const finish = (fn: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('error', onError);
+      fn();
+    };
+
+    const onData = (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > MAX_BODY_BYTES) {
+        finish(() => {
+          // Answer first, then destroy: draining the rest of a payload
+          // already decided to be too big is exactly what destroy() exists
+          // to avoid, but the client still needs the 413 to actually reach
+          // it before the connection goes away. Writing headers here also
+          // marks res.headersSent, so the dispatch catch below (running in
+          // a later microtask) knows not to answer a second time.
+          if (!res.headersSent) {
+            res.writeHead(413, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+            res.end('Request body too large');
+          }
+          req.destroy();
+          reject(new BodyError(413, 'Request body too large'));
+        });
+        return;
+      }
+      chunks.push(chunk);
+    };
+
+    const onEnd = () => {
+      finish(() => {
+        if (chunks.length === 0) {
+          resolve({});
+          return;
+        }
+        let parsed: any;
+        try {
+          parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        } catch (error) {
+          reject(new BodyError(400, 'Malformed JSON body'));
+          return;
+        }
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          reject(new BodyError(400, 'JSON body must be an object'));
+          return;
+        }
+        resolve(parsed);
+      });
+    };
+
+    // A client that disconnects mid-body (or any other stream error) must
+    // reject rather than hang the handler forever waiting on 'end'. The
+    // socket is already gone by the time this fires, so this only ever
+    // unwinds the promise -- see the dispatch catch below for why it must
+    // not then try to write a response on it.
+    const onError = (error: Error) => {
+      finish(() => reject(error));
+    };
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+  });
+}
 
 export interface ServerDeps {
   root: string;
@@ -121,6 +227,11 @@ export function createServer(deps: ServerDeps): http.Server {
       params: {},
       query: parsed.query,
       token,
+      // Reassigned below for POST/PUT/PATCH once readJsonBody resolves; every
+      // other method keeps this default rather than waiting on a body that
+      // was never going to arrive (GET /api/stream is a long-lived SSE
+      // response -- blocking it on a body read hangs the whole dashboard).
+      body: {},
       json(status, body) {
         const payload = JSON.stringify(body);
         res.writeHead(status, {
@@ -151,14 +262,37 @@ export function createServer(deps: ServerDeps): http.Server {
         return;
       }
       ctx.params = match.params;
-      try {
-        const result = match.handler(ctx);
-        if (result && typeof (result as Promise<void>).catch === 'function') {
-          (result as Promise<void>).catch(error => fail(ctx, error, true));
+
+      const dispatch = async () => {
+        // Only these methods can carry a body. A GET must never wait on one
+        // -- see the ctx.body comment above -- and reading a body before
+        // this point (before the token check, before matchRoute) would let
+        // an unauthenticated caller stream a megabyte into this process for
+        // a path that might not even be a real route.
+        if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+          ctx.body = await readJsonBody(req, res);
         }
-      } catch (error) {
+        await match.handler(ctx);
+      };
+
+      dispatch().catch(error => {
+        if (error instanceof BodyError) {
+          // The 413 path already wrote its own response before rejecting
+          // (see readJsonBody) and headersSent will be true here; every
+          // other BodyError (400/415) reaches this still unanswered.
+          if (!ctx.res.headersSent) {
+            ctx.text(error.status, error.message);
+          }
+          return;
+        }
+        // A body-read rejection that is not a BodyError is the request
+        // socket's own 'error' event (client disconnected mid-body): the
+        // socket is already gone, so there is nothing left to answer on.
+        if (req.socket && req.socket.destroyed) {
+          return;
+        }
         fail(ctx, error as Error, true);
-      }
+      });
       return;
     }
 
