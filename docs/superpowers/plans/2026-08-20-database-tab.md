@@ -1346,7 +1346,7 @@ function run(routes: any[], method: string, path: string, ctx: any) {
   const matched = matchRoute(routes, method, path);
   expect(matched).toBeTruthy();
   ctx.params = matched!.params;
-  return matched!.route.handler(ctx);
+  return matched!.handler(ctx);
 }
 
 function build(session: any) {
@@ -1657,12 +1657,15 @@ Add the routes to the `routes` array, after the Cloudflare entries:
 
 Add the missing imports at the top: `ColumnInfo`, `DbClient` from `'../../core/dbClient'`.
 
-- [ ] **Step 4: Confirm the router supports a four-segment parameterised path**
+- [ ] **Step 4: (already verified — no work needed)**
 
-Run: `npx jest src/modules/serverManager/__tests__/router-test.ts`
-If `matchRoute` cannot express `/api/db/:id/tables/:table/columns`, add a test for that
-shape to `router-test.ts` and extend `router.ts` — do not work around it by flattening
-the path into a query string.
+`matchRoute` (`router.ts`) is generic over segment count and matches
+`/api/db/:id/tables/:table/columns` as-is. It also splits on `/` BEFORE
+`decodeURIComponent`, so a table name containing a slash survives correctly as one
+percent-encoded segment. No router change is needed; do not make one.
+
+Note its return shape: `matchRoute` returns `{ handler, params }` — **not**
+`{ route, params }`. Call it as `matched.handler(ctx)`.
 
 - [ ] **Step 5: Run the tests**
 
