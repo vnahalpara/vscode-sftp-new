@@ -98,9 +98,7 @@ tab: five stat cards (CPU, Memory, Disk, Load (1m), Uptime), charts for CPU usag
 memory usage, load average and network throughput, plus tables for filesystems, top processes by
 CPU, disk I/O (IOPS and latency) and network interfaces. A range selector switches the charts
 between the last 5, 15 and 60 minutes of in-memory history. **Services**, **Web server**,
-**Terminal** and **Logs** are also live tabs — see below. **Database** is not yet implemented:
-it appears as a visibly disabled tab for every profile, including profiles that have `database`
-configured (that configuration drives the separate **Databases** sidebar view, not this tab).
+**Terminal**, **Logs** and **Database** are also live tabs — see below.
 
 The Terminal and Logs tabs each open their own token-authenticated WebSocket (`/ws/terminal`,
 `/ws/logs`) alongside the dashboard's existing HTTP/SSE traffic, gated the same way the rest of the
@@ -382,6 +380,48 @@ file transfers, with `administratively prohibited`. The cap keeps six channels o
 that limit for everything else the dashboard and your file transfers need. Note the Terminal is
 not capped: each browser tab left on the Terminal tab holds one more channel, so opening the
 dashboard in several tabs at once can still reach the limit.
+
+### Database tab
+
+Full parity with the extension's existing VS Code data browser (below), rendered as a tab in the
+dashboard instead of a sidebar view: pick a database, browse its tables, sort and filter a page of
+rows, edit a cell in place, delete a row, run raw SQL, and export a table or the whole database as
+a downloaded `.sql.gz`. The tab and the sidebar **Database** entry are both enabled once this build
+ships the feature; a profile whose `sftp.json` has no `database[]` entries just opens to an empty
+picker ("No databases — nothing was returned for this profile") rather than being greyed out. A
+minimal entry, using the same schema the sidebar view already reads:
+
+```json
+{
+  "host": "localhost",
+  "port": 3306,
+  "username": "db_user",
+  "password": "db_pass",
+  "name": "my_database",
+  "label": "main (wp)"
+}
+```
+
+Databases are addressed by a stable id derived from their position in the `database[]` array
+(`db0`, `db1`, …) — never by name, since two entries may legitimately share one. Every table name
+and every column name used in a sort, filter, edit or delete is checked against a live listing for
+that database before any SQL is built; an identifier that doesn't match is rejected rather than
+sent to the server. Pages are capped at **500 rows**, and an individual cell value is truncated at
+**64 KiB** — the grid and the SQL runner both say when a value shown to you has been shortened.
+
+The **SQL runner** is a collapsible panel under the grid. Running a statement that changes data
+(`UPDATE`/`DELETE`/`INSERT`/…) asks for confirmation first; if that statement additionally carries
+no `WHERE` clause, it asks a **second** time, because "this changes data" and "this affects every
+row" are different decisions worth separate confirmations. Both gates are enforced on the server,
+not only in the browser, so a stale tab or a scripted request can't skip them. A bare `SELECT` gets
+an automatic `LIMIT` the same way the sidebar's Run Query does.
+
+**Security note.** This tab has the same reach as the Terminal tab described above: anyone who
+holds the dashboard's URL and its session token can already open that shell and run `mysql` by
+hand. The Database tab is a better *interface* to access the token already grants, not a new
+privilege the dashboard didn't already carry. The practical takeaway is the same one the rest of
+this page already asks for — the dashboard URL carries the session token, so don't leave it open on
+a shared screen and don't paste the URL anywhere.
 
 ### Install the .vsix (both platforms)
 - **UI:** Extensions panel → `…` menu → **Install from VSIX…** → pick `vaibhav-sftp-plus-<version>.vsix` → reload.

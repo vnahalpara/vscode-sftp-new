@@ -1,3 +1,23 @@
+## 1.28.0 - 2026-08-21
+* New Feature : the Manage Server dashboard's **Database** tab -- full parity with the extension's
+  existing VS Code data browser, rendered as a live tab instead of a sidebar view. Pick a database,
+  browse its tables, sort and filter a page of rows, edit a cell in place, delete a row, run raw
+  SQL, and export a table or the whole database as a downloaded `.sql.gz`. Every identifier used in
+  a sort, filter, edit or delete is checked against a live table/column listing before any SQL is
+  built; pages are capped at 500 rows and a cell value is truncated at 64 KiB, with the UI saying so
+  when it happens. The SQL runner asks for confirmation before running a statement that changes
+  data, and a second time if that statement carries no `WHERE` clause -- both gates enforced on the
+  server, not only in the browser. The tab has the same reach as the existing Terminal tab: anyone
+  holding the dashboard URL and its session token can already open that shell and run `mysql` by
+  hand, so this is a better interface to a capability the token already granted, not a new one --
+  don't leave the dashboard open on a shared screen or paste its URL anywhere.
+* Fix : values bound into queries on the `mysql` CLI fallback transport (used when a host disables
+  SSH port forwarding) are now rendered as `sql_mode`-independent hex literals
+  (`_utf8mb4 X'<hex>'`) instead of being escaped with a backslash. Backslash-escaping a quote is
+  wrong under `sql_mode=NO_BACKSLASH_ESCAPES` -- a backslash isn't an escape character there, so it
+  produced a syntax error at best and a malformed query at worst. This is shared code, so it also
+  fixes the existing VS Code database panel on hosts running that mode, not just the new tab.
+
 ## 1.27.0 - 2026-08-20
 * New Feature : the Web server tab now shows a **Cloudflare** card with a **Purge everything**
   button, for any profile whose `sftp.json` entry carries both `CLOUDFLARE_ZONE_ID` and
