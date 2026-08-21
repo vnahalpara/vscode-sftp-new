@@ -82,7 +82,7 @@ const CAPABILITIES = {
   webserver: true,
   logs: true,
   terminal: true,
-  database: false,
+  database: true,
   // DELIBERATELY UNCONSUMED, and it must stay that way. Every other key here
   // is a TAB name -- App.jsx and Dashboard.jsx look each tab up by key to
   // decide whether to grey it out. Cloudflare is not a tab; it is a card

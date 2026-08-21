@@ -196,7 +196,7 @@ describe('buildRoutes', () => {
       webserver: true,
       logs: true,
       terminal: true,
-      database: false,
+      database: true,
       cloudflare: true,
     });
   });
