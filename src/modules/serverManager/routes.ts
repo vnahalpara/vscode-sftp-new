@@ -23,7 +23,16 @@ import { parseUnits, parseUnitFiles, mergeServices, sortServices } from './ops/s
 import { parseDetect, parseNginxVhosts, parseApacheVhosts, parseCertInfo, CertInfo } from './ops/webserver';
 import { parseLogDiscovery } from './ops/logs';
 import { hasCloudflare, zoneInfo, purgeEverything, CloudflareDeps } from './ops/cloudflare';
-import { BadRequest, planRows, requireTable, truncateRows } from './ops/db';
+import {
+  BadRequest,
+  planRows,
+  planUpdate,
+  planDelete,
+  planSql,
+  confirmationNeeded,
+  requireTable,
+  truncateRows,
+} from './ops/db';
 import { ColumnInfo, DbClient } from '../../core/dbClient';
 
 export interface SessionLookup {
@@ -866,6 +875,114 @@ export function buildRoutes(deps: RouteDeps): BuiltRoutes {
           return;
         }
         ctx.json(200, result.value);
+      },
+    },
+    {
+      method: 'POST',
+      path: '/api/db/:id/tables/:table/update',
+      handler: async ctx => {
+        const resolved = resolveDb(deps, ctx);
+        if (!resolved) {
+          return;
+        }
+        const result = await runDb(resolved.session, 'update row', `update ${ctx.params.table}`, async () => {
+          const context = await tableContext(resolved.client, ctx.params.table);
+          const built = planUpdate(context.table, context.columns, ctx.body);
+          return resolved.client.query(built.sql, built.params);
+        });
+        if (!result.ok) {
+          dbError(ctx, result.error);
+          return;
+        }
+        ctx.json(200, { ok: true, affectedRows: result.value.affectedRows });
+      },
+    },
+    {
+      method: 'POST',
+      path: '/api/db/:id/tables/:table/delete',
+      handler: async ctx => {
+        const resolved = resolveDb(deps, ctx);
+        if (!resolved) {
+          return;
+        }
+        const result = await runDb(resolved.session, 'delete row', `delete from ${ctx.params.table}`, async () => {
+          const context = await tableContext(resolved.client, ctx.params.table);
+          const built = planDelete(context.table, context.columns, ctx.body);
+          return resolved.client.query(built.sql, built.params);
+        });
+        if (!result.ok) {
+          dbError(ctx, result.error);
+          return;
+        }
+        ctx.json(200, { ok: true, affectedRows: result.value.affectedRows });
+      },
+    },
+    {
+      method: 'POST',
+      path: '/api/db/:id/sql',
+      handler: async ctx => {
+        const resolved = resolveDb(deps, ctx);
+        if (!resolved) {
+          return;
+        }
+
+        let plan;
+        try {
+          plan = planSql(ctx.body && ctx.body.sql);
+        } catch (error) {
+          dbError(ctx, error as Error);
+          return;
+        }
+
+        // Global Constraint 5. Answered BEFORE anything runs, and answered
+        // here rather than in the browser: a stale tab, a replayed request or
+        // a script driving this API must hit the same gate the dialog does.
+        // 200 rather than 4xx because it is a normal answer the UI acts on --
+        // it renders the confirmation and resends -- not a failure.
+        const needed = confirmationNeeded(plan, ctx.body);
+        if (needed) {
+          ctx.json(200, { needsConfirm: true, reason: needed.reason, statements: plan.statements });
+          return;
+        }
+
+        // Statements run in sequence and stop at the first failure, but the
+        // results that already succeeded are still returned: half a script
+        // having run is exactly what the user needs to know, and discarding
+        // those results to report only the error would hide it.
+        const results: any[] = [];
+        let failure: string | null = null;
+        const start = Date.now();
+        for (const statement of plan.statements) {
+          try {
+            const res = await resolved.client.query(statement);
+            const capped = truncateRows(res.rows);
+            results.push({
+              columns: res.columns,
+              rows: capped.rows,
+              truncated: capped.truncated,
+              rowCount: res.rowCount,
+              affectedRows: res.affectedRows,
+              durationMs: res.durationMs,
+            });
+          } catch (error) {
+            failure = (error as Error).message;
+            break;
+          }
+        }
+
+        resolved.session.activity.push({
+          at: Date.now(),
+          label: 'run sql',
+          // The statement COUNT and the mutating flag, never the SQL text --
+          // a raw statement can carry values a user pasted in, and the
+          // activity log goes to the browser and the output channel alike.
+          command: `${plan.statements.length} statement(s)${plan.mutating ? ', mutating' : ''}`,
+          code: failure ? 1 : 0,
+          ms: Date.now() - start,
+          error: failure,
+        });
+
+        ctx.json(200, { results, error: failure });
       },
     },
   ];

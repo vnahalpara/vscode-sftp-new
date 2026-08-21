@@ -1,4 +1,4 @@
-import { splitStatements, applyDefaultLimit, isMutating, hasWhere } from '../dbSql';
+import { splitStatements, applyDefaultLimit, isMutating, hasWhere, stripLiterals } from '../dbSql';
 import { quoteId, buildTableSearchSql } from '../dbSearch';
 import { buildMysqlCommand, buildTableDumpCommand, parseMysqlBatch, shellSingle, sqlLiteral } from '../dbExec';
 import { buildWhere, buildOrderBy, buildSelect, buildCount, buildUpdate, buildDelete } from '../dbQuery';
@@ -45,6 +45,63 @@ describe('mutation guards', () => {
   it('detects WHERE clauses', () => {
     expect(hasWhere('DELETE FROM t WHERE id=1')).toBe(true);
     expect(hasWhere('DELETE FROM t')).toBe(false);
+  });
+});
+
+describe('stripLiterals', () => {
+  it('blanks a block comment\'s contents but keeps the /* */ markers', () => {
+    const out = stripLiterals('DELETE FROM users /* where did these come from */');
+    expect(out).toBe('DELETE FROM users /*                           */');
+    expect(out.length).toBe('DELETE FROM users /* where did these come from */'.length);
+  });
+  it('blanks a line comment\'s contents but keeps the -- marker', () => {
+    const out = stripLiterals('DELETE FROM users -- where');
+    expect(out).toBe('DELETE FROM users --      ');
+    expect(out.length).toBe('DELETE FROM users -- where'.length);
+  });
+  it('blanks a string literal\'s contents but keeps the quotes', () => {
+    const out = stripLiterals("INSERT INTO log (msg) VALUES ('where')");
+    expect(out).toBe("INSERT INTO log (msg) VALUES ('     ')");
+  });
+  it('preserves a WHERE that follows a string containing a doubled-quote escape', () => {
+    const out = stripLiterals("UPDATE t SET a = 'x' WHERE name = 'O''Brien'");
+    expect(out).toBe("UPDATE t SET a = ' ' WHERE name = '        '");
+    expect(out.length).toBe("UPDATE t SET a = 'x' WHERE name = 'O''Brien'".length);
+  });
+  it('blanks a WHERE sitting inside an unclosed block comment', () => {
+    const out = stripLiterals('SELECT 1 /* where');
+    expect(out).toBe('SELECT 1 /*      ');
+  });
+  it('blanks a backtick-quoted identifier literally named `where`', () => {
+    const out = stripLiterals('SELECT * FROM `where`');
+    expect(out).toBe('SELECT * FROM `     `');
+  });
+  it('leaves plain code untouched', () => {
+    expect(stripLiterals('DELETE FROM t WHERE id = 1')).toBe('DELETE FROM t WHERE id = 1');
+  });
+});
+
+describe('hasWhere (hardened against quotes and comments)', () => {
+  it('is not fooled by "where" inside a block comment', () => {
+    expect(hasWhere('DELETE FROM users /* where did these come from */')).toBe(false);
+  });
+  it('is not fooled by "where" inside a line comment', () => {
+    expect(hasWhere('DELETE FROM users -- where')).toBe(false);
+  });
+  it('is not fooled by "where" inside a string literal', () => {
+    expect(hasWhere("INSERT INTO log (msg) VALUES ('where')")).toBe(false);
+  });
+  it('still detects a real WHERE clause', () => {
+    expect(hasWhere('DELETE FROM t WHERE id = 1')).toBe(true);
+  });
+  it('still detects a WHERE that follows a string containing a quote', () => {
+    expect(hasWhere("UPDATE t SET a = 'x' WHERE name = 'O''Brien'")).toBe(true);
+  });
+  it('is not fooled by "where" inside an unclosed block comment', () => {
+    expect(hasWhere('SELECT 1 /* where')).toBe(false);
+  });
+  it('is not fooled by a backtick-quoted identifier literally named `where`', () => {
+    expect(hasWhere('SELECT * FROM `where`')).toBe(false);
   });
 });
 
