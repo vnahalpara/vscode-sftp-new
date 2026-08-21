@@ -94,7 +94,13 @@ const FACTS = {
 // CAPABILITIES.logs (still false there until that route wiring lands for
 // real — see routes.ts's own comment) — flipping THIS one is what lets the
 // Logs tab actually be exercised against the mock.
-const CAPABILITIES = { services: true, webserver: true, logs: true, terminal: true, database: false };
+//
+// `database: true` is the same kind of ahead-of-real flip: the DB routes and
+// this Task 8 UI are both done, but routes.ts's own CAPABILITIES.database
+// flip is a separate one-line change owned by someone else. Flipping THIS
+// one is what lets the Database tab actually be exercised against the mock
+// in the meantime — see the Database section below for its fixtures.
+const CAPABILITIES = { services: true, webserver: true, logs: true, terminal: true, database: true };
 
 function wave(i, amp, base) {
   return base + Math.sin((tick + i * 7) / 6) * amp + Math.random() * 3;
@@ -955,15 +961,220 @@ function handleTerminalSocket(ws, req) {
   });
 }
 
+/* -------------------------------------------------------------- database -- */
+// Shaped like DbAccess.list() (dbAccess.ts) — `{ id, name, label }` per
+// configured database — plus a per-database in-memory schema+rows fixture
+// exercising the shapes GET/POST /api/db/... hand back (routes.ts, ops/db.ts).
+// Names are deliberately fixture-flavoured (`mock_app`, `mock_reporting`),
+// never a real schema name, matching this file's identity discipline; email
+// addresses in the row data use the `.invalid` TLD for the same reason.
+//
+// `sessions` carries no PRIMARY KEY column on purpose — it's the one table
+// this fixture set exercises the `usingPk: false` / whole-row-identity path
+// against, the same rule dbDataBrowser/index.ts and DbGrid.jsx both apply.
+const DB_LIST = [
+  { id: 'db0', name: 'mock_app', label: 'mock_app' },
+  { id: 'db1', name: 'mock_reporting', label: 'Reporting (read replica)' },
+];
+
+function orderRows(n) {
+  const statuses = ['pending', 'paid', 'shipped', 'refunded'];
+  const rows = [];
+  for (let i = 1; i <= n; i++) {
+    rows.push([i, 1 + (i % 5), 1299 + i * 37, statuses[i % statuses.length]]);
+  }
+  return rows;
+}
+
+const DB_SCHEMA = {
+  db0: {
+    users: {
+      columns: [
+        { name: 'id', type: 'int(11)', nullable: false, key: 'PRI' },
+        { name: 'email', type: 'varchar(255)', nullable: false, key: 'UNI' },
+        { name: 'name', type: 'varchar(120)', nullable: true, key: '' },
+        { name: 'active', type: 'tinyint(1)', nullable: false, key: '' },
+        { name: 'created_at', type: 'datetime', nullable: false, key: '' },
+      ],
+      rows: [
+        [1, 'ada@mock-fixture-host.invalid', 'Ada', 1, '2026-01-04 09:12:00'],
+        [2, 'grace@mock-fixture-host.invalid', 'Grace', 1, '2026-02-11 14:03:00'],
+        [3, 'linus@mock-fixture-host.invalid', null, 0, '2026-03-22 08:47:00'],
+        [4, 'margaret@mock-fixture-host.invalid', 'Margaret', 1, '2026-04-02 17:31:00'],
+        [5, 'alan@mock-fixture-host.invalid', 'Alan', 0, '2026-05-19 11:55:00'],
+      ],
+    },
+    orders: {
+      // 120 rows so pagination (default page size well under this) is
+      // actually exercised in the mock, not just a single always-full page.
+      columns: [
+        { name: 'id', type: 'int(11)', nullable: false, key: 'PRI' },
+        { name: 'user_id', type: 'int(11)', nullable: false, key: '' },
+        { name: 'total_cents', type: 'int(11)', nullable: false, key: '' },
+        { name: 'status', type: "enum('pending','paid','shipped','refunded')", nullable: false, key: '' },
+      ],
+      rows: orderRows(120),
+    },
+    sessions: {
+      // No PRIMARY KEY -- see the module comment above.
+      columns: [
+        { name: 'session_id', type: 'varchar(64)', nullable: false, key: '' },
+        { name: 'user_id', type: 'int(11)', nullable: true, key: '' },
+        { name: 'payload', type: 'text', nullable: true, key: '' },
+      ],
+      rows: [
+        ['sess_a1b2c3', 1, '{"cart":[]}'],
+        ['sess_d4e5f6', null, '{"cart":["sku-102"]}'],
+      ],
+    },
+  },
+  db1: {
+    daily_totals: {
+      columns: [
+        { name: 'day', type: 'date', nullable: false, key: 'PRI' },
+        { name: 'orders', type: 'int(11)', nullable: false, key: '' },
+        { name: 'revenue_cents', type: 'int(11)', nullable: false, key: '' },
+      ],
+      rows: [
+        ['2026-08-14', 18, 42_318],
+        ['2026-08-15', 22, 51_004],
+        ['2026-08-16', 15, 33_920],
+      ],
+    },
+  },
+};
+
+function dbFilterOp(op) {
+  return {
+    '=': (a, b) => a !== null && String(a) === String(b),
+    '!=': (a, b) => a === null || String(a) !== String(b),
+    LIKE: (a, b) => a !== null && String(a).toLowerCase().indexOf(String(b).toLowerCase()) !== -1,
+    '>': (a, b) => a !== null && Number(a) > Number(b),
+    '<': (a, b) => a !== null && Number(a) < Number(b),
+    '>=': (a, b) => a !== null && Number(a) >= Number(b),
+    '<=': (a, b) => a !== null && Number(a) <= Number(b),
+    'IS NULL': a => a === null,
+    'IS NOT NULL': a => a !== null,
+  }[op];
+}
+
+function dbApplyFilter(rows, columnNames, filter) {
+  if (!filter || !filter.op) {
+    return rows;
+  }
+  const fn = dbFilterOp(filter.op);
+  if (!fn) {
+    return rows;
+  }
+  if (filter.column) {
+    const idx = columnNames.indexOf(filter.column);
+    if (idx === -1) {
+      return rows;
+    }
+    return rows.filter(r => fn(r[idx], filter.value));
+  }
+  // "anywhere" -- OR across every column, mirroring buildWhere (dbQuery.ts).
+  return rows.filter(r => columnNames.some((_, i) => fn(r[i], filter.value)));
+}
+
+function dbApplySort(rows, columnNames, sort) {
+  if (!sort || !sort.column) {
+    return rows;
+  }
+  const idx = columnNames.indexOf(sort.column);
+  if (idx === -1) {
+    return rows;
+  }
+  const dir = sort.dir === 'DESC' ? -1 : 1;
+  return rows.slice().sort((a, b) => {
+    const av = a[idx];
+    const bv = b[idx];
+    if (av === bv) {
+      return 0;
+    }
+    if (av === null) {
+      return -1 * dir;
+    }
+    if (bv === null) {
+      return 1 * dir;
+    }
+    return (av > bv ? 1 : -1) * dir;
+  });
+}
+
+function dbRowMatches(row, columnNames, where) {
+  return Object.keys(where || {}).every(col => {
+    const idx = columnNames.indexOf(col);
+    if (idx === -1) {
+      return false;
+    }
+    const wv = where[col];
+    return wv === null || wv === undefined ? row[idx] === null : String(row[idx]) === String(wv);
+  });
+}
+
+function dbTable(id, tableName) {
+  const schema = DB_SCHEMA[id];
+  return schema ? schema[tableName] : undefined;
+}
+
+function dbExportFilename(dbName, table) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const base = table ? `${dbName}.${table}` : dbName;
+  return `${base}-${stamp}.sql.gz`;
+}
+
+// A small, plausible-looking gzip-header-prefixed buffer -- this does not
+// need to decompress into anything real, only to exercise the browser's
+// blob-download path (Database.jsx's downloadExport) end to end.
+function dbExportBody(label) {
+  return Buffer.concat([
+    Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03]),
+    Buffer.from(`-- mock export: ${label}\n`),
+  ]);
+}
+
+// `?fail=sql` on POST /api/db/:id/sql skips straight to the query-failure
+// shape ({ results: [], error }) -- the same "fail is on the query, not the
+// transport" distinction routes.ts's own handler draws.
+function handleSqlFail() {
+  return { results: [], error: 'mock: syntax error near "FORM" -- did you mean FROM?' };
+}
+
 const wss = new WebSocketServer({ noServer: true });
 
+// Only the DB write routes (rows/update/delete/sql) actually read a JSON
+// body -- every other POST route in this file (services actions, webserver
+// test) carries no body at all, so this is new rather than something
+// pre-existing to reuse.
+function readJsonBody(req) {
+  return new Promise(resolve => {
+    let data = '';
+    req.on('data', chunk => {
+      data += chunk;
+    });
+    req.on('end', () => {
+      if (!data) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(data));
+      } catch (error) {
+        resolve({});
+      }
+    });
+  });
+}
+
 http
-  .createServer((req, res) => {
+  .createServer(async (req, res) => {
     const parsed = new URL(req.url, 'http://127.0.0.1');
     const pathname = parsed.pathname;
     const query = parsed.searchParams;
     const segments = pathname.split('/').filter(Boolean).map(decodeURIComponent);
     const fail = query.get('fail');
+    const body = req.method === 'POST' ? await readJsonBody(req) : {};
 
     const sendJson = (code, body) => {
       res.writeHead(code, { 'content-type': 'application/json' });
@@ -1143,6 +1354,223 @@ http
         return;
       }
       sendJson(200, { purged: true });
+      return;
+    }
+
+    // GET /api/db
+    if (req.method === 'GET' && pathname === '/api/db') {
+      sendJson(200, { databases: DB_LIST });
+      return;
+    }
+
+    // GET /api/db/:id/tables
+    if (req.method === 'GET' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'db' && segments[3] === 'tables') {
+      const id = segments[2];
+      const schema = DB_SCHEMA[id];
+      if (!schema) {
+        res.writeHead(404, { 'content-type': 'text/plain' });
+        res.end(`No database "${id}" is configured for this profile.`);
+        return;
+      }
+      sendJson(200, { tables: Object.keys(schema) });
+      return;
+    }
+
+    // GET /api/db/:id/tables/:table/columns
+    if (
+      req.method === 'GET' &&
+      segments.length === 6 &&
+      segments[0] === 'api' &&
+      segments[1] === 'db' &&
+      segments[3] === 'tables' &&
+      segments[5] === 'columns'
+    ) {
+      const id = segments[2];
+      const tableName = segments[4];
+      const table = dbTable(id, tableName);
+      if (!table) {
+        res.writeHead(400, { 'content-type': 'text/plain' });
+        res.end(`No table named "${tableName}" in this database.`);
+        return;
+      }
+      sendJson(200, { columns: table.columns });
+      return;
+    }
+
+    // POST /api/db/:id/tables/:table/rows
+    if (
+      req.method === 'POST' &&
+      segments.length === 6 &&
+      segments[0] === 'api' &&
+      segments[1] === 'db' &&
+      segments[3] === 'tables' &&
+      segments[5] === 'rows'
+    ) {
+      const id = segments[2];
+      const tableName = segments[4];
+      const table = dbTable(id, tableName);
+      if (!table) {
+        res.writeHead(400, { 'content-type': 'text/plain' });
+        res.end(`No table named "${tableName}" in this database.`);
+        return;
+      }
+      const columnNames = table.columns.map(c => c.name);
+      const filtered = dbApplyFilter(table.rows, columnNames, body.filter);
+      const total = filtered.length;
+      const sorted = dbApplySort(filtered, columnNames, body.sort);
+      const limit = Math.max(0, Math.min(Number(body.limit) || 50, 500));
+      const offset = Math.max(0, Number(body.offset) || 0);
+      const page = sorted.slice(offset, offset + limit);
+      sendJson(200, { columns: columnNames, rows: page, total, durationMs: 3, truncated: false });
+      return;
+    }
+
+    // POST /api/db/:id/tables/:table/update
+    if (
+      req.method === 'POST' &&
+      segments.length === 6 &&
+      segments[0] === 'api' &&
+      segments[1] === 'db' &&
+      segments[3] === 'tables' &&
+      segments[5] === 'update'
+    ) {
+      const id = segments[2];
+      const tableName = segments[4];
+      const table = dbTable(id, tableName);
+      if (!table) {
+        res.writeHead(400, { 'content-type': 'text/plain' });
+        res.end(`No table named "${tableName}" in this database.`);
+        return;
+      }
+      const columnNames = table.columns.map(c => c.name);
+      const set = (body && body.set) || {};
+      const where = (body && body.where) || {};
+      if (!Object.keys(set).length || !Object.keys(where).length) {
+        res.writeHead(400, { 'content-type': 'text/plain' });
+        res.end('No columns to update, or no row identity was given.');
+        return;
+      }
+      const idx = table.rows.findIndex(r => dbRowMatches(r, columnNames, where));
+      if (idx === -1) {
+        sendJson(200, { ok: true, affectedRows: 0 });
+        return;
+      }
+      Object.keys(set).forEach(col => {
+        const ci = columnNames.indexOf(col);
+        if (ci !== -1) {
+          table.rows[idx][ci] = set[col];
+        }
+      });
+      sendJson(200, { ok: true, affectedRows: 1 });
+      return;
+    }
+
+    // POST /api/db/:id/tables/:table/delete
+    if (
+      req.method === 'POST' &&
+      segments.length === 6 &&
+      segments[0] === 'api' &&
+      segments[1] === 'db' &&
+      segments[3] === 'tables' &&
+      segments[5] === 'delete'
+    ) {
+      const id = segments[2];
+      const tableName = segments[4];
+      const table = dbTable(id, tableName);
+      if (!table) {
+        res.writeHead(400, { 'content-type': 'text/plain' });
+        res.end(`No table named "${tableName}" in this database.`);
+        return;
+      }
+      const columnNames = table.columns.map(c => c.name);
+      const where = (body && body.where) || {};
+      if (!Object.keys(where).length) {
+        res.writeHead(400, { 'content-type': 'text/plain' });
+        res.end('No row identity was given.');
+        return;
+      }
+      const idx = table.rows.findIndex(r => dbRowMatches(r, columnNames, where));
+      if (idx === -1) {
+        sendJson(200, { ok: true, affectedRows: 0 });
+        return;
+      }
+      table.rows.splice(idx, 1);
+      sendJson(200, { ok: true, affectedRows: 1 });
+      return;
+    }
+
+    // POST /api/db/:id/sql
+    if (req.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'db' && segments[3] === 'sql') {
+      const sql = String((body && body.sql) || '').trim();
+      if (!sql) {
+        res.writeHead(400, { 'content-type': 'text/plain' });
+        res.end('Enter a SQL statement.');
+        return;
+      }
+      // Deliberately loose (a real statement splitter lives in dbSql.ts, not
+      // duplicated here) -- good enough to exercise the two-step confirm gate
+      // (Global Constraint 5) and both result shapes.
+      const mutating = /^\s*(update|delete|insert|replace|truncate|drop|alter|create)\b/i.test(sql);
+      const hasWhere = /\bwhere\b/i.test(sql);
+      if (mutating && !body.confirm) {
+        sendJson(200, { needsConfirm: true, reason: 'This script changes data. Confirm to run it.', statements: [sql] });
+        return;
+      }
+      if (mutating && !hasWhere && !body.confirmUnfiltered) {
+        sendJson(200, {
+          needsConfirm: true,
+          reason: 'This script changes data with no WHERE clause, so it affects every row. Confirm again to run it.',
+          statements: [sql],
+        });
+        return;
+      }
+      if (fail === 'sql') {
+        sendJson(200, handleSqlFail());
+        return;
+      }
+      if (mutating) {
+        sendJson(200, {
+          results: [{ columns: [], rows: [], truncated: false, rowCount: 0, affectedRows: 3, durationMs: 6 }],
+          error: null,
+        });
+        return;
+      }
+      sendJson(200, {
+        results: [
+          {
+            columns: ['id', 'email'],
+            rows: [
+              [1, 'ada@mock-fixture-host.invalid'],
+              [2, 'grace@mock-fixture-host.invalid'],
+            ],
+            truncated: false,
+            rowCount: 2,
+            affectedRows: 0,
+            durationMs: 4,
+          },
+        ],
+        error: null,
+      });
+      return;
+    }
+
+    // GET /api/db/:id/export?table=
+    if (req.method === 'GET' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'db' && segments[3] === 'export') {
+      const id = segments[2];
+      const dbEntry = DB_LIST.find(d => d.id === id);
+      if (!dbEntry) {
+        res.writeHead(404, { 'content-type': 'text/plain' });
+        res.end(`No database "${id}" is configured for this profile.`);
+        return;
+      }
+      const table = query.get('table') || null;
+      const filename = dbExportFilename(dbEntry.name, table);
+      res.writeHead(200, {
+        'content-type': 'application/gzip',
+        'content-disposition': `attachment; filename="${filename}"`,
+        'cache-control': 'no-store',
+      });
+      res.end(dbExportBody(table ? `table ${table}` : `database ${dbEntry.name}`));
       return;
     }
 

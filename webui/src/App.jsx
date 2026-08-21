@@ -6,15 +6,16 @@ import Services from './components/Services.jsx';
 import WebServer from './components/WebServer.jsx';
 import Terminal from './components/Terminal.jsx';
 import Logs from './components/Logs.jsx';
+import Database from './components/Database.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Activity from './pages/Activity.jsx';
 import Settings from './pages/Settings.jsx';
 
 // Overview is always on; the rest come from the `capabilities` object
 // `/api/session` returns — see routes.ts's CAPABILITIES const for which are
-// live (services, webserver, terminal and logs are; database is not yet
-// implemented). Reading that object here, rather than hardcoding which tabs
-// are disabled, is what lets a later milestone turn one on with a server-side
+// live (services, webserver, terminal, logs and database all are, as of
+// Task 8). Reading that object here, rather than hardcoding which tabs are
+// disabled, is what lets a later milestone turn one on with a server-side
 // flag flip instead of an edit to this file.
 const TABS = [
   ['overview', 'Overview', null],
@@ -22,15 +23,20 @@ const TABS = [
   ['web', 'Web server', 'webserver'],
   ['logs', 'Logs', 'logs'],
   ['terminal', 'Terminal', 'terminal'],
+  ['database', 'Database', 'database'],
 ];
 
-// Terminal and Logs both hold a live server-side connection (an SSH shell, a
+// Tabs that hold a live connection OR state the user would have to retype.
+// Terminal and Logs hold a live server-side connection (an SSH shell, a
 // `tail -F`/journalctl follow) that switching tabs must not kill -- see the
-// "terminal tab is reset" bug this was built to fix. Overview/Services/Web
-// server hold no connection and re-fetch cheaply, so they stay mount-on-
-// demand: only these two get the render-once-then-hide-with-CSS treatment
-// in ServerTabs below.
-const PERSISTENT_TABS = new Set(['terminal', 'logs']);
+// "terminal tab is reset" bug this was built to fix. Database holds no
+// connection but does hold state a user would be annoyed to lose on every
+// tab switch -- the selected database/table, the sort/filter/page, and
+// (worst of all) an unsaved SQL draft in DbSqlRunner's textarea.
+// Overview/Services/Web server hold neither and re-fetch cheaply, so they
+// stay mount-on-demand: only the tabs in this set get the
+// render-once-then-hide-with-CSS treatment in ServerTabs below.
+const PERSISTENT_TABS = new Set(['terminal', 'logs', 'database']);
 
 const STATUS_TONE = { online: 'ok', connecting: 'warn', idle: 'warn', offline: 'bad', unsupported: 'bad' };
 const STATUS_LABEL = {
@@ -80,7 +86,12 @@ function Sidebar({ profile, statusTone, page, onNavigate, capabilities }) {
       <Section>
         <NavItem label="Dashboard" active={page === 'dashboard'} onClick={() => onNavigate('dashboard')} />
         <NavItem label="Activity" active={page === 'activity'} onClick={() => onNavigate('activity')} />
-        <NavItem label="Database" disabled={!dbEnabled} onClick={() => onNavigate('database')} />
+        <NavItem
+          label="Database"
+          active={page === 'database'}
+          disabled={!dbEnabled}
+          onClick={() => onNavigate('database')}
+        />
         <NavItem label="Servers & settings" active={page === 'settings'} onClick={() => onNavigate('settings')} />
       </Section>
       <Section title="Servers">
@@ -104,10 +115,9 @@ function Sidebar({ profile, statusTone, page, onNavigate, capabilities }) {
 // comment above: that unmount is what guarantees a persistent tab is not an
 // immortal one, per the "no leaked sockets" requirement.
 function ServerTabs({ page, profile, snapshot, slow, series, facts, capabilities, onNavigate }) {
-  // 'overview', 'services' and 'web' (plus 'database', which is unreachable
-  // while disabled) land here too: any other/unrecognised tab key falls
-  // back to Overview — the nav item itself is still enabled/disabled
-  // correctly from `capabilities`.
+  // 'overview', 'services', 'web' and 'database' all land here too: any
+  // other/unrecognised tab key falls back to Overview — the nav item itself
+  // is still enabled/disabled correctly from `capabilities`.
   const tabPage = TABS.some(([key]) => key === page) ? page : 'overview';
 
   // Which persistent tabs (Terminal, Logs) have ever been opened this
@@ -157,6 +167,11 @@ function ServerTabs({ page, profile, snapshot, slow, series, facts, capabilities
       {opened.has('logs') && (
         <div style={{ display: tabPage === 'logs' ? 'block' : 'none' }}>
           <Logs />
+        </div>
+      )}
+      {opened.has('database') && (
+        <div style={{ display: tabPage === 'database' ? 'block' : 'none' }}>
+          <Database profile={profile} />
         </div>
       )}
     </>
@@ -230,9 +245,9 @@ export default function App() {
   } else if (page === 'settings') {
     content = <Settings profile={profile} session={session} />;
   } else {
-    // 'overview', 'services', 'web', 'logs' and 'terminal' (plus 'database',
-    // which is unreachable while disabled) land here — see ServerTabs for
-    // the tab bar and the persistent-mount handling Terminal/Logs need.
+    // 'overview', 'services', 'web', 'logs', 'terminal' and 'database' land
+    // here — see ServerTabs for the tab bar and the persistent-mount
+    // handling Terminal/Logs/Database need.
     content = (
       <ServerTabs
         page={page}

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost } from '../api.js';
-import { Badge, Card, Empty } from './ui.jsx';
+import { Badge, Card, ConfirmDialog, Empty } from './ui.jsx';
 
 // The four systemctl actions the brief calls for. These run through the very
 // same POST /api/services/:unit/:action route Services.jsx uses (routes.ts
@@ -81,131 +81,10 @@ function fmtExpiry(iso) {
   return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString();
 }
 
-// Every action -- including 'start' -- opens this before anything runs;
-// ported verbatim (same shape, same debounce-on-submit guard) from
-// Services.jsx's ConfirmDialog, since these commands run over SSH against
-// the same live host.
-//
-// Generalised (Task 3, Cloudflare card) to also serve a non-systemctl
-// confirmation: `title`/`message`/`confirmLabel`/`danger` let a caller
-// override the default systemctl-shaped copy and button styling entirely,
-// while every existing `unit`/`action` caller in this file is untouched --
-// none of them pass the new props, so `title`/`message`/`confirmLabel`
-// default back to exactly the strings this dialog always rendered, and
-// `danger` defaults to the original `action === 'stop'` check. The
-// submitting/no-double-submit behaviour (the whole reason a caller reuses
-// this component instead of writing its own) is unchanged for everyone.
-function ConfirmDialog({
-  unit,
-  action,
-  onCancel,
-  onConfirm,
-  title,
-  message,
-  confirmLabel,
-  danger,
-  // True for every existing systemctl caller (none of them pass this), which
-  // preserves their exact current behaviour: Escape/backdrop/Cancel all
-  // close the dialog immediately, but that path is inert for them anyway --
-  // runAction() calls setConfirm(null) as its first synchronous line, so the
-  // dialog is already unmounted before any await begins and there is no
-  // in-flight window to dismiss out of.
-  //
-  // CloudflareCard is the first caller that keeps this dialog mounted across
-  // an await (see its own comment on why -- a purge is slow, destructive,
-  // irreversible, and this card has no per-row banner to fall back on). That
-  // inversion makes Escape/backdrop/Cancel live during a real in-flight
-  // request for the first time: dismissing the dialog without this flag
-  // would make the user believe they cancelled a purge that is, in fact,
-  // still running server-side (apiPost has no abort). dismissible={false}
-  // during that window is what keeps the dialog honestly modal instead of
-  // just visually modal.
-  dismissible = true,
-}) {
-  const [submitting, setSubmitting] = useState(false);
-
-  useEffect(() => {
-    const onKey = e => {
-      if (e.key === 'Escape' && dismissible) {
-        onCancel();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onCancel, dismissible]);
-
-  function handleConfirm() {
-    if (submitting) {
-      return;
-    }
-    setSubmitting(true);
-    onConfirm();
-  }
-
-  function handleBackdropClick() {
-    if (dismissible) {
-      onCancel();
-    }
-  }
-
-  function handleCancelClick() {
-    if (!dismissible) {
-      return;
-    }
-    onCancel();
-  }
-
-  const isDanger = danger != null ? danger : action === 'stop';
-  const readyLabel = confirmLabel || `${action} ${unit}`;
-  const busyLabel = confirmLabel ? `${confirmLabel}…` : `${action}…`;
-
-  return (
-    <div
-      role="presentation"
-      onClick={handleBackdropClick}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.6)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 50,
-      }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        className="card"
-        style={{ maxWidth: 440, width: '90%' }}
-        onClick={e => e.stopPropagation()}
-      >
-        <h3 style={{ marginTop: 0 }}>{title || 'Confirm action'}</h3>
-        <p style={{ color: 'var(--text-secondary)' }}>
-          {message || (
-            <>
-              Run <strong className="mono">systemctl {action}</strong> on{' '}
-              <span className="mono">{unit}</span>? This runs on the live host over SSH.
-            </>
-          )}
-        </p>
-        <div className="row" style={{ justifyContent: 'flex-end', marginTop: 16 }}>
-          <button className="btn" onClick={handleCancelClick} disabled={!dismissible}>
-            Cancel
-          </button>
-          <button
-            className={isDanger ? 'btn danger' : 'btn primary'}
-            onClick={handleConfirm}
-            disabled={submitting}
-            autoFocus
-          >
-            {submitting ? busyLabel : readyLabel}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
+// ConfirmDialog itself now lives in ui.jsx (Task 8 moved it there so
+// Database.jsx could reuse it too) -- see that file's own comment for the
+// full history (Services.jsx's systemctl-shaped original, the Task 3
+// Cloudflare-card generalisation, dismissible's purpose).
 
 // A read-only modal for a vhost's config file (GET /api/file?path=...). The
 // server only allows reading a path it just handed back from a vhost
