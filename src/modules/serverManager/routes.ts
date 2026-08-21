@@ -1034,7 +1034,15 @@ export function buildRoutes(deps: RouteDeps): BuiltRoutes {
           streamExport(exporter.deps, { dbConfig: exporter.dbConfig, table }, {
             write: chunk => ctx.res.write(chunk),
             end: () => ctx.res.end(),
+            // 'close' fires on a normal, successful finish too, not only a
+            // genuine client abort -- streamExport's handler is idempotent
+            // (see its `settled` guard) so the late, harmless firing after a
+            // clean download is a no-op rather than a second abort.
             onAbort: fn => ctx.req.on('close', fn),
+            // The other half of streamExport's backpressure handling: it
+            // pauses the SFTP source when ctx.res.write() returns false, and
+            // resumes it once this fires.
+            onDrain: fn => ctx.res.on('drain', fn),
           })
         );
         if (!result.ok) {

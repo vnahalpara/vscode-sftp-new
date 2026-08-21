@@ -26,6 +26,9 @@ export interface ExportTarget {
 // than on Node's http.ServerResponse directly so this module never imports
 // `http` -- routes.ts adapts ctx.res/ctx.req to this shape.
 export interface ExportSink {
+  // Returns exactly what http.ServerResponse#write does: false once the
+  // response's internal buffer is full, meaning the caller must stop
+  // pushing until the matching onDrain fires.
   write(chunk: Buffer): boolean;
   end(): void;
   // Called with a callback to invoke if the consumer goes away mid-stream --
@@ -33,7 +36,17 @@ export interface ExportSink {
   // to stop reading the SFTP source rather than draining a dump into a
   // socket nobody is listening on, and to make sure the remote temp file
   // still gets removed (Global Constraint 7).
+  //
+  // NOTE: in modern Node, 'close' also fires on a normal, successful finish
+  // -- not abort-only. streamExport's use of this is idempotent (see the
+  // `settled` guard below) so a late, harmless firing after a clean
+  // completion does not re-run the abort path.
   onAbort(fn: () => void): void;
+  // Called with a callback to invoke once the consumer has drained its
+  // buffer and is ready for more -- routes.ts wires this to
+  // ctx.res.on('drain', fn). streamExport resumes the paused SFTP source
+  // from here; see the backpressure comment on the 'data' handler below.
+  onDrain(fn: () => void): void;
 }
 
 function safe(value: string): string {
@@ -70,16 +83,28 @@ export async function streamExport(deps: ExportDeps, target: ExportTarget, sink:
 
   // aborted/activeStream/onAborted are shared with the onAbort callback
   // below, which can fire at any point -- before the dump has even started,
-  // while it is running remotely, or once the download is streaming. It is
-  // registered synchronously, before any `await`, so an abort that arrives
-  // in that first window is never lost: it is recorded here and acted on
-  // (destroying the stream, if one exists yet; rejecting, if there is a
-  // promise waiting to hear about it) as soon as there is something to act
-  // on.
+  // while it is running remotely, once the download is streaming, or paused
+  // mid-stream waiting on backpressure. It is registered synchronously,
+  // before any `await`, so an abort that arrives in that first window is
+  // never lost: it is recorded here and acted on (destroying the stream, if
+  // one exists yet; rejecting, if there is a promise waiting to hear about
+  // it) as soon as there is something to act on. Destroying the stream
+  // works the same way whether it is flowing or paused, so an abort that
+  // lands while backpressure has it paused is not a special case.
+  //
+  // `settled` guards against the NOTE on ExportSink.onAbort above: it is set
+  // once (in the `finally` below) as soon as the export is done, so a late
+  // 'close' firing after a normal finish is a no-op rather than
+  // re-destroying an already-finished stream or rejecting a promise nobody
+  // is waiting on any more.
   let aborted = false;
+  let settled = false;
   let activeStream: NodeJS.ReadableStream | null = null;
   let onAborted: (() => void) | null = null;
   sink.onAbort(() => {
+    if (settled) {
+      return;
+    }
     aborted = true;
     if (activeStream && typeof (activeStream as any).destroy === 'function') {
       (activeStream as any).destroy();
@@ -111,8 +136,23 @@ export async function streamExport(deps: ExportDeps, target: ExportTarget, sink:
 
     await new Promise<void>((resolve, reject) => {
       onAborted = () => reject(cancelledError());
+
+      // Backpressure. `stream` is in flowing mode (it has a 'data'
+      // listener below), so without this it delivers bytes from SFTP as
+      // fast as the remote host sends them regardless of whether the HTTP
+      // client is reading -- silently reinstating the whole-dump-in-memory
+      // buffering this streaming design exists to avoid, inside the process
+      // the user's whole editor runs in. sink.write returning false means
+      // the response's own buffer is full; pause the source until onDrain
+      // says the consumer has caught up.
+      sink.onDrain(() => {
+        stream.resume();
+      });
+
       stream.on('data', (chunk: Buffer) => {
-        sink.write(chunk);
+        if (!sink.write(chunk)) {
+          stream.pause();
+        }
       });
       stream.on('end', () => {
         sink.end();
@@ -123,6 +163,7 @@ export async function streamExport(deps: ExportDeps, target: ExportTarget, sink:
       });
     });
   } finally {
+    settled = true;
     onAborted = null;
     // Wrapped in its own try/catch so a cleanup failure never replaces the
     // real error (or masks a clean success).
