@@ -9,6 +9,7 @@ import logger from '../../logger';
 import { getHostInfo } from '../../core/fileService';
 import { removeRemoteFs, hashOption } from '../../core/remoteFs';
 import { getDbClient } from '../../core/dbConnectionManager';
+import { getSshClient, getRemoteFs } from '../../core/sshAccess';
 import { Collector, MonitorTransport } from '../monitor/collector';
 import { sshTransport, readFacts } from '../monitor/transport';
 import { HostFacts } from '../monitor/types';
@@ -525,8 +526,25 @@ export async function ensureSession(fileService: any, config: any): Promise<stri
   // on the session object. getDbClient pools one client per (connection,
   // database), so the dashboard and the VS Code panel share a connection
   // rather than opening a second one per database.
-  const dbAccess = createDbAccess(normaliseDatabases(config), dbConfig =>
-    getDbClient(fileService, config, dbConfig)
+  const dbAccess = createDbAccess(
+    normaliseDatabases(config),
+    dbConfig => getDbClient(fileService, config, dbConfig),
+    // The export route's opener -- closes over fileService/config, same as
+    // the client opener above, so no database credential becomes a field on
+    // the session object. exec/get reach the SAME connection the rest of
+    // this session already uses (getSshClient/getRemoteFs pool by config),
+    // so an export does not open a second SSH connection just because the
+    // Database tab was opened. remotePath is required for staging the dump
+    // where a chrooted SFTP subsystem can read it back -- see
+    // dbExportStream.ts's ExportDeps doc comment -- so a profile with none
+    // configured gets an export that always fails at the mkdir step rather
+    // than one that silently tries /undefined/.sftp-db-export-tmp.
+    () => ({
+      exec: async (cmd: string) => (await getSshClient(fileService, config)).exec(cmd),
+      get: async (remoteFile: string) => (await getRemoteFs(fileService, config)).get(remoteFile),
+      remotePath: config.remotePath || '',
+      randomName: () => crypto.randomBytes(8).toString('hex'),
+    })
   );
   const session = new ManagedSession(
     redactProfile(fileService.workspace, config),

@@ -33,6 +33,7 @@ import {
   requireTable,
   truncateRows,
 } from './ops/db';
+import { exportFilename, streamExport } from './dbExportStream';
 import { ColumnInfo, DbClient } from '../../core/dbClient';
 
 export interface SessionLookup {
@@ -353,6 +354,15 @@ async function tableContext(
   const known = await client.listTables();
   const resolved = requireTable(table, known);
   return { table: resolved, columns: await client.listColumns(resolved) };
+}
+
+// A filename-safe timestamp for an export -- exportFilename sanitises it
+// further still, this just keeps the raw name readable.
+function stamp(): string {
+  return new Date()
+    .toISOString()
+    .replace(/[:.]/g, '-')
+    .slice(0, 19);
 }
 
 // What buildRoutes hands back: the handlers, plus read-only access to the
@@ -983,6 +993,61 @@ export function buildRoutes(deps: RouteDeps): BuiltRoutes {
         });
 
         ctx.json(200, { results, error: failure });
+      },
+    },
+    {
+      method: 'GET',
+      path: '/api/db/:id/export',
+      handler: async ctx => {
+        const session = resolve(deps, ctx);
+        if (!session) {
+          return;
+        }
+        const exporter = session.db.exporter(ctx.params.id);
+        if (!exporter) {
+          ctx.text(404, `No database "${ctx.params.id}" is configured for this profile.`);
+          return;
+        }
+        const table = typeof ctx.query.table === 'string' && ctx.query.table ? ctx.query.table : null;
+        // Global Constraint 2 applies to the export target too: a table name
+        // reaches a shell command here (shellSingle-quoted, but still), so it
+        // is checked against the live listing before it is used.
+        if (table) {
+          const client = session.db.client(ctx.params.id)!;
+          try {
+            requireTable(table, await client.listTables());
+          } catch (error) {
+            dbError(ctx, error as Error);
+            return;
+          }
+        }
+        const filename = exportFilename(exporter.dbConfig.name, table, stamp());
+        ctx.res.writeHead(200, {
+          'content-type': 'application/gzip',
+          'content-disposition': `attachment; filename="${filename}"`,
+          'cache-control': 'no-store',
+        });
+        const label = table ? `export table ${table}` : `export database ${exporter.dbConfig.name}`;
+        // runDb, so the activity entry's `command` is this description and
+        // never the mysqldump invocation, which embeds MYSQL_PWD.
+        const result = await runDb(session, 'export', label, () =>
+          streamExport(exporter.deps, { dbConfig: exporter.dbConfig, table }, {
+            write: chunk => ctx.res.write(chunk),
+            end: () => ctx.res.end(),
+            onAbort: fn => ctx.req.on('close', fn),
+          })
+        );
+        if (!result.ok) {
+          // The headers are already sent, so there is no status left to change:
+          // destroy the response so the browser sees a truncated download
+          // rather than a silently short, apparently complete file.
+          //
+          // @types/node is pinned at v9, where OutgoingMessage#destroy takes a
+          // REQUIRED Error argument (unlike modern Node) -- result.error is
+          // already the safe, stderr-derived message runDb recorded, never the
+          // mysqldump invocation itself, so it is fine to pass through here.
+          ctx.res.destroy(result.error);
+        }
       },
     },
   ];

@@ -1,4 +1,5 @@
 import { ColumnInfo, DatabaseConfig, DbClient } from '../../core/dbClient';
+import { ExportDeps } from './dbExportStream';
 
 // What the browser is told about a configured database: enough to name it in a
 // picker, and nothing else. This object is serialised straight over
@@ -39,6 +40,19 @@ export interface DbAccess {
   //     as config(id) would. Treat its return value with the same care.
   client(id: string): DbClient | null;
   config(id: string): DatabaseConfig | null;
+
+  // Credential-bearing, same discipline as config() above -- the ExportDeps
+  // it hands back closes over the real SSH transport, and dbConfig is the
+  // same plaintext object config(id) returns. Neither may be serialised to
+  // the browser, written to the activity log, or passed to anything that
+  // logs its argument. It exists for exactly one caller: the export route,
+  // which needs both a way to shell out to mysqldump on the real host and
+  // the credentials to build that command with (see dbExportStream.ts).
+  // Returns null when either the id is unknown or this DbAccess was built
+  // with no export opener (NO_DATABASES, and any test double that omits
+  // one) -- deliberately the same "no export capability" answer either way,
+  // so a caller never has to tell the two apart.
+  exporter(id: string): { deps: ExportDeps; dbConfig: DatabaseConfig } | null;
 
   // Browser-safe result shapes (table/column names, not credentials) --
   // reached through client(id) above, whose own return value is still not
@@ -92,12 +106,17 @@ export function normaliseDatabases(config: any): DatabaseConfig[] {
   );
 }
 
-// `open` is injected rather than importing getDbClient directly so this whole
-// module is testable without an SSH connection -- index.ts supplies the real
-// one, which closes over fileService and config.
+// `open` and `openExport` are injected rather than importing getDbClient /
+// getSshClient+getRemoteFs directly, so this whole module is testable
+// without an SSH connection -- index.ts supplies the real ones, both closing
+// over fileService and config. `openExport` is optional (and omitted by
+// NO_DATABASES and by every existing test double) because it is needed by
+// exactly one caller, the export route -- everything else on DbAccess keeps
+// working without it.
 export function createDbAccess(
   databases: DatabaseConfig[],
-  open: (dbConfig: DatabaseConfig) => DbClient
+  open: (dbConfig: DatabaseConfig) => DbClient,
+  openExport?: (dbConfig: DatabaseConfig) => ExportDeps
 ): DbAccess {
   function configFor(id: string): DatabaseConfig | null {
     const index = indexOfId(id, databases.length);
@@ -129,6 +148,14 @@ export function createDbAccess(
     tables: async id => require(id).listTables(),
     columns: async (id, table) => require(id).listColumns(table),
     config: configFor,
+    // Credential-bearing -- see the doc comment on DbAccess.exporter above.
+    exporter: id => {
+      const dbConfig = configFor(id);
+      if (!dbConfig || !openExport) {
+        return null;
+      }
+      return { deps: openExport(dbConfig), dbConfig };
+    },
   };
 }
 
