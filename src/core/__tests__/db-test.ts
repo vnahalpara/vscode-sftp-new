@@ -1,8 +1,22 @@
+// This must run before ANY import below triggers dbClient.ts's own
+// `require('mysql2/promise')` -- this file's Jest preprocessor is a plain
+// `tsc.transpile` per-file pass with no babel-jest-hoist step, so
+// `jest.mock()` calls are NOT hoisted above imports the way they would be
+// under babel-jest; it has to be textually first. Only the
+// stream-transport-bypass test below needs this; every other test in this
+// file forces the exec transport by making openForwardStream throw, so
+// createConnection is simply never called for them.
+jest.mock('mysql2/promise', () => ({
+  createConnection: jest.fn(),
+}));
+
 import { splitStatements, applyDefaultLimit, isMutating, hasWhere, stripLiterals } from '../dbSql';
 import { quoteId, buildTableSearchSql } from '../dbSearch';
 import { buildMysqlCommand, buildTableDumpCommand, parseMysqlBatch, shellSingle, sqlLiteral } from '../dbExec';
 import { buildWhere, buildOrderBy, buildSelect, buildCount, buildUpdate, buildDelete } from '../dbQuery';
 import { DbClient } from '../dbClient';
+import { createDbExecLimit } from '../dbExecLimit';
+import * as mysql from 'mysql2/promise';
 
 describe('splitStatements', () => {
   it('splits on semicolons', () => {
@@ -256,6 +270,34 @@ describe('DbClient auto-reconnect', () => {
     expect(res.rows).toEqual([['1']]);
     expect(providerCalls).toBe(2); // reconnected with a fresh ssh client
   });
+
+  // Fix 3: _isConnectionError is fuzzy (it matches a bare `indexOf('closed')`
+  // among other things), so it cannot tell "the connection dropped before the
+  // server ever saw this statement" from "it dropped after the UPDATE/DELETE/
+  // INSERT was already applied, and only the response was lost". Retrying a
+  // mutation in the latter case would double-apply it, so query() must not
+  // retry ANY mutating statement on a connection error -- only a read (the
+  // preceding test) is safe to retry.
+  it('does not retry a mutating statement on a connection error, to avoid double-applying it', async () => {
+    let providerCalls = 0;
+    let execCalls = 0;
+    const provider = async () => {
+      providerCalls++;
+      return {
+        openForwardStream: async () => {
+          throw new Error('open failed');
+        },
+        exec: async () => {
+          execCalls++;
+          throw new Error('Not connected');
+        },
+      };
+    };
+    const client = new DbClient({ username: 'u', password: 'p', name: 'db' }, provider);
+    await expect(client.query('UPDATE t SET a = 1 WHERE id = 1')).rejects.toThrow('Not connected');
+    expect(execCalls).toBe(1); // never retried
+    expect(providerCalls).toBe(1); // never reconnected either
+  });
 });
 
 describe('sqlLiteral', () => {
@@ -380,5 +422,99 @@ describe('DbClient exec transport inlining', () => {
     const hex = "_utf8mb4 X'" + Buffer.from('%t%', 'utf8').toString('hex') + "'";
     expect(seen[0].split(hex).length - 1).toBe(2); // both placeholders substituted
     expect(seen[0]).not.toContain('?');
+  });
+});
+
+// Fix 2: the mysql-CLI exec transport is capped so it cannot alone exhaust
+// OpenSSH's MaxSessions; the forwarded-TCP transport must never be gated by
+// the same limiter, since a direct-tcpip channel is not counted by it.
+describe('DbClient exec channel cap', () => {
+  it('refuses a query once the exec-channel cap is reached, naming the limit', async () => {
+    const limit = createDbExecLimit(1);
+    let resolveFirst: (() => void) | null = null;
+    const ssh = {
+      openForwardStream: async () => {
+        throw new Error('forwarding disabled');
+      },
+      exec: async () =>
+        new Promise<{ stdout: string; stderr: string; code: number }>(resolve => {
+          resolveFirst = () => resolve({ stdout: 'n\n1', stderr: '', code: 0 });
+        }),
+    };
+    const client = new DbClient(
+      { username: 'u', password: 'p', name: 'db' },
+      async () => ssh as any,
+      limit
+    );
+    const first = client.query('SELECT 1 AS n');
+    // Let the first query's _execQuery acquire its slot before the second is issued.
+    await new Promise(resolve => setImmediate(resolve));
+    await expect(client.query('SELECT 2 AS n')).rejects.toThrow(/limit 1/i);
+    resolveFirst!();
+    await expect(first).resolves.toMatchObject({ rows: [['1']] });
+  });
+
+  it('frees the slot once a query completes, letting the next one through', async () => {
+    const limit = createDbExecLimit(1);
+    const ssh = {
+      openForwardStream: async () => {
+        throw new Error('forwarding disabled');
+      },
+      exec: async () => ({ stdout: 'n\n1', stderr: '', code: 0 }),
+    };
+    const client = new DbClient(
+      { username: 'u', password: 'p', name: 'db' },
+      async () => ssh as any,
+      limit
+    );
+    await client.query('SELECT 1 AS n');
+    await expect(client.query('SELECT 2 AS n')).resolves.toMatchObject({ rows: [['1']] });
+  });
+
+  it('frees the slot even when the query fails, so the cap cannot leak on error', async () => {
+    const limit = createDbExecLimit(1);
+    let calls = 0;
+    const ssh = {
+      openForwardStream: async () => {
+        throw new Error('forwarding disabled');
+      },
+      exec: async () => {
+        calls++;
+        return { stdout: '', stderr: "ERROR 1146 (42S02): Table doesn't exist", code: 1 };
+      },
+    };
+    const client = new DbClient(
+      { username: 'u', password: 'p', name: 'db' },
+      async () => ssh as any,
+      limit
+    );
+    await expect(client.query('SELECT * FROM nope')).rejects.toThrow();
+    await expect(client.query('SELECT * FROM nope')).rejects.toThrow();
+    expect(calls).toBe(2);
+  });
+
+  it('never gates the forwarded-TCP transport, even when the exec cap is exhausted', async () => {
+    // A cap of 0 would refuse every single exec-transport query -- proving
+    // this passes shows the stream transport never consults the limiter.
+    const limit = createDbExecLimit(0);
+    const fakeConn = {
+      query: jest.fn(async () => [[{ n: 1 }], [{ name: 'n' }]]),
+      on: jest.fn(),
+      end: jest.fn(async () => undefined),
+    };
+    (mysql.createConnection as jest.Mock).mockResolvedValue(fakeConn);
+    const ssh = {
+      openForwardStream: async () => ({}),
+      exec: async () => {
+        throw new Error('exec transport must not be used on the forwarded-TCP path');
+      },
+    };
+    const client = new DbClient(
+      { username: 'u', password: 'p', name: 'db' },
+      async () => ssh as any,
+      limit
+    );
+    const res = await client.query('SELECT 1 AS n');
+    expect(res.rows).toEqual([[1]]);
   });
 });

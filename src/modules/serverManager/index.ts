@@ -9,6 +9,7 @@ import logger from '../../logger';
 import { getHostInfo } from '../../core/fileService';
 import { removeRemoteFs, hashOption } from '../../core/remoteFs';
 import { getDbClient } from '../../core/dbConnectionManager';
+import { dbExecLimit, dbExecLimitMessage } from '../../core/dbExecLimit';
 import { getSshClient, getRemoteFs } from '../../core/sshAccess';
 import { Collector, MonitorTransport } from '../monitor/collector';
 import { sshTransport, readFacts } from '../monitor/transport';
@@ -540,7 +541,24 @@ export async function ensureSession(fileService: any, config: any): Promise<stri
     // configured gets an export that always fails at the mkdir step rather
     // than one that silently tries /undefined/.sftp-db-export-tmp.
     () => ({
-      exec: async (cmd: string) => (await getSshClient(fileService, config)).exec(cmd),
+      // dbExecLimit.ts: this exec reaches the same SSH connection (and
+      // therefore the same MaxSessions budget) as DbClient's own exec
+      // transport, and holds its channel for the ENTIRE mysqldump -- the
+      // worst case that limiter exists for. Acquired around each individual
+      // call (the dump command, and separately the temp-file cleanup one),
+      // never held across both, so a slot is not pinned for longer than the
+      // command actually using it.
+      exec: async (cmd: string) => {
+        const release = dbExecLimit.acquire();
+        if (!release) {
+          throw new Error(dbExecLimitMessage(dbExecLimit.max));
+        }
+        try {
+          return await (await getSshClient(fileService, config)).exec(cmd);
+        } finally {
+          release();
+        }
+      },
       get: async (remoteFile: string) => (await getRemoteFs(fileService, config)).get(remoteFile),
       remotePath: config.remotePath || '',
       randomName: () => crypto.randomBytes(8).toString('hex'),

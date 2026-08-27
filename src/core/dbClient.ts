@@ -1,6 +1,8 @@
 import * as mysql from 'mysql2/promise';
 import logger from '../logger';
 import { buildMysqlCommand, parseMysqlBatch, mysqlError, sqlLiteral } from './dbExec';
+import { DbExecLimit, dbExecLimit, dbExecLimitMessage } from './dbExecLimit';
+import { isMutating } from './dbSql';
 
 export interface DatabaseConfig {
   // resolved from the remote server's perspective (localhost = MySQL on the SSH host)
@@ -61,7 +63,15 @@ export class DbClient {
   private _transport: Transport | null = null;
   private _connecting: Promise<Transport> | null = null;
 
-  constructor(private dbConfig: DatabaseConfig, private sshProvider: SshProvider) {}
+  // execLimit defaults to the process-wide shared cap (dbExecLimit.ts) --
+  // tests inject their own createDbExecLimit(...) instance to exercise the
+  // cap in isolation, without interfering with other tests that share the
+  // default.
+  constructor(
+    private dbConfig: DatabaseConfig,
+    private sshProvider: SshProvider,
+    private execLimit: DbExecLimit = dbExecLimit
+  ) {}
 
   private async _open(): Promise<Transport> {
     const ssh = await this.sshProvider();
@@ -117,17 +127,32 @@ export class DbClient {
   }
 
   private async _execQuery(ssh: SshLike, sql: string): Promise<QueryResult> {
-    const cmd = buildMysqlCommand(this.dbConfig);
-    const input = sql.trim().replace(/;?\s*$/, ';') + '\n';
-    const start = Date.now();
-    const { stdout, stderr } = await ssh.exec(cmd, input);
-    const durationMs = Date.now() - start;
-    const errMsg = mysqlError(stderr);
-    if (errMsg) {
-      throw new Error(errMsg);
+    // See dbExecLimit.ts. ssh.exec() below opens a real SSH exec channel,
+    // which counts against OpenSSH's MaxSessions -- unlike the forwarded-TCP
+    // transport (the other branch of _runOnce, mysql2's own protocol over a
+    // direct-tcpip channel), which is never routed through this limiter
+    // because MaxSessions does not count it. Acquired BEFORE the exec call
+    // (a refused request must not open a channel) and released in `finally`
+    // so a query that throws still gives its slot back.
+    const release = this.execLimit.acquire();
+    if (!release) {
+      throw new Error(dbExecLimitMessage(this.execLimit.max));
     }
-    const { columns, rows } = parseMysqlBatch(stdout);
-    return { columns, rows, rowCount: rows.length, affectedRows: 0, durationMs };
+    try {
+      const cmd = buildMysqlCommand(this.dbConfig);
+      const input = sql.trim().replace(/;?\s*$/, ';') + '\n';
+      const start = Date.now();
+      const { stdout, stderr } = await ssh.exec(cmd, input);
+      const durationMs = Date.now() - start;
+      const errMsg = mysqlError(stderr);
+      if (errMsg) {
+        throw new Error(errMsg);
+      }
+      const { columns, rows } = parseMysqlBatch(stdout);
+      return { columns, rows, rowCount: rows.length, affectedRows: 0, durationMs };
+    } finally {
+      release();
+    }
   }
 
   async query(sql: string, params?: any[]): Promise<QueryResult> {
@@ -136,7 +161,16 @@ export class DbClient {
     } catch (err) {
       // A dropped SSH/DB connection leaves a dead transport; drop it and retry
       // once so the next attempt reconnects (getRemoteFileSystem rebuilds the client).
-      if (this._isConnectionError(err)) {
+      //
+      // Only for a NON-mutating statement, though: _isConnectionError is a
+      // fuzzy classifier (its message check includes a bare `indexOf('closed')`),
+      // and it cannot tell "the connection dropped before the server ever saw
+      // this" from "the connection dropped after an UPDATE/DELETE/INSERT was
+      // already applied, and only the response was lost". Retrying the latter
+      // would apply the mutation a second time. A SELECT (or any other
+      // non-mutating read) has no side effect to double, so it is always safe
+      // to retry.
+      if (this._isConnectionError(err) && !isMutating(sql)) {
         logger.info(`db: connection lost (${(err as Error).message}); reconnecting`);
         this._transport = null;
         return this._runOnce(sql, params);
