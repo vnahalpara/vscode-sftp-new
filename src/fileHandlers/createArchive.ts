@@ -50,7 +50,7 @@ function runTar(
   command: string,
   onFile: (name: string, count: number) => void,
   isCancelled: () => boolean
-): Promise<{ code: number; stderr: string; killed: boolean }> {
+): Promise<{ code: number; stderr: string; killConfirmed: Promise<boolean> | null }> {
   return new Promise((resolve, reject) => {
     ssh.execStream(command).then((stream: any) => {
       let carry = '';
@@ -62,10 +62,14 @@ function runTar(
       let errorTail = '';
       let pidText = '';
       let pid: number | null = null;
-      let killed = false;
+      let killPromise: Promise<boolean> | null = null;
       let done = false;
 
-      const finish = (result: { code: number; stderr: string; killed: boolean }) => {
+      const finish = (result: {
+        code: number;
+        stderr: string;
+        killConfirmed: Promise<boolean> | null;
+      }) => {
         if (done) {
           return;
         }
@@ -73,30 +77,54 @@ function runTar(
         resolve(result);
       };
 
-      // The PID line, then nothing else -- tar writes the archive to a file,
-      // so stdout carries only what the wrapper echoed. Still drained either
-      // way: a full channel window would stall the command.
+      // Scan stdout for the first line that is ONLY digits, rather than
+      // assuming the PID is line 1.
+      //
+      // A non-interactive login shell can print before our `echo` ever runs --
+      // a `.bashrc`/`.profile` that echoes, a `cd` writing the new directory
+      // (CDPATH is set), a wrapper banner. Taking the first line blindly
+      // parses that as the PID, fails, and permanently disables cancel for the
+      // run. Scanning for a digits-only line survives anything printed ahead
+      // of it.
+      //
+      // Capped so a server that streams unexpected output to stdout cannot
+      // grow this buffer without bound; past the cap we give up on the PID
+      // (cancel then reports honestly that it could not confirm a stop)
+      // rather than holding the text forever.
+      const PID_SCAN_LIMIT = 8192;
       stream.on('data', (chunk: Buffer) => {
         if (pid !== null) {
+          // Still draining: a full channel window stalls the command.
           return;
         }
         pidText += chunk.toString('utf8');
-        const nl = pidText.indexOf('\n');
-        if (nl !== -1) {
-          const parsed = parseInt(pidText.slice(0, nl).trim(), 10);
-          pid = Number.isFinite(parsed) && parsed > 0 ? parsed : -1;
+        const lines = pidText.split('\n');
+        // The last element is a partial line unless the text ended in \n;
+        // leave it for the next chunk rather than parsing half a number.
+        const complete = lines.slice(0, -1);
+        for (const line of complete) {
+          if (/^\d+$/.test(line.trim())) {
+            pid = parseInt(line.trim(), 10);
+            return;
+          }
+        }
+        if (pidText.length > PID_SCAN_LIMIT) {
+          pid = -1;
         }
       });
 
       const killRemote = () => {
-        if (killed || pid === null || pid <= 0) {
+        if (killPromise || pid === null || pid <= 0) {
           return;
         }
-        killed = true;
-        // Fire-and-forget on its own channel: the channel tar occupies is
-        // precisely the one that will not answer. A failure here is reported
-        // by the caller as "could not confirm", never thrown over the cancel.
-        ssh.exec(buildKillCommand(pid)).catch(() => undefined);
+        // Runs on its OWN channel: the channel tar occupies is precisely the
+        // one that will not answer. The promise is kept rather than discarded
+        // so the caller can tell the user whether the remote tar was actually
+        // stopped, instead of asserting it merely because a kill was sent.
+        killPromise = ssh
+          .exec(buildKillCommand(pid))
+          .then((res: any) => (res && res.code === 0) || false)
+          .catch(() => false);
       };
 
       // tar's member list and its diagnostics both arrive on stderr.
@@ -118,7 +146,7 @@ function runTar(
       });
 
       stream.on('close', (code: number) =>
-        finish({ code: code || 0, stderr: errorTail, killed })
+        finish({ code: code || 0, stderr: errorTail, killConfirmed: killPromise })
       );
       stream.on('error', (err: Error) => {
         if (!done) {
@@ -226,14 +254,16 @@ export const createArchive = createFileHandler({
 
         if (token.isCancellationRequested) {
           await cleanup(ssh, parent, file);
-          // `killed` says a TERM/KILL was actually dispatched at a real PID.
-          // Without it the archive was removed but the remote tar may still be
-          // running -- saying "nothing was left behind" then would be a lie,
-          // and the user would have no idea their server was still working.
+          // Await the kill's own exit status rather than asserting a stop
+          // because a kill was DISPATCHED. If the second channel failed, or no
+          // PID was ever seen, the remote tar may still be running -- and a
+          // user told "stopped" would have no reason to go and look. The
+          // honest message is the one that admits the uncertainty.
+          const stopped = result.killConfirmed ? await result.killConfirmed : false;
           vscode.window.showInformationMessage(
-            result.killed
+            stopped
               ? 'Create tar.gz cancelled — the remote tar was stopped and the partial archive removed.'
-              : 'Create tar.gz cancelled and the partial archive removed, but the remote tar could not be confirmed stopped.'
+              : 'Create tar.gz cancelled and the partial archive removed, but the remote tar could not be confirmed stopped. It may still be running on the server.'
           );
           return;
         }
