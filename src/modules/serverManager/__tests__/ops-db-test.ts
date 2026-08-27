@@ -237,6 +237,21 @@ describe('planUpdate', () => {
     expect(built.sql.endsWith(' LIMIT 1')).toBe(true);
   });
 
+  // Superset, not subset: the full PK plus one extra non-PK column is still
+  // not an EXACT match for the PK column set, so it must not be honoured --
+  // this is the realistic shape (a grid sending the PK plus a couple of
+  // visible columns as belt-and-braces), and would silently regress to an
+  // unlimited UPDATE if the comparison were ever loosened to "contains the
+  // PK" instead of "is exactly the PK".
+  it('still applies LIMIT 1 when usingPk is claimed but the where names the full primary key plus one extra column', () => {
+    const built = planUpdate('t', COMPOSITE_PK_COLUMNS, {
+      set: { title: 'new' },
+      where: { tenant_id: 1, item_id: 2, title: 'old' },
+      usingPk: true,
+    });
+    expect(built.sql.endsWith(' LIMIT 1')).toBe(true);
+  });
+
   it('omits LIMIT for a genuine single-column primary key', () => {
     const built = planUpdate('wp_posts', COLUMNS, {
       set: { title: 'new' },
@@ -280,6 +295,16 @@ describe('planDelete', () => {
   it('still applies LIMIT 1 when usingPk is claimed but the where names only one column of a two-column primary key', () => {
     const built = planDelete('t', COMPOSITE_PK_COLUMNS, {
       where: { tenant_id: 1 },
+      usingPk: true,
+    });
+    expect(built.sql.endsWith(' LIMIT 1')).toBe(true);
+  });
+
+  // Superset, not subset -- see the matching planUpdate test above for why
+  // this is the realistic shape worth guarding.
+  it('still applies LIMIT 1 when usingPk is claimed but the where names the full primary key plus one extra column', () => {
+    const built = planDelete('t', COMPOSITE_PK_COLUMNS, {
+      where: { tenant_id: 1, item_id: 2, title: 'old' },
       usingPk: true,
     });
     expect(built.sql.endsWith(' LIMIT 1')).toBe(true);

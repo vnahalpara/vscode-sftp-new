@@ -216,6 +216,61 @@ describe('streamExport', () => {
     expect(caught!.message).toContain('2002');
   });
 
+  // A set -x trace can repeat the command -- a retry, a wrapper, a nested
+  // shell -- so more than one occurrence in stderr is the realistic shape,
+  // not the exotic one. Every occurrence must be scrubbed, not just the
+  // first.
+  it('redacts every occurrence when the password appears more than once in stderr', async () => {
+    const { deps } = fakeDeps({
+      exec: async (cmd: string) =>
+        cmd.indexOf('rm -f') === -1
+          ? {
+              stdout: '',
+              stderr:
+                '+ MYSQL_PWD=DB-PASSWORD-4c1f mysqldump --user=u --host=h shop\n' +
+                '+ MYSQL_PWD=DB-PASSWORD-4c1f mysqldump --user=u --host=h shop\n' +
+                "mysqldump: Got error: 2002: Can't connect",
+              code: 1,
+            }
+          : { stdout: '', stderr: '', code: 0 },
+    });
+    let caught: Error | null = null;
+    try {
+      await streamExport(deps as any, { dbConfig: DB as any, table: null }, fakeSink().sink as any);
+    } catch (error) {
+      caught = error as Error;
+    }
+    expect(caught).not.toBeNull();
+    expect(caught!.message).not.toContain('DB-PASSWORD-4c1f');
+    // Both occurrences were replaced, not just the first.
+    expect(caught!.message.split('[redacted]').length - 1).toBe(2);
+  });
+
+  // The assertion here is about the VALUE being gone, not about a whole
+  // line disappearing -- so also cover the password showing up as a
+  // substring of a longer token, with no whitespace boundary on either side.
+  it('redacts the password even when it appears as a substring of a longer token', async () => {
+    const { deps } = fakeDeps({
+      exec: async (cmd: string) =>
+        cmd.indexOf('rm -f') === -1
+          ? {
+              stdout: '',
+              stderr: 'mysqldump: access denied for tokenDB-PASSWORD-4c1fSUFFIX',
+              code: 1,
+            }
+          : { stdout: '', stderr: '', code: 0 },
+    });
+    let caught: Error | null = null;
+    try {
+      await streamExport(deps as any, { dbConfig: DB as any, table: null }, fakeSink().sink as any);
+    } catch (error) {
+      caught = error as Error;
+    }
+    expect(caught).not.toBeNull();
+    expect(caught!.message).not.toContain('DB-PASSWORD-4c1f');
+    expect(caught!.message).toContain('token[redacted]SUFFIX');
+  });
+
   // Backpressure: streaming into the response must not turn into buffering
   // the whole dump in the extension host's memory just because sink.write()
   // occasionally returns false.
