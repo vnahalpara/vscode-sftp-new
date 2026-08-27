@@ -67,6 +67,7 @@ export const COMMAND_CREATE_FOLDER = 'sftp.create.folder';
 export const COMMAND_CREATE_FILE = 'sftp.create.file';
 export const COMMAND_GOTO_FOLDER = 'sftp.goto.folder';
 export const COMMAND_GET_SIZE = 'sftp.getSize';
+export const COMMAND_CREATE_ARCHIVE = 'sftp.createArchive';
 
 export const COMMAND_DB_OPEN_TABLE = 'sftp.db.openTable';
 export const COMMAND_DB_FIND_TABLE = 'sftp.db.findTable';

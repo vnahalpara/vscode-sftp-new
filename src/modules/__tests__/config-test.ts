@@ -75,3 +75,45 @@ describe('validateConfig: documented empty passwords', () => {
     ).toBeNull();
   });
 });
+
+describe('validateConfig: archiveExcludes', () => {
+  function withExcludes(archiveExcludes: any): any {
+    return {
+      host: '1.2.3.4',
+      username: 'someone',
+      remotePath: '/var/www',
+      archiveExcludes,
+    };
+  }
+
+  test('accepts an ordinary list', () => {
+    expect(validateConfig(withExcludes(['node_modules', 'var/cache']))).toBeNull();
+  });
+
+  // An empty array is the only way to say "archive everything", so it has to
+  // validate -- and it must NOT be confused with the field being absent,
+  // which means "use the defaults".
+  test('accepts an empty list, which means archive everything', () => {
+    expect(validateConfig(withExcludes([]))).toBeNull();
+  });
+
+  test('accepts an empty string entry', () => {
+    expect(validateConfig(withExcludes(['']))).toBeNull();
+  });
+
+  // The blast radius is the whole point of keeping this schema permissive.
+  // validateConfig() runs for the entire profile on the way to getConfig(),
+  // so a schema strict enough to reject an odd exclude pattern would take
+  // plain SFTP upload/download/sync and every database feature down with it
+  // -- which is exactly how a `.min(1)` on vpn.socksPort once broke profiles
+  // for users who never touched the VPN feature. Unsafe patterns are filtered
+  // at runtime by isSafeExclude instead.
+  test('accepts a pattern with a newline rather than failing the whole profile', () => {
+    expect(validateConfig(withExcludes(['ok', 'bad\nline']))).toBeNull();
+  });
+
+  test('is optional — a profile without it still validates', () => {
+    const config: any = { host: '1.2.3.4', username: 'someone', remotePath: '/var/www' };
+    expect(validateConfig(config)).toBeNull();
+  });
+});

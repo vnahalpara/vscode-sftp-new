@@ -105,6 +105,15 @@
         },
         "default": [".vscode", ".git", ".DS_Store"]
       },
+      "archiveExcludes": {
+        "type": "array",
+        "description": "Patterns excluded by \"Create tar.gz\". Omit to use the defaults (regenerable caches, logs and VCS directories). An empty array archives everything. Note that \"vendor\" is NOT excluded by default: dropping a dependency tree makes the archive unrestorable without a working composer/npm install on the server.",
+        "items": {
+          "type": "string",
+          "description": "Exclude pattern, matched by tar --exclude."
+        },
+        "default": ["node_modules", ".git", ".svn", "var/cache", "var/log", "var/session", "var/tmp", "pub/static", ".DS_Store"]
+      },
       "ignoreFile": {
         "type": "string",
         "description": "Absolute path to the ignore file or Relative path relative to the workspace root folder.",

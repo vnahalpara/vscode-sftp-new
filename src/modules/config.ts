@@ -49,6 +49,14 @@ const configScheme = {
     socksPort: Joi.number().integer().min(0).max(65535),
     healthCheckTimeout: Joi.number().integer(),
   },
+  // Deliberately permissive: any array of strings validates, including an
+  // empty array (which means "archive everything") and an empty string.
+  // Unsafe patterns are filtered at runtime by isSafeExclude
+  // (fileHandlers/createArchiveCore.ts), NOT rejected here -- a bad entry
+  // must cost the user that one pattern, never the whole profile. Tightening
+  // this is how `socksPort` once broke plain SFTP and every database feature
+  // for anyone who took the editor's default.
+  archiveExcludes: Joi.array().items(Joi.string().allow('')),
   ssh_prefix: Joi.string(),
   post_connect: Joi.alternatives([Joi.string(), Joi.array().items(Joi.string())]).optional(),
   database: Joi.array().items(

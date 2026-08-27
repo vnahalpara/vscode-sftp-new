@@ -1,3 +1,16 @@
+## 1.29.0 - 2026-08-21
+* New Feature : **Create tar.gz** on any folder in the Remote Explorer, directly under **Get Size**.
+  The archive is built on the server and written beside the folder as
+  `<folder>-YYYY-MM-DD-HHmmss.tar.gz`, so a second run cannot overwrite the first. The progress
+  notification shows a real percentage — the file count is established up front — and cancelling
+  kills the remote `tar` and removes the partial archive. Excludes regenerable directories
+  (`node_modules`, `.git`, `var/cache`, `var/log`, `pub/static` and friends) by default;
+  override per profile with `archiveExcludes` in `sftp.json`, where an empty array archives
+  everything. `vendor` is deliberately NOT excluded by default — dropping a dependency tree makes
+  the archive unrestorable without a working `composer install`/`npm install` on the server. A
+  `tar` exit of 1 ("file changed as we read it") keeps the archive and warns, rather than
+  discarding a usable backup. Requires an SFTP (SSH) connection.
+
 ## 1.28.0 - 2026-08-21
 * New Feature : the Manage Server dashboard's **Database** tab -- full parity with the extension's
   existing VS Code data browser, rendered as a live tab instead of a sidebar view. Pick a database,

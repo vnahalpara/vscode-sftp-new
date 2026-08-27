@@ -2,7 +2,7 @@
   "name": "vaibhav-sftp-plus",
   "displayName": "Vaibhav SFTP Plus",
   "description": "SFTP/FTP file synchronization for VS Code (patched for current Node/VS Code).",
-  "version": "1.28.0",
+  "version": "1.29.0",
   "publisher": "vaibhavupdated",
   "author": "Vaibhav (https://github.com/vnahalpara)",
   "engines": {
@@ -354,6 +354,11 @@
       {
         "command": "sftp.getSize",
         "title": "Get Size",
+        "category": "SFTP"
+      },
+      {
+        "command": "sftp.createArchive",
+        "title": "Create tar.gz",
         "category": "SFTP"
       },
       {
@@ -953,6 +958,11 @@
         },
         {
           "command": "sftp.getSize",
+          "group": "5_info",
+          "when": "view == remoteExplorer && viewItem != file"
+        },
+        {
+          "command": "sftp.createArchive",
           "group": "5_info",
           "when": "view == remoteExplorer && viewItem != file"
         },

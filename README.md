@@ -69,6 +69,7 @@ the notes below.
 |---|---|---|
 | SFTP/FTP sync (upload / download / diff / sync) | ✅ | ✅ |
 | Remote Explorer, Go To Folder | ✅ | ✅ |
+| Create tar.gz of a remote folder (**Linux/Unix servers only**) | ✅ | ✅ |
 | Database: browse, data view (paging/sort/filter), search, SQL runner, cell/row edit, Find Table | ✅ | ✅ |
 | Manage Server (**Linux servers only**) | ✅ | ✅ |
 | VPN tunnel for SFTP **and** database traffic | ✅ | ✅ |
@@ -877,6 +878,48 @@ Remote Explorer lets you explore files in remote. You can open Remote Explorer b
 2. Click SFTP view in Activity Bar.
 
 You can only view a files content with Remote Explorer. Run command `SFTP: Edit in Local` to edit it in local.
+
+### Create tar.gz
+
+Right-click any folder in the Remote Explorer → **Create tar.gz** (directly under **Get Size**).
+The archive is built **on the server** — nothing crosses the network — and written beside the
+folder as `<folder>-YYYY-MM-DD-HHmmss.tar.gz`. The timestamp means a second run can never
+silently overwrite the first.
+
+A progress notification reports a real percentage: the file count is established up front, so
+the bar tracks actual work rather than spinning. Cancelling kills the remote `tar` and removes
+the partial archive, so a cancelled run leaves nothing behind on your server.
+
+Requires an SFTP (SSH) connection — an FTP profile has no exec channel, and there is nothing
+useful to fall back to (a download-tar-reupload round trip would move the whole tree across the
+network twice to produce a file the server could have made locally in seconds).
+
+#### What it skips
+
+By default it excludes regenerable directories: `node_modules`, `.git`, `.svn`, `var/cache`,
+`var/log`, `var/session`, `var/tmp`, `pub/static` and `.DS_Store`.
+
+**`vendor` is deliberately not excluded by default.** Dropping a dependency tree would quietly
+turn "I archived this before a risky change" into an archive you cannot restore without a working
+`composer install`/`npm install` and network access *from the server* — which is exactly what you
+are least likely to have when you need the backup. Add it yourself if you want it.
+
+Override the list per profile with `archiveExcludes` in `sftp.json`:
+
+```json
+{
+  "host": "example.com",
+  "username": "deploy",
+  "remotePath": "/var/www/html",
+  "archiveExcludes": ["node_modules", ".git", "var/cache", "vendor"]
+}
+```
+
+An **empty array archives everything**; omitting the field entirely uses the defaults above.
+
+If `tar` reports that a file changed while it was being read (exit 1 — a log written to mid-run,
+typically), the archive is **kept** and you get a warning rather than a failure. Throwing away a
+good backup because a log file moved would be the wrong trade.
 
 ### Multiple Select
 You are able to select multiple files/folders at once on the remote server to download and upload. You can do it simply by holding down Ctrl or Shift while selecting all desired files, just like on the regular explorer view.
