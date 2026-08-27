@@ -154,6 +154,27 @@ function requireIdentity(where: any, columns: ColumnInfo[]): { [col: string]: an
   return where;
 }
 
+// The client's `usingPk` flag is a HINT, never a fact we trust: a stale or
+// scripted client could send `usingPk: true` alongside a `where` that is not
+// the primary key, which would switch off the LIMIT 1 below and turn one
+// request into a table-wide UPDATE/DELETE. So the claim is verified against
+// the live listColumns() answer (`key === 'PRI'`) before it is honoured --
+// `where`'s keys must be exactly the table's primary-key column set (all of
+// them, for a composite key; order does not matter). Anything else silently
+// falls back to `usingPk: false` (LIMIT 1) rather than being rejected, which
+// is both the safe interpretation and keeps a legitimate client working.
+function isVerifiedPkIdentity(where: { [col: string]: any }, columns: ColumnInfo[]): boolean {
+  const pkColumns = columns.filter(c => c.key === 'PRI').map(c => c.name);
+  if (pkColumns.length === 0) {
+    return false;
+  }
+  const whereKeys = Object.keys(where);
+  if (whereKeys.length !== pkColumns.length) {
+    return false;
+  }
+  return pkColumns.every(name => whereKeys.indexOf(name) !== -1);
+}
+
 export function planUpdate(table: string, columns: ColumnInfo[], body: any): Built {
   const source = body || {};
   const set = source.set;
@@ -162,15 +183,17 @@ export function planUpdate(table: string, columns: ColumnInfo[], body: any): Bui
   }
   requireColumns(Object.keys(set), columns);
   const where = requireIdentity(source.where, columns);
-  // limitOne whenever the identity is NOT a primary key: two byte-identical
+  // limitOne unless the identity is a VERIFIED primary key: two byte-identical
   // rows would otherwise both be written by one edit.
-  return buildUpdate(table, set, where, !source.usingPk);
+  const usingPk = !!source.usingPk && isVerifiedPkIdentity(where, columns);
+  return buildUpdate(table, set, where, !usingPk);
 }
 
 export function planDelete(table: string, columns: ColumnInfo[], body: any): Built {
   const source = body || {};
   const where = requireIdentity(source.where, columns);
-  return buildDelete(table, where, !source.usingPk);
+  const usingPk = !!source.usingPk && isVerifiedPkIdentity(where, columns);
+  return buildDelete(table, where, !usingPk);
 }
 
 export interface SqlPlan {

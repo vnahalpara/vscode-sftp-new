@@ -24,6 +24,14 @@ const COLUMNS: ColumnInfo[] = [
   { name: 'body', type: 'longtext', nullable: true, key: '' },
 ];
 
+// A composite primary key, used to verify that `usingPk` is honoured only
+// when the client's `where` names EXACTLY the PK column set.
+const COMPOSITE_PK_COLUMNS: ColumnInfo[] = [
+  { name: 'tenant_id', type: 'int(11)', nullable: false, key: 'PRI' },
+  { name: 'item_id', type: 'int(11)', nullable: false, key: 'PRI' },
+  { name: 'title', type: 'varchar(255)', nullable: true, key: '' },
+];
+
 describe('requireTable', () => {
   it('returns the table when the live listing contains it', () => {
     expect(requireTable('wp_posts', ['wp_posts', 'wp_users'])).toBe('wp_posts');
@@ -199,6 +207,44 @@ describe('planUpdate', () => {
       planUpdate('wp_posts', COLUMNS, { set: { nope: 'x' }, where: { id: 1 } })
     ).toThrow(BadRequest);
   });
+
+  // Fix 1: the client's `usingPk` claim is a hint, never trusted -- it is
+  // verified against the live PRI columns before it can switch off LIMIT 1.
+  it('honours usingPk when the where matches a genuine composite primary key', () => {
+    const built = planUpdate('t', COMPOSITE_PK_COLUMNS, {
+      set: { title: 'new' },
+      where: { item_id: 2, tenant_id: 1 },
+      usingPk: true,
+    });
+    expect(built.sql.endsWith(' LIMIT 1')).toBe(false);
+  });
+
+  it('still applies LIMIT 1 when usingPk is claimed but the where names a non-PK column', () => {
+    const built = planUpdate('wp_posts', COLUMNS, {
+      set: { body: 'new' },
+      where: { title: 'old' },
+      usingPk: true,
+    });
+    expect(built.sql.endsWith(' LIMIT 1')).toBe(true);
+  });
+
+  it('still applies LIMIT 1 when usingPk is claimed but the where names only one column of a two-column primary key', () => {
+    const built = planUpdate('t', COMPOSITE_PK_COLUMNS, {
+      set: { title: 'new' },
+      where: { tenant_id: 1 },
+      usingPk: true,
+    });
+    expect(built.sql.endsWith(' LIMIT 1')).toBe(true);
+  });
+
+  it('omits LIMIT for a genuine single-column primary key', () => {
+    const built = planUpdate('wp_posts', COLUMNS, {
+      set: { title: 'new' },
+      where: { id: 7 },
+      usingPk: true,
+    });
+    expect(built.sql.endsWith(' LIMIT 1')).toBe(false);
+  });
 });
 
 describe('planDelete', () => {
@@ -215,6 +261,33 @@ describe('planDelete', () => {
 
   it('rejects an empty where so it can never become a whole-table delete', () => {
     expect(() => planDelete('wp_posts', COLUMNS, { where: {} })).toThrow(BadRequest);
+  });
+
+  // Fix 1: same verification as planUpdate -- usingPk is a hint, never trusted.
+  it('honours usingPk when the where matches a genuine composite primary key', () => {
+    const built = planDelete('t', COMPOSITE_PK_COLUMNS, {
+      where: { item_id: 2, tenant_id: 1 },
+      usingPk: true,
+    });
+    expect(built.sql.endsWith(' LIMIT 1')).toBe(false);
+  });
+
+  it('still applies LIMIT 1 when usingPk is claimed but the where names a non-PK column', () => {
+    const built = planDelete('wp_posts', COLUMNS, { where: { title: 'old' }, usingPk: true });
+    expect(built.sql.endsWith(' LIMIT 1')).toBe(true);
+  });
+
+  it('still applies LIMIT 1 when usingPk is claimed but the where names only one column of a two-column primary key', () => {
+    const built = planDelete('t', COMPOSITE_PK_COLUMNS, {
+      where: { tenant_id: 1 },
+      usingPk: true,
+    });
+    expect(built.sql.endsWith(' LIMIT 1')).toBe(true);
+  });
+
+  it('omits LIMIT for a genuine single-column primary key', () => {
+    const built = planDelete('wp_posts', COLUMNS, { where: { id: 7 }, usingPk: true });
+    expect(built.sql.endsWith(' LIMIT 1')).toBe(false);
   });
 });
 
