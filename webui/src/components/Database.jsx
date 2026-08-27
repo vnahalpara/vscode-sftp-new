@@ -30,7 +30,11 @@ async function downloadExport(url) {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(objectUrl);
+  // Deferred rather than called right after click(): some browsers start a
+  // large blob's download asynchronously, and revoking the object URL in the
+  // same tick can cancel it before the browser has actually read from it.
+  // A macrotask is enough of a delay for the download to have started.
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
 }
 
 function DatabaseTab({ profile }) {

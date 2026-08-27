@@ -386,10 +386,12 @@ dashboard in several tabs at once can still reach the limit.
 Full parity with the extension's existing VS Code data browser (below), rendered as a tab in the
 dashboard instead of a sidebar view: pick a database, browse its tables, sort and filter a page of
 rows, edit a cell in place, delete a row, run raw SQL, and export a table or the whole database as
-a downloaded `.sql.gz`. The tab and the sidebar **Database** entry are both enabled once this build
-ships the feature; a profile whose `sftp.json` has no `database[]` entries just opens to an empty
-picker ("No databases — nothing was returned for this profile") rather than being greyed out. A
-minimal entry, using the same schema the sidebar view already reads:
+a downloaded `.sql.gz` (a very large export is held entirely in the browser tab's memory while it
+downloads, even though the server side streams it rather than buffering it). The tab and the
+sidebar **Database** entry are both enabled once this build ships the feature; a profile whose
+`sftp.json` has no `database[]` entries just opens to an empty picker ("No databases — nothing was
+returned for this profile") rather than being greyed out. A minimal entry, using the same schema
+the sidebar view already reads:
 
 ```json
 {
@@ -415,6 +417,14 @@ no `WHERE` clause, it asks a **second** time, because "this changes data" and "t
 row" are different decisions worth separate confirmations. Both gates are enforced on the server,
 not only in the browser, so a stale tab or a scripted request can't skip them. A bare `SELECT` gets
 an automatic `LIMIT` the same way the sidebar's Run Query does.
+
+On a host that disables SSH port forwarding (the same `mysql`-CLI fallback the Database tab uses
+elsewhere — see [Database — nothing to install
+locally](#database--nothing-to-install-locally)), every query and export opens its own SSH exec
+channel and draws from the same 10-channel `MaxSessions` budget the log-follow cap above protects;
+**up to 2 such operations may run at once**, with a clear refusal — not a queue — past that. This
+does not apply when TCP forwarding is available: that transport uses a `direct-tcpip` channel,
+which `MaxSessions` does not count at all.
 
 **Security note.** This tab has the same reach as the Terminal tab described above: anyone who
 holds the dashboard's URL and its session token can already open that shell and run `mysql` by
