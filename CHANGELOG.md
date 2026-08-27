@@ -17,6 +17,12 @@
   wrong under `sql_mode=NO_BACKSLASH_ESCAPES` -- a backslash isn't an escape character there, so it
   produced a syntax error at best and a malformed query at worst. This is shared code, so it also
   fixes the existing VS Code database panel on hosts running that mode, not just the new tab.
+* Fix : the shared check for whether a query has a `WHERE` clause (used by both the new Database
+  tab and the existing VS Code data browser's "Run Query" to decide whether to warn that a
+  statement affects every row) no longer matches the bare word `where` inside a string literal or
+  a comment. If you use the existing panel, this means you may now see that "no WHERE clause"
+  confirmation on a statement that previously ran straight through -- that statement never had a
+  real `WHERE`, so this is a safety fix, not a new restriction.
 
 ## 1.27.0 - 2026-08-20
 * New Feature : the Web server tab now shows a **Cloudflare** card with a **Purge everything**
