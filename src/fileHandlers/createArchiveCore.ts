@@ -91,31 +91,60 @@ export function splitRemotePath(remotePath: string): { parent: string; name: str
 // Counts what tar is about to add, so the progress bar has a real denominator
 // instead of an indeterminate spinner.
 //
-// `find` prunes an excluded directory rather than merely skipping its entry
-// (`-prune`), which is what makes this count agree with tar's own
-// `--exclude` behaviour: tar does not descend into an excluded directory
-// either. Counting the entries and then watching tar skip a subtree would
-// make the bar stall short of 100%.
+// The predicate has to agree with what GNU tar's `--exclude` actually does, or
+// the denominator is wrong and the bar never reaches 100%.
+//
+// `-name` matches the BASENAME only, so `-name 'var/cache'` can never match
+// anything -- five of the nine default excludes contain a slash, and every one
+// of them was silently counted in while tar went on to exclude them. A pattern
+// containing a slash needs `-path`, matched against the whole path, with a
+// leading `*/` because tar's `--exclude` is unanchored by default and matches
+// at any depth.
+//
+// `-prune` (rather than a plain filter) is what makes this agree with tar on
+// DIRECTORIES: tar does not descend into an excluded directory, so counting
+// its contents and then watching tar skip them would stall the bar short.
+function findPredicate(pattern: string): string {
+  return pattern.indexOf('/') === -1
+    ? `-name ${shellSingle(pattern)}`
+    : `-path ${shellSingle('*/' + pattern)}`;
+}
+
 export function buildCountCommand(parent: string, name: string, excludes: string[]): string {
-  const prunes = excludes
-    .map(pattern => `-name ${shellSingle(pattern)} -prune -o`)
-    .join(' ');
+  const target = shellSingle('./' + name);
+  if (excludes.length === 0) {
+    return `cd ${shellSingle(parent)} && find ${target} -print | wc -l`;
+  }
+  // One parenthesised group of alternatives, pruned together. Escaped for the
+  // shell, since find's own parentheses would otherwise be subshell syntax.
+  const group = excludes.map(findPredicate).join(' -o ');
   return (
-    `cd ${shellSingle(parent)} && find ${shellSingle('./' + name)} ` +
-    `${prunes} -print | wc -l`
+    `cd ${shellSingle(parent)} && find ${target} ` +
+    `\\( ${group} \\) -prune -o -print | wc -l`
   );
 }
 
 // The archive command itself.
 //
 // `--` before the path is the end-of-options guard this repo uses on every
-// remote command: a directory legitimately named `--checkpoint` is a flag to
-// getopt otherwise, quoted or not. `-C <parent>` plus a bare relative name
-// keeps the archive's contents relative (see splitRemotePath).
+// remote command. `-C <parent>` plus a bare relative name keeps the archive's
+// contents relative (see splitRemotePath).
 //
 // The archive is written to the PARENT directory, never inside the folder
 // being archived -- tar reading the file it is writing produces a growing
 // archive and a "file changed as we read it" warning at best.
+//
+// `echo $$ && exec tar` is what makes CANCEL actually work. ssh2 can send an
+// SSH `signal` request, but OpenSSH's sshd ignores it on a pty-less exec
+// channel, and closing our end of the channel only tears down the CLIENT's
+// view -- the remote tar carries on to completion, still writing an archive
+// nobody wants, and the `rm -f` that follows merely unlinks a file tar still
+// holds open, so the disk space is not even released until it finishes.
+//
+// Printing the shell's PID first and then `exec`ing tar into that same PID
+// gives the client a real handle to kill over a second channel. It goes to
+// STDOUT, where nothing else is written -- tar's verbose member list is on
+// stderr -- so the two never interleave.
 export function buildTarCommand(
   parent: string,
   name: string,
@@ -126,21 +155,48 @@ export function buildTarCommand(
     .map(pattern => `--exclude=${shellSingle(pattern)}`)
     .join(' ');
   return (
-    `cd ${shellSingle(parent)} && tar -czvf ${shellSingle(archiveFile)} ` +
-    `${excludeArgs} -- ${shellSingle('./' + name)}`
+    `cd ${shellSingle(parent)} && echo $$ && ` +
+    `exec tar -czvf ${shellSingle(archiveFile)} ${excludeArgs} -- ${shellSingle('./' + name)}`
   );
+}
+
+// Stops the remote tar started by buildTarCommand. Runs over its OWN exec
+// channel, because the channel tar is running on is exactly the one that will
+// not respond. TERM first, then KILL after a moment for a tar that ignores it;
+// `|| true` so a process that has already exited is not an error.
+export function buildKillCommand(pid: number): string {
+  return `kill -TERM ${pid} 2>/dev/null; sleep 1; kill -KILL ${pid} 2>/dev/null; true`;
+}
+
+// Integrity check for the exit-1 case.
+//
+// GNU tar uses exit 1 for "some files differ" (a log written to mid-run) and 2
+// for a fatal error, so exit 1 there means the archive is usable. bsdtar
+// (libarchive, the default tar on macOS and the BSDs) does NOT make that
+// distinction -- it returns 1 for a genuine failure too, so trusting the exit
+// code alone would report success on a total failure against a non-Linux
+// server. Ask gzip whether the file it produced is actually intact instead of
+// inferring it from a code whose meaning depends on which tar is installed.
+export function buildVerifyCommand(parent: string, archiveFile: string): string {
+  return `gzip -t -- ${shellSingle(parent + '/' + archiveFile)} 2>&1 && echo OK`;
 }
 
 // Removes a partial archive after a cancel or a failure. Best-effort: a
 // cleanup that cannot run must never replace the error that caused it.
 export function buildCleanupCommand(parent: string, archiveFile: string): string {
-  return `rm -f ${shellSingle(parent + '/' + archiveFile)}`;
+  // `--` for the same reason every other remote command in this repo carries
+  // one: an absolute path is the normal case, but a relative parent makes
+  // `-something/archive.tar.gz` a flag to getopt, quoted or not.
+  return `rm -f -- ${shellSingle(parent + '/' + archiveFile)}`;
 }
 
 export function buildStatCommand(parent: string, archiveFile: string): string {
   const target = shellSingle(parent + '/' + archiveFile);
   // BSD/macOS servers take -f%z, GNU takes -c%s. Try GNU first, fall back.
-  return `stat -c%s ${target} 2>/dev/null || stat -f%z ${target} 2>/dev/null || echo 0`;
+  return (
+    `stat -c%s -- ${target} 2>/dev/null || ` +
+    `stat -f%z -- ${target} 2>/dev/null || echo 0`
+  );
 }
 
 // tar -v writes one line per member to STDERR (stdout carries the archive

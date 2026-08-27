@@ -3,8 +3,10 @@ import {
   archiveName,
   buildCleanupCommand,
   buildCountCommand,
+  buildKillCommand,
   buildStatCommand,
   buildTarCommand,
+  buildVerifyCommand,
   isDiagnosticLine,
   isSafeExclude,
   parseVerboseChunk,
@@ -126,12 +128,38 @@ describe('splitRemotePath', () => {
 });
 
 describe('buildCountCommand', () => {
-  it('prunes each exclude so the count matches what tar will add', () => {
-    const cmd = buildCountCommand('/var/www', 'html', ['node_modules', '.git']);
-    expect(cmd).toContain("cd '/var/www'");
-    expect(cmd).toContain("-name 'node_modules' -prune -o");
-    expect(cmd).toContain("-name '.git' -prune -o");
-    expect(cmd).toContain('-print | wc -l');
+  it('matches a slash-free pattern by name', () => {
+    expect(buildCountCommand('/var/www', 'html', ['node_modules'])).toContain(
+      `-name 'node_modules'`
+    );
+  });
+
+  // The bug this replaced: `-name` matches the BASENAME only, so
+  // `-name 'var/cache'` can never match anything. Five of the nine default
+  // excludes contain a slash, so the count silently included every file under
+  // them while tar went on to exclude them -- the denominator was inflated on
+  // ordinary default usage and the bar could never reach 100%.
+  it('matches a pattern containing a slash by path, not by name', () => {
+    const cmd = buildCountCommand('/var/www', 'html', ['var/cache']);
+    expect(cmd).toContain(`-path '*/var/cache'`);
+    expect(cmd).not.toContain(`-name 'var/cache'`);
+  });
+
+  // tar's --exclude is unanchored, so it matches at any depth. The leading
+  // `*/` is what makes find agree.
+  it('anchors a slash pattern so it matches at any depth', () => {
+    expect(buildCountCommand('/p', 'n', ['pub/static'])).toContain(`-path '*/pub/static'`);
+  });
+
+  it('groups every exclude into one pruned alternation', () => {
+    const cmd = buildCountCommand('/p', 'n', ['node_modules', 'var/cache']);
+    expect(cmd).toContain(`\\( -name 'node_modules' -o -path '*/var/cache' \\) -prune -o -print`);
+  });
+
+  it('omits the group entirely when nothing is excluded', () => {
+    const cmd = buildCountCommand('/p', 'n', []);
+    expect(cmd).toBe(`cd '/p' && find './n' -print | wc -l`);
+    expect(cmd).not.toContain('-prune');
   });
 
   it('quotes a path containing a single quote', () => {
@@ -139,10 +167,46 @@ describe('buildCountCommand', () => {
   });
 });
 
+describe('buildKillCommand', () => {
+  // Cancel cannot work through the channel tar occupies: OpenSSH ignores an
+  // SSH signal request on a pty-less exec, and closing the client's end leaves
+  // tar running server-side. Killing by PID over a second channel is what
+  // actually stops it.
+  it('sends TERM then KILL and never fails on an already-dead process', () => {
+    const cmd = buildKillCommand(4242);
+    expect(cmd).toContain('kill -TERM 4242');
+    expect(cmd).toContain('kill -KILL 4242');
+    expect(cmd.trim().endsWith('true')).toBe(true);
+  });
+});
+
+describe('buildVerifyCommand', () => {
+  // GNU tar's exit 1 means "some files differ"; bsdtar's exit 1 can mean a
+  // fatal error. Asking gzip whether the archive is intact is the only check
+  // that means the same thing on both.
+  it('asks gzip to test the archive and echoes a recognisable marker', () => {
+    const cmd = buildVerifyCommand('/p', 'a.tar.gz');
+    expect(cmd).toContain(`gzip -t -- '/p/a.tar.gz'`);
+    expect(cmd).toContain('echo OK');
+  });
+});
+
 describe('buildTarCommand', () => {
   it('writes the archive to the parent and archives a relative path', () => {
     const cmd = buildTarCommand('/var/www', 'html', 'html-2026.tar.gz', []);
-    expect(cmd).toBe(`cd '/var/www' && tar -czvf 'html-2026.tar.gz'  -- './html'`);
+    expect(cmd).toContain(`cd '/var/www'`);
+    expect(cmd).toContain(`tar -czvf 'html-2026.tar.gz'`);
+    expect(cmd).toContain(`-- './html'`);
+  });
+
+  // The PID wrapper is what makes cancel able to stop the remote tar at all.
+  // `exec` matters: without it the shell forks and $$ names the shell, not
+  // tar, so the kill would hit an already-exited process and leave tar running.
+  it('prints the shell PID and execs tar into it', () => {
+    const cmd = buildTarCommand('/p', 'n', 'a.tar.gz', []);
+    expect(cmd).toContain('echo $$ &&');
+    expect(cmd).toContain('exec tar');
+    expect(cmd.indexOf('echo $$')).toBeLessThan(cmd.indexOf('exec tar'));
   });
 
   it('passes each exclude to tar', () => {
@@ -164,7 +228,7 @@ describe('buildTarCommand', () => {
 
 describe('buildCleanupCommand', () => {
   it('removes the partial archive by full path', () => {
-    expect(buildCleanupCommand('/var/www', 'a.tar.gz')).toBe(`rm -f '/var/www/a.tar.gz'`);
+    expect(buildCleanupCommand('/var/www', 'a.tar.gz')).toBe(`rm -f -- '/var/www/a.tar.gz'`);
   });
 });
 

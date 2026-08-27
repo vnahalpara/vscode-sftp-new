@@ -7,8 +7,10 @@ import {
   archiveName,
   buildCleanupCommand,
   buildCountCommand,
+  buildKillCommand,
   buildStatCommand,
   buildTarCommand,
+  buildVerifyCommand,
   isDiagnosticLine,
   parseVerboseChunk,
   resolveExcludes,
@@ -38,12 +40,17 @@ async function countEntries(ssh: any, parent: string, name: string, excludes: st
 // `execStream` rather than `exec`: exec buffers until the command closes, so a
 // ten-minute archive would show nothing at all until it finished, which is
 // precisely the experience this feature exists to avoid.
+//
+// Cancellation kills the remote process by PID over a SECOND channel. Signals
+// on this channel do not work -- see buildTarCommand's comment: OpenSSH
+// ignores an SSH signal request on a pty-less exec, and closing our end leaves
+// tar running server-side. The PID arrives as the first line of stdout.
 function runTar(
   ssh: any,
   command: string,
   onFile: (name: string, count: number) => void,
   isCancelled: () => boolean
-): Promise<{ code: number; stderr: string }> {
+): Promise<{ code: number; stderr: string; killed: boolean }> {
   return new Promise((resolve, reject) => {
     ssh.execStream(command).then((stream: any) => {
       let carry = '';
@@ -53,14 +60,43 @@ function runTar(
       // to build an error message that will be truncated anyway would hold
       // that in the extension host's heap, the process the editor runs in.
       let errorTail = '';
+      let pidText = '';
+      let pid: number | null = null;
+      let killed = false;
       let done = false;
 
-      const finish = (result: { code: number; stderr: string }) => {
+      const finish = (result: { code: number; stderr: string; killed: boolean }) => {
         if (done) {
           return;
         }
         done = true;
         resolve(result);
+      };
+
+      // The PID line, then nothing else -- tar writes the archive to a file,
+      // so stdout carries only what the wrapper echoed. Still drained either
+      // way: a full channel window would stall the command.
+      stream.on('data', (chunk: Buffer) => {
+        if (pid !== null) {
+          return;
+        }
+        pidText += chunk.toString('utf8');
+        const nl = pidText.indexOf('\n');
+        if (nl !== -1) {
+          const parsed = parseInt(pidText.slice(0, nl).trim(), 10);
+          pid = Number.isFinite(parsed) && parsed > 0 ? parsed : -1;
+        }
+      });
+
+      const killRemote = () => {
+        if (killed || pid === null || pid <= 0) {
+          return;
+        }
+        killed = true;
+        // Fire-and-forget on its own channel: the channel tar occupies is
+        // precisely the one that will not answer. A failure here is reported
+        // by the caller as "could not confirm", never thrown over the cancel.
+        ssh.exec(buildKillCommand(pid)).catch(() => undefined);
       };
 
       // tar's member list and its diagnostics both arrive on stderr.
@@ -76,29 +112,14 @@ function runTar(
           onFile(line, count);
         });
 
-        if (isCancelled() && !done) {
-          // Kill the remote tar rather than merely stopping reading: closing
-          // our end would leave tar running to completion on the user's
-          // server, still writing an archive nobody asked for any more.
-          try {
-            stream.signal('TERM');
-          } catch {
-            /* some servers refuse signals; the close below still tears down */
-          }
-          try {
-            stream.close();
-          } catch {
-            /* already gone */
-          }
+        if (isCancelled()) {
+          killRemote();
         }
       });
 
-      // Drain stdout so the channel's window does not fill and stall the
-      // command. tar writes the archive to a file here, so this is normally
-      // empty -- but a stalled channel would hang the whole operation.
-      stream.on('data', () => undefined);
-
-      stream.on('close', (code: number) => finish({ code: code || 0, stderr: errorTail }));
+      stream.on('close', (code: number) =>
+        finish({ code: code || 0, stderr: errorTail, killed })
+      );
       stream.on('error', (err: Error) => {
         if (!done) {
           done = true;
@@ -107,6 +128,17 @@ function runTar(
       });
     }, reject);
   });
+}
+
+// Ask gzip whether the archive is actually intact, rather than inferring it
+// from an exit code whose meaning differs between GNU tar and bsdtar.
+async function archiveIsIntact(ssh: any, parent: string, file: string): Promise<boolean> {
+  try {
+    const res = await ssh.exec(buildVerifyCommand(parent, file));
+    return /\bOK\b/.test(res.stdout || '');
+  } catch {
+    return false;
+  }
 }
 
 async function archiveSize(ssh: any, parent: string, file: string): Promise<number> {
@@ -194,21 +226,42 @@ export const createArchive = createFileHandler({
 
         if (token.isCancellationRequested) {
           await cleanup(ssh, parent, file);
-          vscode.window.showInformationMessage(`Create tar.gz cancelled — no archive was left on the server.`);
+          // `killed` says a TERM/KILL was actually dispatched at a real PID.
+          // Without it the archive was removed but the remote tar may still be
+          // running -- saying "nothing was left behind" then would be a lie,
+          // and the user would have no idea their server was still working.
+          vscode.window.showInformationMessage(
+            result.killed
+              ? 'Create tar.gz cancelled — the remote tar was stopped and the partial archive removed.'
+              : 'Create tar.gz cancelled and the partial archive removed, but the remote tar could not be confirmed stopped.'
+          );
           return;
         }
 
+        // Close the bar honestly. `pct` is capped at 99 while streaming so it
+        // never claims completion before tar has closed, and the 120ms
+        // throttle drops whatever updates land in the final window -- so
+        // without this the notification routinely ends visibly short of full.
+        if (total) {
+          progress.report({ increment: 100 - reported, message: 'Finishing…' });
+        }
+
         if (result.code !== 0) {
-          // tar exits 1 for "some files differ" (a file changed while being
-          // read) and 2 for a fatal error. A 1 still produces a usable
-          // archive, so it is reported as a warning rather than a failure --
-          // treating it as fatal and deleting the archive would throw away a
-          // good backup because a log file was written to mid-run.
-          if (result.code === 1) {
+          // GNU tar returns 1 for "some files differ" (a log written to
+          // mid-run) and 2 for a fatal error, so on GNU an exit 1 still leaves
+          // a usable archive. bsdtar (libarchive -- the default on macOS and
+          // the BSDs) does NOT make that distinction and returns 1 for a real
+          // failure too, so trusting the code alone would report success on a
+          // total failure against a non-Linux server.
+          //
+          // Ask gzip whether the file is actually intact instead of inferring
+          // it from a code whose meaning depends on which tar is installed.
+          const intact = result.code === 1 && (await archiveIsIntact(ssh, parent, file));
+          if (intact) {
             const bytes = await archiveSize(ssh, parent, file);
             vscode.window.showWarningMessage(
               `${file} — ${formatBytes(bytes)}, but some files changed while being read. ` +
-                `The archive was kept: ${parent}/${file}`
+                `The archive is intact and was kept: ${parent}/${file}`
             );
             return;
           }
