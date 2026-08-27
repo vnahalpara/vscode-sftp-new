@@ -68,6 +68,26 @@ function remoteTmp(remotePath: string, name: string): { dir: string; file: strin
   return { dir, file: `${dir}/${name}.sql.gz` };
 }
 
+// Last line of defense for Global Constraint 1. dumpCmd (buildMysqldumpCommand/
+// buildTableDumpCommand, dbExec.ts) embeds MYSQL_PWD='<password>' literally, and
+// the error below is built from stderr ONLY specifically so that command
+// string can never become part of it. But stderr is remote output this
+// process does not control: if the target server's ~/.bashrc sets `set -x`,
+// bash traces every command it runs (non-interactive ssh execution still
+// sources it) onto stderr -- including this one, with the real password
+// substituted in. That traced line would otherwise flow straight into the
+// activity log, GET /api/activity, and the output channel. We know the exact
+// password value here, so scrub every occurrence of it out before the text
+// becomes an Error -- an empty password is a valid, intentionally-accepted
+// config (see normaliseDatabases in dbAccess.ts) and is deliberately left
+// alone rather than redacting every character of the string.
+function redactPassword(text: string, password: string): string {
+  if (!password) {
+    return text;
+  }
+  return text.split(password).join('[redacted]');
+}
+
 // Pipe the SFTP download straight into the sink, unmodified: the gzip goes
 // through as-is (the browser saves a .sql.gz), unlike the VS Code path,
 // which optionally gunzips into a chosen local file.
@@ -119,7 +139,9 @@ export async function streamExport(deps: ExportDeps, target: ExportTarget, sink:
     if (dumped.code !== 0) {
       // Built from stderr ONLY -- dumpCmd embeds MYSQL_PWD='<password>' and
       // must never become part of an error message (Global Constraint 1).
-      throw new Error(dumped.stderr.trim() || `mysqldump failed (exit ${dumped.code})`);
+      // redactPassword is the belt to that braces -- see its doc comment.
+      const stderr = redactPassword(dumped.stderr.trim(), dbConfig.password);
+      throw new Error(stderr || `mysqldump failed (exit ${dumped.code})`);
     }
     if (aborted) {
       throw cancelledError();
