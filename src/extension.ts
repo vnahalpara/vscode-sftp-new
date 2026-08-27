@@ -122,6 +122,15 @@ export function deactivate() {
   fileActivityMonitor.destory();
   getAllFileService().forEach(disposeFileService);
   vpnTunnel.disposeAll();
-  dbConnectionManager.disposeAll();
+  // serverManager BEFORE dbConnectionManager: an export in flight in the
+  // Database tab reaches its cleanup in a `finally` (dbExportStream.ts)
+  // whether it finishes, fails, or is aborted -- and that cleanup runs an
+  // exec over the connection dbConnectionManager pools. Tearing the pool
+  // down first has the cleanup exec reach an already-dying connection, which
+  // fails and is swallowed by its own best-effort catch, leaving the remote
+  // temp file behind. Disposing serverManager first lets any in-flight
+  // request settle (including that cleanup) before the pool underneath it
+  // goes away.
   serverManager.disposeAll();
+  dbConnectionManager.disposeAll();
 }
