@@ -600,9 +600,8 @@ export default function Logs() {
 
                 {selected.kind === 'file' && !tailError && (
                   <div className="muted" style={{ fontSize: 11.5, marginBottom: 8 }}>
-                    Showing the start of the file (the first {TAIL_LINES.toLocaleString()} lines, oldest
-                    first) — for an actively growing log this is old content; start Follow for what's
-                    happening now.
+                    Showing the last {TAIL_LINES.toLocaleString()} lines of the file, oldest first —
+                    a point-in-time snapshot. Start Follow for lines arriving now.
                   </div>
                 )}
 
@@ -627,9 +626,16 @@ export default function Logs() {
                   </div>
                 )}
 
-                {selected.kind === 'unit' && !hasContent && !tailError && (
+                {/* A unit that read successfully and returned nothing. Since
+                    /api/journal exists this is a real answer -- "journalctl
+                    knows this unit and it has logged nothing in the window we
+                    asked for" -- not the absence of a feature, and it must not
+                    be confused with a read that FAILED (tailError, rendered
+                    above) or with one still in flight. */}
+                {selected.kind === 'unit' && !hasContent && !tailError && !tailLoading && (
                   <div className="muted" style={{ fontSize: 12.5, marginBottom: 8 }}>
-                    journald units have no one-shot snapshot in this UI — start Follow to see live output.
+                    Nothing in this unit's journal for the last {TAIL_LINES.toLocaleString()} lines.
+                    Start Follow to watch for new entries.
                   </div>
                 )}
 
