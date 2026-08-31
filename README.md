@@ -372,15 +372,32 @@ deploy ALL=(ALL) NOPASSWD: /bin/tail, /bin/journalctl
 
 — or the root-credential lane, which covers all of it.
 
-**Up to 4 log follows may be open at once per Manage Server session.** Starting a fifth is refused
-outright rather than queued. Every open follow holds an SSH exec channel for as long as it runs, on
-the same pooled SSH connection shared with SFTP transfers, the metrics sampler and the Terminal
-tab. OpenSSH's default `MaxSessions` is 10 channels per connection, and running past it doesn't
-just refuse the extra follow — every other channel on that connection starts failing too, including
-file transfers, with `administratively prohibited`. The cap keeps six channels of headroom under
-that limit for everything else the dashboard and your file transfers need. Note the Terminal is
-not capped: each browser tab left on the Terminal tab holds one more channel, so opening the
-dashboard in several tabs at once can still reach the limit.
+**Up to 4 log follows and 2 terminals may be open at once per Manage Server session.** Starting
+one more is refused outright rather than queued, with a message saying so. Every follow and every
+terminal holds an SSH exec channel for as long as it runs, on the same pooled SSH connection shared
+with SFTP transfers, the metrics sampler and the database features. OpenSSH's default `MaxSessions`
+is 10 channels per connection, and running past it doesn't just refuse the extra channel — every
+other channel on that connection starts failing too, including file transfers, with
+`administratively prohibited`.
+
+The budget those caps protect:
+
+| Consumer | Channels |
+|---|---|
+| SFTP (the transfer connection) | 1 |
+| Metrics sampler | 1 |
+| Log follows | up to 4 |
+| Terminals | up to 2 |
+| Database queries | up to 2 — and only on the `mysql` CLI fallback; a forwarded-TCP connection uses `direct-tcpip`, which `MaxSessions` does not count |
+| Privileged one-shots (`systemctl`, `nginx -t`, `openssl`) | transient, effectively 1 |
+
+Follows get the largest share because they are the only consumer that can multiply without you
+doing anything — a client reconnect loop can re-open one faster than the close round trips
+complete. A terminal is opened by a person clicking a tab, so 2 is enough for a shell alongside
+something long-running.
+
+Earlier releases capped follows but *not* terminals, so several browser tabs left on the Terminal
+could still exhaust the limit. That gap is closed.
 
 ### Database tab
 

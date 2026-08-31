@@ -62,6 +62,15 @@ export interface TerminalDeps {
   // able to open a root shell with no further prompt would be a serious,
   // silent privilege escalation, not a convenience. See index.ts.
   openShell(size: TerminalSize): Promise<ShellStream>;
+  // A slot on the session's SSH-channel budget, or null when this session
+  // already holds the maximum number of shells. Optional so the many existing
+  // tests that bridge a fake shell need not supply one -- an absent acquire
+  // means "uncapped", which is exactly what those tests want and exactly what
+  // production must NOT do (index.ts always supplies one).
+  //
+  // Terminals went uncapped for three releases while log follows were bounded
+  // at four, against the same OpenSSH MaxSessions budget. See channelLimit.ts.
+  acquire?(): (() => void) | null;
 }
 
 // xterm.js's default geometry. The real size arrives moments later as the
@@ -111,6 +120,7 @@ function classifyControl(text: string): ControlFrame {
 
 export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
   let stream: ShellStream | null = null;
+  let releaseSlot: (() => void) | null = null;
   // Input (and a resize) can arrive while openShell()'s round trip to the
   // remote host is still in flight; neither is dropped on the floor.
   const inputQueue: (string | Buffer)[] = [];
@@ -129,6 +139,14 @@ export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
     torndown = true;
     if (stream) {
       releaseStream(stream);
+    }
+    // Before the socket close, and unconditionally: a slot held by a torn-down
+    // bridge is a channel this session can never reclaim, which turns the cap
+    // into a slow leak that only manifests as "the Terminal stopped opening"
+    // several tabs later.
+    if (releaseSlot) {
+      releaseSlot();
+      releaseSlot = null;
     }
     try {
       socket.close(code || CLOSE_NORMAL, reason === undefined ? undefined : truncateReason(reason));
@@ -191,6 +209,24 @@ export function bridgeTerminal(deps: TerminalDeps, socket: WsLike): void {
   // or a queued write() on a channel that died the instant it was handed
   // back -- becomes an unhandled rejection, leaving the socket open with no
   // teardown. Chained, that throw lands in the same catch.
+  // Refused outright rather than queued, for the same reason bridgeLogFollow
+  // refuses: a queued shell is a socket sitting open with no prompt on it,
+  // indistinguishable to the user from a broken tab.
+  //
+  // The number is deliberately absent from the message -- the cap lives in the
+  // limiter index.ts supplied, and a hard-coded figure here would be wrong for
+  // any other cap.
+  if (deps.acquire) {
+    releaseSlot = deps.acquire();
+    if (!releaseSlot) {
+      teardown(
+        CLOSE_INTERNAL_ERROR,
+        'Too many terminals are already open for this session. Close one and retry.'
+      );
+      return;
+    }
+  }
+
   deps
     .openShell(DEFAULT_SIZE)
     .then(openedStream => {

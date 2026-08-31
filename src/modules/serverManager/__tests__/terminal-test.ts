@@ -517,3 +517,85 @@ test('terminal bytes queued while the shell is still opening are not lost', asyn
 
   expect(stream.written).toEqual(['echo hi\n']);
 });
+
+describe('bridgeTerminal: the session channel cap', () => {
+  // Terminals went uncapped for three releases while log follows were bounded
+  // at four, against the same OpenSSH MaxSessions budget of 10. These pin the
+  // gate that closed that asymmetry.
+
+  it('opens a shell when a slot is available', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    let acquired = 0;
+    bridgeTerminal(
+      { openShell: () => Promise.resolve(stream as any), acquire: () => (acquired++, () => undefined) },
+      socket
+    );
+    await Promise.resolve();
+    expect(acquired).toBe(1);
+    expect(socket.closed).toBe(false);
+  });
+
+  // Refused outright rather than queued: a queued shell is a socket sitting
+  // open with no prompt on it, which the user cannot tell from a broken tab.
+  it('refuses, with a reason, when the session is at its cap', async () => {
+    const socket = new FakeSocket();
+    let opened = 0;
+    bridgeTerminal(
+      {
+        openShell: () => {
+          opened++;
+          return Promise.resolve(new FakeStream() as any);
+        },
+        acquire: () => null,
+      },
+      socket
+    );
+    await Promise.resolve();
+    expect(opened).toBe(0);
+    expect(socket.closed).toBe(true);
+    expect(String(socket.closeReason)).toContain('Too many terminals');
+  });
+
+  // A slot held by a torn-down bridge is a channel the session can never
+  // reclaim -- the cap becomes a slow leak that surfaces several tabs later as
+  // "the Terminal stopped opening".
+  it('releases the slot when the socket closes', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    let released = 0;
+    bridgeTerminal(
+      { openShell: () => Promise.resolve(stream as any), acquire: () => () => released++ },
+      socket
+    );
+    await Promise.resolve();
+    socket.emit('close');
+    expect(released).toBe(1);
+  });
+
+  it('releases the slot when the shell fails to open', async () => {
+    const socket = new FakeSocket();
+    let released = 0;
+    bridgeTerminal(
+      {
+        openShell: () => Promise.reject(new Error('channel refused')),
+        acquire: () => () => released++,
+      },
+      socket
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(released).toBe(1);
+  });
+
+  // Every existing caller and test omits `acquire`; that must keep meaning
+  // "uncapped" rather than "refuse everything".
+  it('stays uncapped when no limiter is supplied', async () => {
+    const stream = new FakeStream();
+    const socket = new FakeSocket();
+    bridgeTerminal(deps(Promise.resolve(stream as any)), socket);
+    await Promise.resolve();
+    expect(socket.closed).toBe(false);
+  });
+});

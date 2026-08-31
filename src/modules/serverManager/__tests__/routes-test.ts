@@ -1193,3 +1193,156 @@ describe('buildRoutes', () => {
     });
   });
 });
+
+describe('GET /api/file?tail=1', () => {
+  let routes: Route<Handler>[];
+  let store: Map<string, any>;
+
+  beforeEach(() => {
+    store = new Map();
+    routes = buildRoutes({
+      sessions: { get: token => store.get(token) },
+      pingMs: 25000,
+      schedule: () => 1,
+      cancel: () => undefined,
+    }).routes;
+  });
+
+  // The Logs tab was calling this endpoint with a constant literally named
+  // TAIL_LINES while the endpoint ran `sed -n '1,Np'`, so opening a log showed
+  // its OLDEST hundred lines and presented them as the tail. On a long-lived
+  // log that does not merely fail to help -- it points an operator at the
+  // wrong end of an incident.
+  it('reads the END of the file when tail=1', async () => {
+    const commands: string[] = [];
+    const { session } = fakeSession({
+      privilegedTransport: {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          return { stdout: LOG_DISCOVERY_TEXT, stderr: '', code: 0 };
+        },
+      },
+    });
+    store.set('tok', session);
+    await find(routes, 'GET', '/api/logs')(fakeCtx('tok').ctx);
+
+    const fileCtx = fakeCtx('tok', { path: '/var/log/syslog', lines: '50', tail: '1' });
+    await find(routes, 'GET', '/api/file')(fileCtx.ctx);
+
+    const last = commands[commands.length - 1];
+    expect(last).toContain('tail -n 50');
+    expect(last).not.toContain('sed -n');
+  });
+
+  // The Web server tab's "View" button reads a vhost config, where the top of
+  // the file is what you want. Changing the default would have broken it.
+  it('still reads the BEGINNING of the file without tail=1', async () => {
+    const commands: string[] = [];
+    const { session } = fakeSession({
+      privilegedTransport: {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          return { stdout: LOG_DISCOVERY_TEXT, stderr: '', code: 0 };
+        },
+      },
+    });
+    store.set('tok', session);
+    await find(routes, 'GET', '/api/logs')(fakeCtx('tok').ctx);
+
+    const fileCtx = fakeCtx('tok', { path: '/var/log/syslog', lines: '50' });
+    await find(routes, 'GET', '/api/file')(fileCtx.ctx);
+
+    expect(commands[commands.length - 1]).toContain("sed -n '1,50p'");
+  });
+
+  // tail=1 changes how an already-authorised path is read; it must not become
+  // a way to read one that was never discovered.
+  it('does not bypass the discovery allowlist', async () => {
+    const { session } = fakeSession();
+    store.set('tok', session);
+    const fileCtx = fakeCtx('tok', { path: '/etc/shadow', tail: '1' });
+    await find(routes, 'GET', '/api/file')(fileCtx.ctx);
+    expect(fileCtx.res.status).toBe(403);
+  });
+});
+
+describe('GET /api/journal', () => {
+  let routes: Route<Handler>[];
+  let store: Map<string, any>;
+
+  beforeEach(() => {
+    store = new Map();
+    routes = buildRoutes({
+      sessions: { get: token => store.get(token) },
+      pingMs: 25000,
+      schedule: () => 1,
+      cancel: () => undefined,
+    }).routes;
+  });
+
+  // journalCommand was written, documented and unit-tested with NO production
+  // caller: selecting a unit in the Logs tab showed an empty pane, and the
+  // only way to see anything was to notice Follow existed and press it.
+  it('reads a unit through journalctl', async () => {
+    const commands: string[] = [];
+    const { session } = fakeSession({
+      privilegedTransport: {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          return { stdout: 'Aug 31 09:00:00 host sshd[1]: Started.', stderr: '', code: 0 };
+        },
+      },
+    });
+    store.set('tok', session);
+    const { ctx, res } = fakeCtx('tok', { unit: 'ssh.service', lines: '80' });
+
+    await find(routes, 'GET', '/api/journal')(ctx);
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).content).toContain('Started.');
+    expect(commands[0]).toContain('--lines=80');
+    expect(commands[0]).toContain("--unit='ssh.service'");
+  });
+
+  it('refuses an unsafe unit name', async () => {
+    const { session } = fakeSession();
+    store.set('tok', session);
+    const { ctx, res } = fakeCtx('tok', { unit: 'ssh.service; rm -rf /' });
+    await find(routes, 'GET', '/api/journal')(ctx);
+    expect(res.status).toBe(400);
+  });
+
+  it('refuses a missing unit name', async () => {
+    const { session } = fakeSession();
+    store.set('tok', session);
+    const { ctx, res } = fakeCtx('tok', {});
+    await find(routes, 'GET', '/api/journal')(ctx);
+    expect(res.status).toBe(400);
+  });
+
+  // journalctl exits non-zero for a unit it has never seen, which is a
+  // legitimate answer, not a server fault. Reporting it in-band lets the UI
+  // distinguish "nothing logged" from "you may not read this".
+  it('reports a journalctl failure in-band rather than as a 500', async () => {
+    const { session } = fakeSession({
+      privilegedTransport: {
+        exec: async () => ({
+          stdout: '',
+          stderr: 'sudo: a password is required',
+          code: 1,
+        }),
+      },
+    });
+    store.set('tok', session);
+    const { ctx, res } = fakeCtx('tok', { unit: 'ssh.service' });
+
+    await find(routes, 'GET', '/api/journal')(ctx);
+
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.error).toBeTruthy();
+    // The 'logs' hint context names tail/journalctl -- the binaries this path
+    // actually runs -- rather than the Web server tab's systemctl/sed.
+    expect(String(body.error)).toContain('journalctl');
+  });
+});

@@ -28,6 +28,7 @@ import { httpsRequest } from './ops/cloudflare';
 import { browserCommand, BrowserKind } from './browser';
 import { bridgeTerminal } from './terminal';
 import { bridgeLogFollow, createFollowLimit, LogTarget } from './logFollow';
+import { createChannelLimit, MAX_CONCURRENT_TERMINALS } from './channelLimit';
 
 const GRACE_MS = 30000;
 const PING_MS = 25000;
@@ -310,7 +311,13 @@ function onTerminal(ws: WebSocket, req: http.IncomingMessage, token: string): vo
   // so an unbound reference works today -- and would break silently the day
   // a transport is implemented as a class or starts caching a client on
   // itself.
-  bridgeTerminal({ openShell: opts => session!.transport.shell!(opts) }, ws);
+  bridgeTerminal(
+    {
+      openShell: opts => session!.transport.shell!(opts),
+      acquire: () => terminalLimit.acquire(token),
+    },
+    ws
+  );
 }
 
 // Reads `path=`/`unit=` off the /ws/logs upgrade URL -- a SECOND parse of
@@ -352,6 +359,17 @@ export function logTargetFromRequest(req: http.IncomingMessage): LogTarget | nul
 // self-prunes -- a token back at zero follows is deleted -- so nothing has
 // to remember to clear it on disposal.
 const followLimit = createFollowLimit();
+
+// The same accounting for shells. Module-level and NOT rebuilt per server,
+// for the same reason followLimit is not: it counts channels on pooled SSH
+// connections, which outlive any one http.Server this module binds. It
+// self-prunes, so nothing has to clear it on disposal.
+//
+// This did not exist until three releases after followLimit, and its absence
+// was the asymmetry that made the follow cap only half a mitigation: four
+// follows were bounded while an unbounded number of Terminal tabs spent the
+// same MaxSessions budget. See channelLimit.ts for the full arithmetic.
+const terminalLimit = createChannelLimit(MAX_CONCURRENT_TERMINALS);
 
 // session.privilegedTransport is used here, deliberately never
 // session.transport: both followCommand and journalFollowCommand bake in

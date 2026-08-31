@@ -46,6 +46,7 @@ import {
   truncateReason,
   WsLike,
 } from './wsBridge';
+import { ChannelLimit, createChannelLimit } from './channelLimit';
 
 export type LogTarget = { kind: 'file'; path: string } | { kind: 'unit'; unit: string };
 
@@ -126,57 +127,23 @@ export interface LogFollowDeps {
 // channels without anything having leaked. `tail -F` makes that far more
 // reachable than the single Terminal tab ever was.
 //
-// Four leaves six channels of headroom for everything else on the
-// connection (SFTP, the sampler's long-lived channel, a terminal, and the
-// one-shot privileged commands the other tabs issue) -- deliberately well
-// under 10 rather than close to it, because this bridge is the only
-// consumer here that can multiply.
+// Four leaves headroom for everything else on the connection. That list
+// used to read "a terminal", singular -- which was not a fact about the
+// system but an assumption, and a wrong one: nothing capped terminals at
+// all until MAX_CONCURRENT_TERMINALS was added. channelLimit.ts now
+// carries the whole budget in one place rather than each consumer
+// estimating the others. This bridge is still the consumer most able to
+// MULTIPLY without a person acting, which is why it is capped highest.
 export const MAX_CONCURRENT_FOLLOWS = 4;
 
-export interface FollowLimit {
-  // A release function, or null when `token` is already at the cap.
-  acquire(token: string): (() => void) | null;
-  // Slots currently held by `token`. For tests and diagnostics only.
-  active(token: string): number;
-}
+// The limiter primitive now lives in channelLimit.ts: it was never specific
+// to follows, and while it was named as though it were, the Terminal went
+// uncapped for three releases against the same MaxSessions budget this
+// protects. See that file for the full channel arithmetic.
+export type FollowLimit = ChannelLimit;
 
-// Per-token concurrency accounting for /ws/logs. Deliberately a free
-// function over a private map rather than state on ManagedSession: the
-// counter must fall back to zero on its own as sockets close (which is what
-// makes it self-pruning -- a token at zero is deleted, so this map is
-// bounded by "sessions currently following", not "tokens ever seen"), and
-// nothing outside this bridge has any business adjusting it.
 export function createFollowLimit(max: number = MAX_CONCURRENT_FOLLOWS): FollowLimit {
-  const counts = new Map<string, number>();
-
-  return {
-    acquire(token: string): (() => void) | null {
-      const held = counts.get(token) || 0;
-      if (held >= max) {
-        return null;
-      }
-      counts.set(token, held + 1);
-      // Idempotent: teardown is one-shot today, but a double release would
-      // otherwise hand this session a free slot it is not entitled to,
-      // which is precisely how a cap stops being one.
-      let released = false;
-      return () => {
-        if (released) {
-          return;
-        }
-        released = true;
-        const remaining = (counts.get(token) || 1) - 1;
-        if (remaining <= 0) {
-          counts.delete(token);
-        } else {
-          counts.set(token, remaining);
-        }
-      };
-    },
-    active(token: string): number {
-      return counts.get(token) || 0;
-    },
-  };
+  return createChannelLimit(max);
 }
 
 // How much stderr is kept for diagnosis. Only the first ~123 BYTES can ever

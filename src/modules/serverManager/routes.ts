@@ -18,6 +18,8 @@ import {
   isLogFilePath,
   isSafeUnitName,
   splitAt,
+  tailCommand,
+  journalCommand,
 } from './ops/command';
 import { parseUnits, parseUnitFiles, mergeServices, sortServices } from './ops/services';
 import { parseDetect, parseNginxVhosts, parseApacheVhosts, parseCertInfo, CertInfo } from './ops/webserver';
@@ -170,6 +172,12 @@ function readOpsFor(session: ManagedSession): OpsDeps {
 function badRequest(ctx: Ctx, error: unknown): void {
   ctx.text(400, (error as Error).message);
 }
+
+// What GET /api/journal reads when the caller names no line count. Matches
+// the Logs tab's own TAIL_LINES so the unit and file snapshots are the same
+// depth, which is what makes them comparable when an operator flips between
+// a service's journal and its log file during an incident.
+const DEFAULT_JOURNAL_LINES = 200;
 
 type Kind = 'nginx' | 'apache';
 
@@ -737,9 +745,23 @@ export function buildRoutes(deps: RouteDeps): BuiltRoutes {
 
         const ops = opsFor(session);
         const linesParam = typeof ctx.query.lines === 'string' ? Number(ctx.query.lines) : NaN;
+        // `tail=1` reads the END of the file rather than the beginning.
+        //
+        // Both are wanted, by different callers, which is why this is a
+        // parameter and not a change of default. The Web server tab's "View"
+        // button reads a vhost config, where the top of the file is what you
+        // want. The Logs tab reads a log, where the top is the OLDEST content
+        // -- and it was calling this endpoint with a constant literally named
+        // TAIL_LINES while the endpoint ran `sed -n '1,Np'`, so opening a log
+        // showed its first hundred lines and called them the tail. On a
+        // long-lived log that is not merely unhelpful, it points an operator
+        // at the wrong end of an incident.
+        const wantTail = ctx.query.tail === '1' || ctx.query.tail === 'true';
         let command: string;
         try {
-          command = readFileCommand(requestedPath, linesParam);
+          command = wantTail
+            ? tailCommand(requestedPath, linesParam)
+            : readFileCommand(requestedPath, linesParam);
         } catch (error) {
           badRequest(ctx, error);
           return;
@@ -747,6 +769,72 @@ export function buildRoutes(deps: RouteDeps): BuiltRoutes {
 
         const result = await runPrivileged(ops, `view ${requestedPath}`, command);
         ctx.json(200, { content: result.stdout });
+      },
+    },
+    {
+      method: 'GET',
+      path: '/api/journal',
+      handler: async ctx => {
+        const session = resolve(deps, ctx);
+        if (!session) {
+          return;
+        }
+        const unit = typeof ctx.query.unit === 'string' ? ctx.query.unit : '';
+        // The same allowlist discipline every other privileged read here
+        // uses, and for the same reason: the token authenticates the page, it
+        // does not authorise running journalctl against an arbitrary unit
+        // name. `isSafeUnitName` is the existing validator -- deliberately
+        // not a second, parallel one -- and journalCommand re-checks it, so a
+        // future change to either cannot silently widen this.
+        //
+        // Note this is NOT gated on the unit having appeared in a discovery
+        // scan, unlike /api/file's path allowlist. A unit name is not a
+        // filesystem path: journalctl against an unknown unit returns no
+        // entries rather than exposing anything, and the discovery scan lists
+        // only units that have ever logged, which would wrongly refuse a unit
+        // that is real but quiet.
+        if (!isSafeUnitName(unit)) {
+          ctx.text(400, `Unsafe or missing unit name: ${unit}`);
+          return;
+        }
+        // journalCommand VALIDATES rather than clamps (unlike readFileCommand's
+        // clampLines), so an absent ?lines= would arrive as NaN and 400 -- a
+        // caller asking for "the recent journal for this unit" without naming
+        // a number is a reasonable request, not a malformed one. Default it
+        // here; a value that IS supplied is still validated, not clamped, so a
+        // nonsense number is still refused.
+        const linesParam =
+          typeof ctx.query.lines === 'string' && ctx.query.lines !== ''
+            ? Number(ctx.query.lines)
+            : DEFAULT_JOURNAL_LINES;
+        const ops = opsFor(session);
+        let command: string;
+        try {
+          command = journalCommand(unit, linesParam);
+        } catch (error) {
+          badRequest(ctx, error);
+          return;
+        }
+        // journalctl exits non-zero for a unit it has never seen, which is a
+        // legitimate answer ("nothing logged"), not a server fault -- so this
+        // reports the output either way rather than throwing. runPrivileged
+        // would turn a quiet unit into an error toast.
+        const result = await ops.exec(command);
+        ops.activity.push({
+          at: ops.now(),
+          label: `read journal for ${unit}`,
+          command,
+          code: result.code,
+          ms: 0,
+          error: result.code === 0 ? null : sudoHint(result.stderr, ops.user, ops.host, 'logs'),
+        });
+        ctx.json(200, {
+          content: result.stdout,
+          error:
+            result.code === 0
+              ? null
+              : sudoHint(result.stderr, ops.user, ops.host, 'logs') || result.stderr.trim() || null,
+        });
       },
     },
     {

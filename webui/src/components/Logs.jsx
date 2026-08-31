@@ -350,19 +350,24 @@ export default function Logs() {
     if (!selected) {
       return;
     }
-    // journald has no one-shot "read N lines" route wired up (routes.ts only
-    // exposes GET /api/file, which is keyed by a file path in the discovery
-    // allowlist -- there is nothing equivalent for a unit). A unit can only
-    // ever be observed by starting Follow; there is no snapshot to fetch.
-    if (selected.kind === 'unit') {
-      setTailLoading(false);
-      setTailError(null);
-      return;
-    }
     let cancelled = false;
     setTailLoading(true);
     setTailError(null);
-    apiGet(`/api/file?path=${encodeURIComponent(selected.path)}&lines=${TAIL_LINES}`)
+    // A unit reads through GET /api/journal, a file through GET /api/file.
+    //
+    // Until this was wired, selecting a unit showed an empty pane with no
+    // explanation -- the only way to see anything was to notice that Follow
+    // existed and press it. `journalCommand` had been written, documented and
+    // unit-tested the whole time with no caller.
+    //
+    // `tail=1` on the file route matters as much: without it the endpoint ran
+    // `sed -n '1,Np'` and returned the FIRST N lines of the file, which for a
+    // log is the oldest content -- shown under a constant named TAIL_LINES.
+    const url =
+      selected.kind === 'unit'
+        ? `/api/journal?unit=${encodeURIComponent(selected.unit)}&lines=${TAIL_LINES}`
+        : `/api/file?path=${encodeURIComponent(selected.path)}&lines=${TAIL_LINES}&tail=1`;
+    apiGet(url)
       .then(res => {
         if (cancelled || !mountedRef.current) {
           return;
@@ -372,6 +377,16 @@ export default function Logs() {
         // buffer already holds live output; a snapshot that is now stale
         // must not replace it.
         if (followStartedRef.current) {
+          return;
+        }
+        // /api/journal answers 200 with an `error` string for a unit that
+        // journalctl could not read (a missing sudoers rule, typically),
+        // because "this unit logged nothing" and "you may not read it" are
+        // both legitimate answers rather than server faults. Surface it the
+        // same way a transport failure is surfaced instead of rendering an
+        // empty pane that looks like a quiet unit.
+        if (res && res.error) {
+          setTailError(res.error);
           return;
         }
         buffer.setSnapshot((res && res.content) || '');

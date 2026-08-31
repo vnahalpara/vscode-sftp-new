@@ -1,3 +1,20 @@
+## 1.29.1 - 2026-08-31
+* Fix : the **Logs** tab showed the WRONG END of a log file. The snapshot ran `sed -n '1,Np'`
+  and returned the first N lines -- the oldest content -- while the client requested them under
+  a constant named `TAIL_LINES`. On a long-lived log that pointed you at the wrong end of an
+  incident. `GET /api/file` now takes `tail=1` and uses `tail -n N`; the Web server tab's
+  **View** button, where the top of a config file is what you want, is unchanged.
+* New Feature : selecting a **journald unit** in the Logs tab now shows a snapshot immediately.
+  Previously a unit could only be observed by noticing that **Follow** existed and pressing it --
+  selecting one showed an empty pane with no explanation. A new `GET /api/journal` route wires up
+  `journalCommand`, which had been written, documented and unit-tested with no caller at all.
+* Fix : **terminals are now capped at 2 per session**, as log follows have been capped at 4.
+  Both hold an SSH exec channel against OpenSSH's default `MaxSessions` of 10, but only follows
+  were bounded -- so several browser tabs left on the Terminal could exhaust the connection and
+  start failing unrelated file transfers with `administratively prohibited`. The full channel
+  budget is now documented in the README and lives in one place in the code
+  (`serverManager/channelLimit.ts`) rather than each consumer estimating the others.
+
 ## 1.29.0 - 2026-08-21
 * New Feature : **Create tar.gz** on any folder in the Remote Explorer, directly under **Get Size**.
   The archive is built on the server and written beside the folder as
