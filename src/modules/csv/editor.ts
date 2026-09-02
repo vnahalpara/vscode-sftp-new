@@ -31,6 +31,9 @@ interface DocumentModel {
   // event it causes can be told apart from a real outside change.
   lastWritten: string | null;
   panels: number;
+  // The tail of this document's op queue. Ops are chained onto it so only one
+  // is ever between `applyOp` and its applyEdit; see the `op` branch below.
+  inFlight: Promise<void>;
 }
 
 // A file the grid will refuse is not worth parsing -- the rows would be built
@@ -119,8 +122,9 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
     };
 
     const sendTable = () => {
-      if (isTooLarge(document.getText().length)) {
-        send({ type: 'tooLarge', bytes: document.getText().length, limit: MAX_GRID_BYTES });
+      const text = document.getText();
+      if (isTooLarge(text.length)) {
+        send({ type: 'tooLarge', bytes: text.length, limit: MAX_GRID_BYTES });
         return;
       }
       send({
@@ -157,9 +161,13 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
       sendTable();
     });
 
-    const fail = (error: Error) => {
-      logger.error(error, 'csv editor message');
-      send({ type: 'error', message: error.message });
+    const fail = (error: unknown) => {
+      // A rejection is not necessarily an Error -- a thrown string from the
+      // webview boundary would otherwise make `error.message` undefined and
+      // the grid show an empty complaint.
+      const e = error instanceof Error ? error : new Error(String(error));
+      logger.error(e, 'csv editor message');
+      send({ type: 'error', message: e.message });
       sendTable();
     };
 
@@ -177,26 +185,47 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
           return;
         }
         if (message.type === 'openAsText') {
-          vscode.commands.executeCommand(COMMAND_CSV_OPEN_AS_TEXT, document.uri);
+          // Same reason as the op branch: the thenable is not awaited here, so
+          // its rejection has to be caught on the chain rather than by the
+          // surrounding try.
+          vscode.commands
+            .executeCommand(COMMAND_CSV_OPEN_AS_TEXT, document.uri)
+            .then(undefined, fail);
           return;
         }
         if (message.type === 'op') {
+          const { base, op } = message;
+          // Queued, not called straight away. The webview already sends one op
+          // at a time, but the invariant `base` rests on has to hold here too:
+          // a second op arriving while the first applyEdit is still pending
+          // would run `applyOp` against the pre-edit table and would overwrite
+          // `lastWritten`, so the first edit's echo would be mistaken for an
+          // outside change. Chained, an op sent before its ack simply carries a
+          // stale `base` and is resynced -- the correct outcome.
+          //
           // Not awaited -- onDidReceiveMessage is synchronous -- so the
-          // surrounding try/catch cannot see a rejection from it. The catch
-          // has to be chained on, or a failed applyEdit would surface as an
-          // unhandled rejection and leave the grid waiting for its ack.
-          this.applyFromWebview(
-            document,
-            model,
-            message.base,
-            message.op,
-            send,
-            sendTable,
-            readOnlyReason
-          ).catch(fail);
+          // surrounding try/catch cannot see a rejection from it. The catch has
+          // to be chained on, or a failed applyEdit would surface as an
+          // unhandled rejection and leave the grid waiting for its ack. It also
+          // keeps the queue alive: a settled promise is what the next op waits
+          // on.
+          model.inFlight = model.inFlight
+            .then(() =>
+              this.applyFromWebview(
+                document,
+                model,
+                base,
+                op,
+                send,
+                sendTable,
+                reparse,
+                readOnlyReason
+              )
+            )
+            .catch(fail);
         }
       } catch (error) {
-        fail(error as Error);
+        fail(error);
       }
     });
 
@@ -217,6 +246,7 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
       table: readTable(document.getText(), path.basename(document.uri.path)),
       lastWritten: null,
       panels: 1,
+      inFlight: Promise.resolve(),
     };
     this.models.set(key, model);
     return model;
@@ -240,8 +270,17 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
     op: CsvOp,
     send: (message: HostMessage) => void,
     sendTable: () => void,
+    reparse: () => void,
     readOnlyReason: string | undefined
   ): Promise<void> {
+    if (isTooLarge(document.getText().length)) {
+      // Defence in depth. A grid told `tooLarge` shows no rows and so should
+      // never send an op, but the model behind an over-limit document is the
+      // empty table readTable returns -- serializing that over the file would
+      // erase it.
+      sendTable();
+      return;
+    }
     if (readOnlyReason !== undefined) {
       send({ type: 'error', message: readOnlyReason });
       sendTable();
@@ -278,6 +317,17 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
     if (!applied) {
       model.lastWritten = null;
       send({ type: 'error', message: 'This file could not be changed.' });
+      sendTable();
+      return;
+    }
+    if (document.getText() !== text) {
+      // An outside change landed while applyEdit was in flight, so the document
+      // is no longer the text this op produced. The document is the truth, and
+      // the model must never be set from an op that no longer describes it:
+      // keeping `next` here would quietly revert that change, because the next
+      // op would pass isStaleOp against the new version and then be serialized
+      // from this stale table.
+      reparse();
       sendTable();
       return;
     }
