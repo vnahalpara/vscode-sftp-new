@@ -89,7 +89,10 @@ the grid pads them visually with empty cells.
   that count, and a mode of 0 scores 0. Pick the highest score; tie → the higher mode; still tied → the order
   `,` `;` `\t` `|`. Every score 0: comma, or tab when the file name ends in `.tsv`.
 - **EOL**: the first line ending found; `\n` if none.
-- **finalNewline**: text ends with the EOL.
+- **finalNewline**: the last row was terminated by an EOL outside quotes. "Text ends with the
+  EOL" is only the first guess; the parser refines it, because a final newline swallowed by an
+  unterminated quoted field belongs to that row's `raw`, and appending another on save would grow
+  the file by one line every time.
 - **quoteAll**: every non-empty cell in the first 1000 rows is quoted (and there is at least one).
 
 ### Parsing (`parse.ts`)
@@ -218,7 +221,8 @@ Styled with VS Code CSS variables only (`--vscode-editor-*`, `--vscode-list-*`,
 ### Interactions
 
 - **Select** a cell by click. Arrow keys move. `Home`/`End` go to first/last column;
-  `Ctrl+Home`/`Ctrl+End` to first/last row.
+  `Ctrl+Home`/`Ctrl+End` to the first/last row — and, as in a spreadsheet, to the first/last
+  column at the same time.
 - **Edit**: `Enter`, `F2`, or typing a printable character starts editing (typing replaces the
   value; `Enter`/`F2` keeps it). `Enter` commits and moves down; `Tab`/`Shift+Tab` commit and
   move right/left; `Escape` cancels. Clicking elsewhere commits. A commit with an unchanged
