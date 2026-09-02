@@ -1,3 +1,18 @@
+## 1.32.0 - 2026-09-03
+* New Feature : **CSV editor.** Every `.csv` and `.tsv` file now opens in a grid by default --
+  sortable columns, a row-number gutter, in-place editing, row and column operations, and a search
+  that filters the whole file rather than the rows on screen, with Replace All as one undoable
+  change. The delimiter and quoting style are detected on open and preserved on save, as is the
+  line ending for any file that uses one consistently (`\n` or `\r\n`; mixed or CR-only endings
+  are normalised, which is what VS Code does to them on open anyway). Every row you did not touch
+  is written back byte-for-byte, so a one-cell edit is a one-line diff. Every change goes through
+  the normal text document, so the dirty dot, `Ctrl/Cmd+S`, undo, redo and upload-on-save all
+  behave as they do for any other file. **Open as Text** (toolbar, tab right-click, Explorer
+  right-click) opens the raw text. To make the text editor the default again:
+  `"workbench.editorAssociations": { "*.csv": "default", "*.tsv": "default" }`. A remote preview
+  opened with `downloadWhenOpenInRemoteExplorer` off is read-only, and a file over 10 MB gets a
+  notice with an Open as Text button instead of a grid.
+
 ## 1.31.1 - 2026-09-02
 * Fix : **Find in the Markdown viewer.** `Cmd/Ctrl+F` did nothing in the rendered view, because
   VS Code's find widget for webviews is opt-in and the viewer never asked for it. It now opens

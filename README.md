@@ -948,6 +948,55 @@ needed for CJK text and for PDFs that reference fonts without embedding them. No
 from the network: the viewer's page policy refuses every external host, so a PDF cannot make it
 phone home.
 
+## CSV editor
+
+Every `.csv` and `.tsv` file opens in a **grid** by default — sortable columns, a row-number
+gutter, in-place editing, and search across the whole file rather than the part of it on screen.
+The delimiter is detected when the file opens (comma, semicolon, tab or pipe; `.tsv` defaults to
+tab), counted per record so newlines inside quoted fields do not throw it off, and the status line
+on the right shows what it found, along with the row and column count and the line ending.
+
+**Saving keeps the file the way you found it.** Same delimiter, same quoting, same trailing
+newline or lack of one — and every row you did not touch is written back byte-for-byte, so editing
+one cell of a 10,000-row export is a one-line diff. Line endings survive too, as long as the file
+uses one of them consistently: `\n` throughout, or `\r\n` throughout. A file with mixed endings,
+or with old CR-only endings, comes back with a single ending throughout — which is what VS Code
+does to that file on open regardless, so any save from any editor would do the same.
+
+Editing: click a cell and type, or press `Enter` / `F2` to edit what is there. `Enter` commits and
+moves down, `Tab` / `Shift+Tab` move across, `Escape` cancels, `Delete` clears a cell. Arrow keys,
+`Home` / `End` and `Ctrl/Cmd+Home` / `Ctrl/Cmd+End` move around. `Ctrl/Cmd+C` and `Ctrl/Cmd+V` copy
+and paste one cell. Right-click a row number for Insert Above / Insert Below / Duplicate / Delete,
+or a column header for Rename / Insert Left / Insert Right / Delete. Drag a header edge to widen a
+column.
+
+`Ctrl/Cmd+F` focuses the grid's own search box. It filters to the rows that match — scoped to one
+column if you pick one, case-sensitive if you press **Aa** — and highlights what matched.
+**Replace All** replaces every match in that scope as a single change.
+
+Clicking a header sorts the file: ascending, then descending, then the indicator clears. That
+**rewrites the row order in the file**, because a CSV has no other place to keep it — it is an
+ordinary edit, and `Ctrl/Cmd+Z` undoes it like any other.
+
+Every change goes through VS Code's normal editor machinery, so the dirty dot, `Ctrl/Cmd+S`, undo
+and redo, upload-on-save, and a side-by-side text editor that stays in sync all work exactly as
+they do for any other file. **Open as Text** — on the toolbar, the tab's right-click menu, or the
+Explorer's — opens the raw text; VS Code's own **Reopen Editor With…** works too.
+
+**Not for you?** Put the plain text editor back as the default with one setting:
+
+```json
+"workbench.editorAssociations": { "*.csv": "default", "*.tsv": "default" }
+```
+
+The grid stays available under **Open With… → CSV Editor**.
+
+Two limits worth knowing. A CSV opened from the **Remote Explorer** with
+`sftp.downloadWhenOpenInRemoteExplorer` off is a preview with nothing to write to, so the grid
+shows a read-only banner — download the file to edit it. And a file over **10 MB** does not get a
+grid at all: you get a notice with the size, the limit, and an **Open as Text** button, rather than
+a hundred megabytes of cells in a webview.
+
 ## Remote Explorer
 ![remote-explorer-preview](https://raw.githubusercontent.com/Natizyskunk/vscode-sftp/master/assets/showcase/remote-explorer.png)
 
