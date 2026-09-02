@@ -90,3 +90,54 @@ export function relativeConfigRootLabel(
   }
   return relative.split(p.sep).join('/');
 }
+
+// Two spellings of one file must collapse to one entry, or the second load
+// overwrites the first service on the same baseDir. Windows is where this
+// actually happens: the same path comes back with either case and either
+// separator depending on who produced it.
+function pathKey(fsPath: string, p: PathApi): string {
+  const normalized = p.normalize(fsPath);
+  return p.sep === '\\' ? normalized.toLowerCase() : normalized;
+}
+
+/**
+ * The config files to load for one workspace folder: the root-level file (found
+ * without any search, so it is independent of the depth setting) plus every
+ * search result inside the folder and within `depth`, de-duplicated and sorted.
+ */
+export function selectDiscovered(
+  folderPath: string,
+  rootPath: string | null,
+  found: string[],
+  depth: number,
+  p: PathApi = path
+): string[] {
+  const selected: string[] = [];
+  const seen: { [key: string]: boolean } = {};
+
+  const take = (configPath: string) => {
+    const key = pathKey(configPath, p);
+    if (seen[key]) {
+      return;
+    }
+    seen[key] = true;
+    selected.push(configPath);
+  };
+
+  if (rootPath) {
+    take(rootPath);
+  }
+
+  found.forEach(configPath => {
+    if (!isConfigPath(configPath, p)) {
+      return;
+    }
+    const fileDepth = configDepth(folderPath, configPath, p);
+    if (fileDepth < 0 || fileDepth > depth) {
+      return;
+    }
+    take(configPath);
+  });
+
+  return selected.sort((a, b) => a.localeCompare(b));
+}

@@ -125,6 +125,13 @@
           "default": true,
           "description": "Show each file's size (B/KB/MB/GB) on the right side of its row in the Remote Explorer"
         },
+        "sftp.configSearchDepth": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "How many folder levels below each workspace folder to search for .vscode/sftp.json. 0 searches only the workspace folder itself. Reload the window after changing."
+        },
         "sftp.serverManager.browser": {
           "type": "string",
           "enum": [

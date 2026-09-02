@@ -7,6 +7,7 @@ import {
   configRootOf,
   isConfigPath,
   relativeConfigRootLabel,
+  selectDiscovered,
 } from '../configPaths';
 
 const posix = path.posix;
@@ -144,5 +145,82 @@ describe('search constants', () => {
 
   it('caps the search at 500 results', () => {
     expect(CONFIG_SEARCH_MAX_RESULTS).toBe(500);
+  });
+});
+
+describe('selectDiscovered', () => {
+  it('keeps the root-level config even when the search found nothing', () => {
+    expect(
+      selectDiscovered('/ws', '/ws/.vscode/sftp.json', [], 0, posix)
+    ).toEqual(['/ws/.vscode/sftp.json']);
+  });
+
+  it('returns nothing when there is no root config and no results', () => {
+    expect(selectDiscovered('/ws', null, [], 4, posix)).toEqual([]);
+  });
+
+  it('de-duplicates the root config against the search results', () => {
+    expect(
+      selectDiscovered(
+        '/ws',
+        '/ws/.vscode/sftp.json',
+        ['/ws/.vscode/sftp.json', '/ws/a/.vscode/sftp.json'],
+        4,
+        posix
+      )
+    ).toEqual(['/ws/.vscode/sftp.json', '/ws/a/.vscode/sftp.json']);
+  });
+
+  it('drops results deeper than the depth', () => {
+    expect(
+      selectDiscovered(
+        '/ws',
+        null,
+        ['/ws/a/.vscode/sftp.json', '/ws/a/b/c/.vscode/sftp.json'],
+        2,
+        posix
+      )
+    ).toEqual(['/ws/a/.vscode/sftp.json']);
+  });
+
+  it('drops results outside the folder', () => {
+    expect(
+      selectDiscovered('/ws', null, ['/other/.vscode/sftp.json'], 4, posix)
+    ).toEqual([]);
+  });
+
+  it('drops a result that is not a .vscode/sftp.json', () => {
+    expect(selectDiscovered('/ws', null, ['/ws/a/sftp.json'], 4, posix)).toEqual([]);
+  });
+
+  it('sorts by path', () => {
+    expect(
+      selectDiscovered(
+        '/ws',
+        null,
+        ['/ws/c/.vscode/sftp.json', '/ws/a/.vscode/sftp.json', '/ws/b/.vscode/sftp.json'],
+        4,
+        posix
+      )
+    ).toEqual([
+      '/ws/a/.vscode/sftp.json',
+      '/ws/b/.vscode/sftp.json',
+      '/ws/c/.vscode/sftp.json',
+    ]);
+  });
+
+  // Windows hands the same file back with either case or either separator
+  // depending on who asked; loading it twice would put two services on one
+  // baseDir and lose one of them.
+  it('de-duplicates win32 paths that differ only in case or separator', () => {
+    expect(
+      selectDiscovered(
+        'C:\\ws',
+        'C:\\ws\\.vscode\\sftp.json',
+        ['C:\\WS\\.vscode\\sftp.json', 'C:/ws/.vscode/sftp.json'],
+        4,
+        win32
+      )
+    ).toEqual(['C:\\ws\\.vscode\\sftp.json']);
   });
 });
