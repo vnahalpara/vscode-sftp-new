@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { detectFormat } from '../format';
+import { setCell } from '../model';
 import { parseCsv } from '../parse';
 import { serializeCell, serializeCsv } from '../serialize';
 import { CsvFormat, CsvTable } from '../types';
@@ -30,6 +31,8 @@ describe('the round-trip corpus', () => {
       'semicolon.csv',
       'tabs.tsv',
       'trailing-delimiter.csv',
+      'unterminated-quote-crlf.csv',
+      'unterminated-quote.csv',
     ]);
   });
 
@@ -111,6 +114,25 @@ describe('serializeCell', () => {
   it('leaves a value containing a delimiter alone when it is not marked quoted', () => {
     // serializeCell obeys the flag; deciding the flag is needsQuote's job.
     expect(serializeCell('a,b', false)).toBe('a,b');
+  });
+});
+
+// The bug this guards: the file's last newline is swallowed by an
+// unterminated quoted field, so it lives inside the last row's `raw`. If
+// `finalNewline` still came from "the text ends with \n", every save appended
+// another one, and the file grew a blank line each time.
+describe('an unterminated quote at the end of the file', () => {
+  const TEXT = 'name,note\nAda,"unclosed\n';
+
+  it('does not gain a newline over five successive edits', () => {
+    let text = TEXT;
+    for (let i = 0; i < 5; i += 1) {
+      const table = parseCsv(text, detectFormat(text, 'x.csv'));
+      text = serializeCsv(setCell(table, 0, 0, `name${i}`));
+    }
+    expect(text).toBe('name4,note\nAda,"unclosed\n');
+    // The only growth is the edit itself: 'name' -> 'name4'.
+    expect(text.length).toBe(TEXT.length + 1);
   });
 });
 

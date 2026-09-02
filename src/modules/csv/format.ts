@@ -157,10 +157,13 @@ export function detectFormat(text: string, fileName: string): CsvFormat {
   return {
     delimiter,
     eol: detectEol(text),
-    // Both EOLs end in '\n', so "the text ends with the EOL" is exactly "the
-    // text ends with a newline" for any file with a consistent line ending --
-    // and it is the answer that keeps the trailing newline on a file with
-    // mixed ones.
+    // The initial guess only. Both EOLs end in '\n', so "the text ends with
+    // the EOL" is exactly "the text ends with a newline" for any file with a
+    // consistent line ending -- and it is the answer that keeps the trailing
+    // newline on a file with mixed ones. parseCsv then refines it to what
+    // finalNewline actually means (see types.ts), because only the parser
+    // knows whether that newline terminated the last row or was swallowed by
+    // an unterminated quote.
     finalNewline: text.length > 0 && text.charAt(text.length - 1) === '\n',
     quoteAll: detectQuoteAll(text, delimiter),
   };

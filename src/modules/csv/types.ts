@@ -8,8 +8,11 @@ export type Eol = '\n' | '\r\n';
 export interface CsvFormat {
   delimiter: Delimiter;
   eol: Eol;
-  // Did the text end with an EOL. Preserved so saving does not add or remove
-  // a final newline the user never touched.
+  // Was the LAST ROW terminated by an EOL outside quotes. Preserved so saving
+  // does not add or remove a final newline the user never touched. Not simply
+  // "the text ends with \n": an unterminated quoted field swallows that
+  // newline into the row's own text, and writing another one would grow the
+  // file on every save. detectFormat guesses it; parseCsv settles it.
   finalNewline: boolean;
   // Does the file quote every non-empty cell. Drives the quoting of cells the
   // user changes, so an all-quoted export stays all-quoted.

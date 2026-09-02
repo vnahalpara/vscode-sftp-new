@@ -13,6 +13,9 @@ export function parseCsv(text: string, format: CsvFormat): CsvTable {
   const delimiter = format.delimiter;
   const len = text.length;
   let i = 0;
+  // Whether the row just pushed ended on a CR/LF the parser consumed. This is
+  // what `finalNewline` really means; see the return below.
+  let lastRowTerminated = false;
 
   while (i < len) {
     const rowStart = i;
@@ -72,14 +75,26 @@ export function parseCsv(text: string, format: CsvFormat): CsvTable {
     }
 
     const rowEnd = i;
+    lastRowTerminated = false;
     if (text.charAt(i) === '\r') {
       i += 1;
+      lastRowTerminated = true;
     }
     if (text.charAt(i) === '\n') {
       i += 1;
+      lastRowTerminated = true;
     }
     rows.push({ cells, quoted, raw: text.slice(rowStart, rowEnd) });
   }
 
-  return { rows, format };
+  // detectFormat can only guess `finalNewline` from the text's last
+  // character. That guess is wrong when an unterminated quoted field swallowed
+  // the file's last newline: the newline is then part of the last row's `raw`,
+  // and serializing would append a SECOND one -- and another on every save
+  // after that. The parser knows the truth, so it corrects the guess here.
+  // With no rows there is nothing to terminate, so the guess stands.
+  if (rows.length === 0) {
+    return { rows, format };
+  }
+  return { rows, format: { ...format, finalNewline: lastRowTerminated } };
 }
