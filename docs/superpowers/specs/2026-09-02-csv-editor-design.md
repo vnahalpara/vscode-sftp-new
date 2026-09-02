@@ -178,7 +178,9 @@ The host keeps one model per open document, discarded when the last editor for i
 ## Editor provider (`editor.ts`)
 
 - `CSV_EDITOR_ID = 'sftp.csvEditor'`. `retainContextWhenHidden: true`,
-  `supportsMultipleEditorsPerDocument: true`.
+  `supportsMultipleEditorsPerDocument: false` — one grid per file. VS Code moves the existing
+  tab rather than opening a second, which is what keeps the host's echo mark (below) sound; a
+  side-by-side text editor is not a custom editor and is unaffected.
 - `localResourceRoots: [media/csv]`. CSP: `default-src 'none'; script-src 'nonce-…';
   style-src ${cspSource} 'unsafe-inline'`. No external host anywhere. Inline styles are needed
   for virtual-scroll offsets and column widths.
