@@ -14,6 +14,12 @@ const CELL_PADDING = 16;
 // the user can drag any column that guesses wrong.
 const AUTO_WIDTH_SAMPLE = 200;
 
+// Ctrl+click IS the context-menu gesture on macOS, so it must never be read
+// as a selection click there. Cmd takes over as the toggle modifier.
+const IS_MAC =
+  typeof navigator !== 'undefined' &&
+  /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+
 export interface CellRef {
   row: number;
   col: number;
@@ -332,6 +338,12 @@ export default function Grid(props: GridProps) {
   };
 
   const onGutterMouseDown = (event: React.MouseEvent, row: number) => {
+    // Only the primary button selects. A right-click -- ctrl+click on macOS --
+    // opens the row menu, and it must leave the selection the menu is about to
+    // act on exactly as it found it.
+    if (event.button !== 0 || (IS_MAC && event.ctrlKey)) {
+      return;
+    }
     // The grid keeps the keys after a row click, so the arrows still work.
     focusGrid();
     if (event.shiftKey && anchorRef.current !== null) {
@@ -486,7 +498,10 @@ export default function Grid(props: GridProps) {
                         className={'csv-cell' + (isSelected ? ' csv-cell-selected' : '')}
                         key={col}
                         style={{ width: w }}
-                        onMouseDown={() => {
+                        onMouseDown={event => {
+                          if (event.button !== 0 || (IS_MAC && event.ctrlKey)) {
+                            return;
+                          }
                           if (!isEditing) {
                             setSelected({ row, col });
                             focusGrid();

@@ -83,6 +83,9 @@ export default function App() {
         setReadOnly(message.readOnly);
         setReadOnlyReason(message.readOnlyReason || '');
         setSelectedRows([]);
+        // A menu holds row and column indices of the document it was opened
+        // over; a new table makes them meaningless.
+        setMenu(null);
         setScreen('grid');
         return;
       }
@@ -159,6 +162,14 @@ export default function App() {
     () => filterRows(rows, query, matchCase, scopeCol, hasHeader),
     [rows, query, matchCase, scopeCol, hasHeader]
   );
+
+  // A scoped column can be deleted out from under the search. Without this the
+  // select would render blank and every row would report 0 matching.
+  useEffect(() => {
+    if (scopeCol !== null && scopeCol >= width) {
+      setScopeCol(null);
+    }
+  }, [scopeCol, width]);
 
   const onHeaderClick = (col: number) => {
     const next = nextSortState(sort, col);

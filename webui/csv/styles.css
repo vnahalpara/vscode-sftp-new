@@ -352,7 +352,7 @@ body {
   border: 1px solid var(--csv-border);
   border-radius: 4px;
   background: var(--vscode-menu-background, var(--csv-bg));
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35));
 }
 
 .csv-menu-item {

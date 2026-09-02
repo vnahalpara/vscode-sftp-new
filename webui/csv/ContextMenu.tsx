@@ -43,10 +43,15 @@ export default function ContextMenu(props: ContextMenuProps) {
     window.addEventListener('mousedown', close);
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('resize', close);
+    // Capture, not bubble: the grid's scroll container is what actually
+    // scrolls, and a scroll event does not bubble. The menu is fixed, so the
+    // row it is about would otherwise slide out from under it.
+    window.addEventListener('scroll', close, true);
     return () => {
       window.removeEventListener('mousedown', close);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', close, true);
     };
   }, [props.onClose]);
 
