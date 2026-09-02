@@ -4,6 +4,7 @@ import app from '../../app';
 import logger from '../../logger';
 import { simplifyPath, reportError } from '../../helper';
 import { UResource, FileService, TransferTask } from '../../core';
+import { CONFIG_PATH } from '../../constants';
 import { validateConfig } from '../config';
 import watcherService from '../fileWatcher';
 import { maskConfig } from './maskConfig';
@@ -61,13 +62,26 @@ export function getBasePath(context: string, workspace: string) {
   return normalizePathForTrie(dirpath);
 }
 
-export function createFileService(config: any, workspace: string) {
+export function createFileService(config: any, configRoot: string, workspaceFolder: string) {
   if (config.defaultProfile) {
     app.state.profile = config.defaultProfile;
   }
 
-  const normalizedBasePath = getBasePath(config.context, workspace);
-  const service = new FileService(normalizedBasePath, workspace, config);
+  const normalizedBasePath = getBasePath(config.context, configRoot);
+  // Two profiles on one folder still collide and the later one still wins, as
+  // it always has. With nested configs the two can now come from different
+  // files, so say which files rather than leaving the user to find them.
+  const claimed = serviceManager.get(normalizedBasePath);
+  if (claimed) {
+    logger.warn(
+      `Two sftp.json profiles claim ${normalizedBasePath}: ` +
+        `${path.join(claimed.workspace, CONFIG_PATH)} and ` +
+        `${path.join(configRoot, CONFIG_PATH)}. The later one wins; ` +
+        'give them different "context" values.'
+    );
+  }
+
+  const service = new FileService(normalizedBasePath, configRoot, workspaceFolder, config);
 
   logger.info(`config at ${normalizedBasePath}`, maskConfig(config));
 

@@ -135,6 +135,17 @@ export default class Trie<T> {
     return null;
   }
 
+  // Exact key, not longest prefix: "is this folder already claimed by a
+  // service" has a different answer from "which service owns this path".
+  get(path: string | string[]): T | null {
+    const tokens = Array.isArray(path) ? path : this.splitPath(path);
+    const node = this.findNode(this.root, tokens);
+    if (!node) {
+      return null;
+    }
+    return node.getValue();
+  }
+
   clearPrefix(path: string | string[]) {
     const tokens = Array.isArray(path) ? path : this.splitPath(path);
     const node = this.findPrefixNode(this.root, tokens);

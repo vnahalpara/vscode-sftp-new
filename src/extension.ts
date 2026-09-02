@@ -8,7 +8,9 @@ import { reportError } from './helper';
 import fileActivityMonitor from './modules/fileActivityMonitor';
 import * as vpnTunnel from './core/vpnTunnel';
 import * as serverManager from './modules/serverManager';
-import { tryLoadConfigs } from './modules/config';
+import { readConfigsFromFile } from './modules/config';
+import { configRootOf } from './modules/configPaths';
+import { discoverConfigFiles, readDepthSetting } from './modules/configDiscovery';
 import {
   getAllFileService,
   createFileService,
@@ -23,11 +25,24 @@ import { MarkdownViewerProvider } from './modules/markdown/viewer';
 import { PdfViewerProvider } from './modules/pdf/viewer';
 import { CsvEditorProvider } from './modules/csv/editor';
 
-async function setupWorkspaceFolder(dir) {
-  const configs = await tryLoadConfigs(dir);
-  configs.forEach(config => {
-    createFileService(config, dir);
-  });
+async function setupWorkspaceFolder(folder: vscode.WorkspaceFolder) {
+  const folderPath = folder.uri.fsPath;
+  const configFiles = await discoverConfigFiles(
+    { name: folder.name, fsPath: folderPath },
+    readDepthSetting()
+  );
+
+  // One try/catch per file: a nested project with a broken sftp.json must cost
+  // the user that project, not every other project in the folder.
+  for (const configFile of configFiles) {
+    try {
+      const configs = await readConfigsFromFile(configFile);
+      const configRoot = configRootOf(configFile);
+      configs.forEach(config => createFileService(config, configRoot, folderPath));
+    } catch (error) {
+      reportError(error, `load config ${configFile}`);
+    }
+  }
 }
 
 async function setup(workspaceFolders: readonly vscode.WorkspaceFolder[]) {
@@ -35,7 +50,7 @@ async function setup(workspaceFolders: readonly vscode.WorkspaceFolder[]) {
   // folder doesn't prevent the others from initializing.
   await Promise.all(
     workspaceFolders.map(folder =>
-      setupWorkspaceFolder(folder.uri.fsPath).catch(error =>
+      setupWorkspaceFolder(folder).catch(error =>
         reportError(error, `setup workspace folder ${folder.uri.fsPath}`)
       )
     )
@@ -126,18 +141,24 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidChangeWorkspaceFolders(async event => {
       await Promise.all(
         event.added.map(folder =>
-          setupWorkspaceFolder(folder.uri.fsPath).catch(error =>
+          setupWorkspaceFolder(folder).catch(error =>
             reportError(error, `setup workspace folder ${folder.uri.fsPath}`)
           )
         )
       );
       event.removed.forEach(folder => {
-        findAllFileService(service => service.workspace === folder.uri.fsPath).forEach(
-          disposeFileService
-        );
+        // workspaceFolder, not workspace: a nested service's `workspace` is its
+        // own config root, so keying on it would leave every nested service of
+        // a removed folder behind in the Trie.
+        findAllFileService(
+          service => service.workspaceFolder === folder.uri.fsPath
+        ).forEach(disposeFileService);
       });
       if (app.remoteExplorer) {
         app.remoteExplorer.refresh();
+      }
+      if (app.dbExplorer) {
+        app.dbExplorer.refresh();
       }
     })
   );

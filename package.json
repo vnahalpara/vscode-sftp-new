@@ -35,7 +35,7 @@
     "onCommand:sftp.markdown.toPdf",
     "onCommand:sftp.markdown.openAsText",
     "onCommand:sftp.config",
-    "workspaceContains:.vscode/sftp.json"
+    "workspaceContains:**/.vscode/sftp.json"
   ],
   "icon": "resources/icon.png",
   "main": "./dist/extension",

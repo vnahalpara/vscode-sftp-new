@@ -394,10 +394,21 @@ export default class FileService {
   id: number;
   baseDir: string;
   workspace: string;
+  // The VS Code workspace folder that CONTAINS this service's config file.
+  // `workspace` above is the config root -- the folder holding .vscode -- and
+  // the two differ for a nested sftp.json. Only grouping and folder-removal
+  // disposal use this; every path resolution still goes through `workspace`.
+  workspaceFolder: string;
 
-  constructor(baseDir: string, workspace: string, config: FileServiceConfig) {
+  constructor(
+    baseDir: string,
+    workspace: string,
+    workspaceFolder: string,
+    config: FileServiceConfig
+  ) {
     this.id = ++id;
     this.workspace = workspace;
+    this.workspaceFolder = workspaceFolder;
     this.baseDir = baseDir;
     this._watcherConfig = config.watcher;
     this._config = config;
