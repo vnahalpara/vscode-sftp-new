@@ -83,9 +83,10 @@ the grid pads them visually with empty cells.
 ### Format detection (`format.ts`)
 
 - **Delimiter**: over the first 50 non-empty lines, count each candidate (`,` `;` `\t` `|`)
-  outside quotes per line. Pick the candidate with the highest count that appears on the most
-  lines with a consistent count. Ties prefer comma. No candidate found: comma, or tab when the
-  file name ends in `.tsv`.
+  outside quotes on each line. For each candidate take the most common per-line count (its
+  mode); the candidate's score is the number of lines that have exactly that count, and a mode
+  of 0 scores 0. Pick the highest score; tie → the higher mode; still tied → the order
+  `,` `;` `\t` `|`. Every score 0: comma, or tab when the file name ends in `.tsv`.
 - **EOL**: the first line ending found; `\n` if none.
 - **finalNewline**: text ends with the EOL.
 - **quoteAll**: every non-empty cell in the first 1000 rows is quoted (and there is at least one).
@@ -130,7 +131,7 @@ rows it changes.
 | `insertColumn {at}` | pads every row to `at` cells, inserts an empty cell | all |
 | `deleteColumn {col}` | removes index `col` from every row that has it | all that had it |
 | `sort {col, direction, hasHeader}` | stable sort of data rows; header row (row 0 when `hasHeader`) stays put; rows move with `raw` intact | none |
-| `replaceAll {find, replace, col?, matchCase, hasHeader}` | plain-substring replace in every data cell that contains `find` (scoped to `col` when given); header row never touched | rows with a match |
+| `replaceAll {find, replace, col?, matchCase, hasHeader}` | plain-substring replace in every data cell that contains `find` (scoped to `col` when given); row 0 untouched when `hasHeader` | rows with a match |
 
 Sort compare: both values numeric (`/^\s*-?\d+(\.\d+)?\s*$/`) → numeric compare; otherwise
 `localeCompare` with `{ numeric: true, sensitivity: 'base' }`. **Empty cells always sort to the
@@ -233,8 +234,10 @@ Styled with VS Code CSS variables only (`--vscode-editor-*`, `--vscode-list-*`,
 - **Header toggle** is view state for this tab only. Off: headers show `1, 2, 3…` and row 0 is
   an ordinary row.
 - **Search** filters to rows with a matching cell (case-insensitive unless "Aa"), scoped by the
-  dropdown, and highlights the matched text. The header row is always shown and never matched.
-  `Ctrl/Cmd+F` focuses the search box. `Escape` in the search box clears it.
+  dropdown, and highlights the matched text. With the header toggle on, row 0 is always shown
+  and never matched or replaced; with it off, row 0 is an ordinary row. `Ctrl/Cmd+F` focuses
+  the search box — the CSV panel does **not** enable VS Code's own webview find widget, so the
+  grid owns that key. `Escape` in the search box clears it.
 - **Replace All** replaces the search text with the replace text in every matching cell within
   the current scope, as one op (one undo step). It asks nothing: the match count is already on
   screen, and undo is one keystroke.
