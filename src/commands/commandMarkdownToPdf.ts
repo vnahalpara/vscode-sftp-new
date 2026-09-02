@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { COMMAND_MARKDOWN_TO_PDF } from '../constants';
 import { checkCommand } from './abstract/createCommand';
-import { markdownTargetUri } from '../modules/markdown/target';
+import { activeDocumentUri } from '../modules/editorTarget';
 import { renderPrintDocument } from '../modules/markdown/render';
 import { renderPdf } from '../modules/markdown/pdf';
 import { formatBytes } from '../ui/transferFormat';
@@ -12,7 +12,7 @@ export default checkCommand({
   id: COMMAND_MARKDOWN_TO_PDF,
 
   async handleCommand(arg?: unknown) {
-    const uri = markdownTargetUri(arg);
+    const uri = activeDocumentUri(arg);
     if (!uri) {
       vscode.window.showInformationMessage('Open a Markdown file first.');
       return;

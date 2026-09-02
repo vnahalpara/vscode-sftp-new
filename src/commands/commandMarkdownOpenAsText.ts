@@ -1,14 +1,14 @@
 import * as vscode from 'vscode';
 import { COMMAND_MARKDOWN_OPEN_AS_TEXT } from '../constants';
 import { checkCommand } from './abstract/createCommand';
-import { markdownTargetUri } from '../modules/markdown/target';
+import { activeDocumentUri } from '../modules/editorTarget';
 
 
 export default checkCommand({
   id: COMMAND_MARKDOWN_OPEN_AS_TEXT,
 
   async handleCommand(arg?: unknown) {
-    const uri = markdownTargetUri(arg);
+    const uri = activeDocumentUri(arg);
     if (!uri) {
       vscode.window.showInformationMessage('Open a Markdown file first.');
       return;
