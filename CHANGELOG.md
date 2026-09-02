@@ -1,3 +1,15 @@
+## 1.31.0 - 2026-08-31
+* New Feature : **PDF viewer.** Every `.pdf` now opens in a built-in viewer -- page navigation,
+  zoom presets, find with match counts, rotate, clickable links, keyboard shortcuts, following
+  your editor theme. Rendering is Mozilla's PDF.js, bundled with the extension along with the
+  character maps and standard fonts needed for CJK text and non-embedded fonts. The viewer's page
+  policy refuses every external host, so a PDF cannot phone home. Replaces the separate
+  `tomoki1207.pdf` extension.
+* Fix : **remote files now open in the right editor.** A click in the Remote Explorer (with
+  `downloadWhenOpenInRemoteExplorer` off) went straight to the text editor and never consulted
+  custom-editor associations -- so a remote PDF rendered as binary garbage and a remote README
+  skipped the Markdown viewer. Clicks now resolve the editor the way the file explorer does.
+
 ## 1.30.0 - 2026-08-31
 * New Feature : **Markdown viewer.** Every `.md` / `.markdown` file now opens in a rendered,
   read-only view by default -- headings, tables, code blocks and lists laid out the way they read,

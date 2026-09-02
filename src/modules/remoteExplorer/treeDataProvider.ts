@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import { showTextDocument } from '../../host';
 import {
   upath,
   UResource,
@@ -228,19 +227,30 @@ export default class RemoteTreeData
     return this._rootsMap.get(rootId);
   }
 
-  async provideTextDocumentContent(
-    uri: vscode.Uri,
-    token: vscode.CancellationToken
-  ): Promise<string> {
+  // The raw bytes of a remote resource. Split out of provideTextDocumentContent
+  // so a BINARY consumer -- the PDF viewer -- can read a `remote:` URI without
+  // going through a text decode that would mangle it. Same root lookup, same
+  // remote filesystem, same read; only the final toString() is the text
+  // provider's own concern.
+  async readBytes(uri: vscode.Uri): Promise<Uint8Array> {
     const root = this.findRoot(uri);
     if (!root) {
       throw new Error(`Can't find remote for resource ${uri}.`);
     }
-
     const config = root.explorerContext.config;
     const remotefs = await root.explorerContext.fileService.getRemoteFileSystem(config);
-    const buffer = await remotefs.readFile(UResource.makeResource(uri).fsPath);
-    return buffer.toString();
+    const content = await remotefs.readFile(UResource.makeResource(uri).fsPath);
+    // The remote filesystem's readFile is typed string | Buffer. A binary
+    // consumer needs bytes either way; a string here would be a text
+    // transport's doing, and re-encoding it is the only honest conversion.
+    return typeof content === 'string' ? Buffer.from(content) : content;
+  }
+
+  async provideTextDocumentContent(
+    uri: vscode.Uri,
+    _token: vscode.CancellationToken
+  ): Promise<string> {
+    return (await this.readBytes(uri)).toString();
   }
 
   showItem(item: ExplorerItem): void {
@@ -248,7 +258,14 @@ export default class RemoteTreeData
       return;
     }
 
-    showTextDocument(makePreivewUrl(item.resource.uri));
+    // `vscode.open`, not showTextDocument. showTextDocument goes straight to
+    // the TEXT editor and never consults the custom-editor associations, so
+    // a remote PDF opened this way rendered as binary garbage and a remote
+    // README bypassed the Markdown viewer. `vscode.open` resolves the editor
+    // the same way a click in the file explorer does -- custom editors
+    // included -- and falls through to the text editor for everything else,
+    // which is exactly what showTextDocument did.
+    vscode.commands.executeCommand('vscode.open', makePreivewUrl(item.resource.uri));
   }
 
   private _getRoots(): ExplorerRoot[] {

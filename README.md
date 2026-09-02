@@ -71,6 +71,7 @@ the notes below.
 | Remote Explorer, Go To Folder | ✅ | ✅ |
 | Create tar.gz of a remote folder (**Linux/Unix servers only**) | ✅ | ✅ |
 | Markdown viewer (default for `.md`) and Markdown → PDF | ✅ | ✅ (PDF needs Chrome, Edge or Chromium) |
+| PDF viewer (default for `.pdf`, local and remote) | ✅ | ✅ |
 | Database: browse, data view (paging/sort/filter), search, SQL runner, cell/row edit, Find Table | ✅ | ✅ |
 | Manage Server (**Linux servers only**) | ✅ | ✅ |
 | VPN tunnel for SFTP **and** database traffic | ✅ | ✅ |
@@ -928,6 +929,23 @@ document containing `![](https://example.com/pixel.png)` can tell that host some
 that matters for a particular file, open it as text instead.
 
 Requires VS Code 1.67 or newer (April 2022).
+
+## PDF viewer
+
+Every `.pdf` opens in a built-in viewer — page navigation, zoom (auto / page-fit / page-width /
+percentages), find with match counts, rotate, and clickable links. Keyboard: `←`/`→` or
+`PageUp`/`PageDown` to move, `Home`/`End`, `Ctrl/Cmd F` to find, `Ctrl/Cmd +`/`-`/`0` for zoom.
+Follows your editor theme.
+
+It works on **remote PDFs too**: click one in the Remote Explorer and it opens in the viewer,
+whichever way `sftp.downloadWhenOpenInRemoteExplorer` is set. (Previously, with that setting off,
+a remote PDF opened as binary garbage in the text editor.)
+
+This replaces the separate `tomoki1207.pdf` extension — you can uninstall it. The rendering engine
+is Mozilla's PDF.js, bundled with the extension, including the character maps and standard fonts
+needed for CJK text and for PDFs that reference fonts without embedding them. Nothing is fetched
+from the network: the viewer's page policy refuses every external host, so a PDF cannot make it
+phone home.
 
 ## Remote Explorer
 ![remote-explorer-preview](https://raw.githubusercontent.com/Natizyskunk/vscode-sftp/master/assets/showcase/remote-explorer.png)

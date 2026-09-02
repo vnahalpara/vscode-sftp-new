@@ -20,6 +20,7 @@ import RemoteExplorer from './modules/remoteExplorer';
 import DbExplorer from './modules/dbExplorer';
 import * as dbConnectionManager from './core/dbConnectionManager';
 import { MarkdownViewerProvider } from './modules/markdown/viewer';
+import { PdfViewerProvider } from './modules/pdf/viewer';
 
 async function setupWorkspaceFolder(dir) {
   const configs = await tryLoadConfigs(dir);
@@ -72,6 +73,22 @@ export async function activate(context: vscode.ExtensionContext) {
   // workspace without a profile, and the customEditors contribution in
   // package.json would then point at a viewType nothing ever provided.
   context.subscriptions.push(MarkdownViewerProvider.register(context));
+  // Same placement, same reason. The PDF viewer's only tie to the SFTP
+  // machinery is reading a `remote:` URI, and that is resolved LAZILY through
+  // app.remoteExplorer at read time: the explorer is constructed further down,
+  // only in a workspace that has a profile, but a `remote:` URI can only ever
+  // come from that explorer -- so by the time one is opened, it exists. The
+  // guard is for the honest error, not for a case that can actually occur.
+  context.subscriptions.push(
+    PdfViewerProvider.register(context, {
+      readRemote: async uri => {
+        if (!app.remoteExplorer) {
+          throw new Error('The Remote Explorer is not open, so this remote file cannot be read.');
+        }
+        return app.remoteExplorer.readBytes(uri);
+      },
+    })
+  );
 
   const workspaceFolders = getWorkspaceFolders();
   if (!workspaceFolders) {

@@ -10,3 +10,4 @@
 !resources/**/*
 !schema/**/*
 !media/webui/**/*
+!media/pdfjs/**/*

@@ -32,6 +32,12 @@ export default class RemoteExplorer {
     );
   }
 
+  // The raw bytes of a `remote:` resource, for consumers that are not text --
+  // the PDF viewer reads through this. See RemoteTreeDataProvider.readBytes.
+  readBytes(uri: vscode.Uri): Promise<Uint8Array> {
+    return this._treeDataProvider.readBytes(uri);
+  }
+
   refresh(item?: ExplorerItem) {
     if (item && !UResource.isRemote(item.resource.uri)) {
       const uri = item.resource.uri;
