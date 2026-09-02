@@ -52,3 +52,5 @@ media/webui
 .playwright-mcp/
 # PDF.js assets copied from node_modules by scripts/copy-pdfjs.js
 media/pdfjs/
+# CSV grid bundle built from webui/csv by vite
+media/csv/

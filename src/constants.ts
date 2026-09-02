@@ -70,6 +70,7 @@ export const COMMAND_GET_SIZE = 'sftp.getSize';
 export const COMMAND_CREATE_ARCHIVE = 'sftp.createArchive';
 export const COMMAND_MARKDOWN_OPEN_AS_TEXT = 'sftp.markdown.openAsText';
 export const COMMAND_MARKDOWN_TO_PDF = 'sftp.markdown.toPdf';
+export const COMMAND_CSV_OPEN_AS_TEXT = 'sftp.csv.openAsText';
 
 export const COMMAND_DB_OPEN_TABLE = 'sftp.db.openTable';
 export const COMMAND_DB_FIND_TABLE = 'sftp.db.findTable';

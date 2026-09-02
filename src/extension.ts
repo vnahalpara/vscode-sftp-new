@@ -21,6 +21,7 @@ import DbExplorer from './modules/dbExplorer';
 import * as dbConnectionManager from './core/dbConnectionManager';
 import { MarkdownViewerProvider } from './modules/markdown/viewer';
 import { PdfViewerProvider } from './modules/pdf/viewer';
+import { CsvEditorProvider } from './modules/csv/editor';
 
 async function setupWorkspaceFolder(dir) {
   const configs = await tryLoadConfigs(dir);
@@ -89,6 +90,11 @@ export async function activate(context: vscode.ExtensionContext) {
       },
     })
   );
+  // Same placement, same reason as the two viewers above: a .csv file needs
+  // no sftp.json, so registering after the workspace-folder return would make
+  // the grid silently absent in every workspace without a profile while
+  // package.json still claimed the viewType.
+  context.subscriptions.push(CsvEditorProvider.register(context));
 
   const workspaceFolders = getWorkspaceFolders();
   if (!workspaceFolders) {

@@ -11,3 +11,4 @@
 !schema/**/*
 !media/webui/**/*
 !media/pdfjs/**/*
+!media/csv/**/*

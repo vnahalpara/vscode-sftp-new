@@ -30,6 +30,8 @@
   "activationEvents": [
     "onCustomEditor:sftp.pdfViewer",
     "onCustomEditor:sftp.markdownViewer",
+    "onCustomEditor:sftp.csvEditor",
+    "onCommand:sftp.csv.openAsText",
     "onCommand:sftp.markdown.toPdf",
     "onCommand:sftp.markdown.openAsText",
     "onCommand:sftp.config",
@@ -58,6 +60,19 @@
           },
           {
             "filenamePattern": "*.markdown"
+          }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "sftp.csvEditor",
+        "displayName": "CSV Editor",
+        "selector": [
+          {
+            "filenamePattern": "*.csv"
+          },
+          {
+            "filenamePattern": "*.tsv"
           }
         ],
         "priority": "default"
@@ -401,6 +416,12 @@
         "title": "Convert to PDF",
         "category": "Markdown",
         "icon": "$(file-pdf)"
+      },
+      {
+        "command": "sftp.csv.openAsText",
+        "title": "Open as Text",
+        "category": "CSV",
+        "icon": "$(code)"
       },
       {
         "command": "sftp.db.openTable",
@@ -777,6 +798,11 @@
           "command": "sftp.markdown.toPdf",
           "group": "navigation@11",
           "when": "resourceExtname == .md || resourceExtname == .markdown"
+        },
+        {
+          "command": "sftp.csv.openAsText",
+          "group": "navigation@12",
+          "when": "resourceExtname == .csv || resourceExtname == .tsv"
         }
       ],
       "editor/context": [
@@ -816,6 +842,11 @@
           "command": "sftp.markdown.toPdf",
           "group": "1_open@2",
           "when": "resourceExtname == .md || resourceExtname == .markdown"
+        },
+        {
+          "command": "sftp.csv.openAsText",
+          "group": "1_open@3",
+          "when": "activeCustomEditorId == sftp.csvEditor"
         }
       ],
       "view/title": [
@@ -975,6 +1006,11 @@
           "command": "sftp.markdown.toPdf",
           "group": "navigation@2",
           "when": "activeCustomEditorId == sftp.markdownViewer || (resourceExtname == .md && editorLangId == markdown)"
+        },
+        {
+          "command": "sftp.csv.openAsText",
+          "group": "navigation@3",
+          "when": "activeCustomEditorId == sftp.csvEditor"
         }
       ],
       "scm/title": [
