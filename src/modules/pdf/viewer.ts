@@ -45,9 +45,17 @@ class PdfDocument implements vscode.CustomDocument {
 // URI backed by a TextDocumentContentProvider, which a webview cannot fetch
 // from at all. Reading the bytes here, through whichever provider the URI's
 // scheme has, and posting them to the webview means one viewer serves every
-// scheme the extension can read. The cost is that a very large PDF is held in
-// memory twice for a moment while it crosses; that is accepted, and the same
-// bytes would have been read to render it anyway.
+// scheme the extension can read.
+//
+// THE COST, stated honestly: the bytes are held TWICE for the tab's whole
+// life -- once on this document, once inside the retained webview -- not
+// "for a moment". They are kept here deliberately: VS Code reloads a webview
+// on some theme and settings changes, the shell then sends `ready` again,
+// and serving that from memory is what keeps a remote PDF from being
+// re-fetched over SFTP every time it happens. For the documents this
+// extension is for (READMEs, invoices, reports) the duplication is a few MB
+// and not worth a re-read path; a 300MB scan would feel it, and the right
+// fix then is to re-read on reload rather than to hold on.
 export class PdfViewerProvider implements vscode.CustomReadonlyEditorProvider<PdfDocument> {
   static register(context: vscode.ExtensionContext, deps: PdfViewerDeps): vscode.Disposable {
     return vscode.window.registerCustomEditorProvider(

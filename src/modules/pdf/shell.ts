@@ -163,6 +163,13 @@ export function buildPdfShell(opts: PdfShellOptions): string {
   };
 
   const eventBus = new pdfjsViewer.EventBus();
+  // Links inside a PDF are safe by two layers this file does not own, which
+  // is why there is no openExternal bridge here the way the Markdown viewer
+  // has one. PDF.js's core only ever builds an anchor for http, https, ftp,
+  // mailto and tel -- a javascript: or file: target never reaches the DOM --
+  // and it renders it as target="_blank" rel="noopener noreferrer nofollow"
+  // (verified on a live render). A VS Code webview then intercepts _blank
+  // itself and asks the user before opening any host it does not trust.
   const linkService = new pdfjsViewer.PDFLinkService({ eventBus, externalLinkTarget: pdfjsViewer.LinkTarget.BLANK });
   const findController = new pdfjsViewer.PDFFindController({ eventBus, linkService });
   const viewer = new pdfjsViewer.PDFViewer({
