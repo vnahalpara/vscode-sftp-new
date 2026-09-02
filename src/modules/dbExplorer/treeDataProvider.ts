@@ -27,9 +27,9 @@ function dbConfigsOf(config: any): DatabaseConfig[] {
   return Array.isArray(dbs) ? dbs : [];
 }
 
-// @types/vscode 1.40 marks the ThemeIcon(id) constructor private; it is public at runtime (VS Code 1.45+).
+// One place to name a codicon, so both trees build their icons the same way.
 function themeIcon(id: string): vscode.ThemeIcon {
-  return new (vscode.ThemeIcon as any)(id);
+  return new vscode.ThemeIcon(id);
 }
 
 export default class DbTreeDataProvider implements vscode.TreeDataProvider<DbNode> {

@@ -71,10 +71,9 @@ export function isExplorerGroup(item: ExplorerItem): item is ExplorerGroup {
   return (item as ExplorerGroup).kind === 'group';
 }
 
-// @types/vscode marks the ThemeIcon(id) constructor public from 1.45; the cast
-// mirrors dbExplorer's so both trees build icons the same way.
+// One place to name a codicon, so both trees build their icons the same way.
 function themeIcon(id: string): vscode.ThemeIcon {
-  return new (vscode.ThemeIcon as any)(id);
+  return new vscode.ThemeIcon(id);
 }
 
 function configRootDescription(root: ExplorerRoot): string | undefined {
