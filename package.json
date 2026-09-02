@@ -35,6 +35,7 @@
     "onCommand:sftp.markdown.toPdf",
     "onCommand:sftp.markdown.openAsText",
     "onCommand:sftp.config",
+    "onCommand:sftp.config.here",
     "workspaceContains:**/.vscode/sftp.json"
   ],
   "icon": "resources/icon.png",
@@ -221,6 +222,11 @@
       {
         "command": "sftp.config",
         "title": "Config",
+        "category": "SFTP"
+      },
+      {
+        "command": "sftp.config.here",
+        "title": "Create Config Here",
         "category": "SFTP"
       },
       {
@@ -810,6 +816,11 @@
           "command": "sftp.csv.openAsText",
           "group": "navigation@12",
           "when": "resourceExtname == .csv || resourceExtname == .tsv"
+        },
+        {
+          "command": "sftp.config.here",
+          "group": "sftp.config@1",
+          "when": "explorerResourceIsFolder"
         }
       ],
       "editor/context": [

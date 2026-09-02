@@ -393,3 +393,23 @@ describe('pathKey', () => {
     expect(pathKey('/ws/Site', posix)).not.toBe(pathKey('/ws/site', posix));
   });
 });
+
+// What "Create Config Here" measures before it warns: the depth of the config
+// file the command is ABOUT to create in the chosen folder.
+describe('configDepth for a folder about to get a config', () => {
+  function depthOfNewConfigIn(folderPath: string, target: string) {
+    return configDepth(folderPath, posix.join(target, '.vscode', 'sftp.json'), posix);
+  }
+
+  it('is 0 for the workspace folder itself', () => {
+    expect(depthOfNewConfigIn('/ws', '/ws')).toBe(0);
+  });
+
+  it('is 5 for a folder five levels down, which is past the default of 4', () => {
+    expect(depthOfNewConfigIn('/ws', '/ws/a/b/c/d/e')).toBe(5);
+  });
+
+  it('is -1 for a folder outside the workspace folder', () => {
+    expect(depthOfNewConfigIn('/ws', '/elsewhere/a')).toBe(-1);
+  });
+});
