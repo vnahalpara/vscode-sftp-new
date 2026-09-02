@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as fse from 'fs-extra';
 import { COMMAND_CONFIG_HERE, CONFIG_PATH } from '../constants';
 import { newConfig } from '../modules/config';
 import { showOpenDialog, showWarningMessage } from '../host';
@@ -34,6 +35,21 @@ export default checkCommand({
     }
 
     const folderPath = folderUri.fsPath;
+
+    // A keybinding can hand this command a file. A path that cannot be stat'ed
+    // (most likely: it does not exist) is left alone, so reporting it stays
+    // `newConfig`'s job, exactly as before.
+    let isFolder = true;
+    try {
+      isFolder = (await fse.stat(folderPath)).isDirectory();
+    } catch (error) {
+      // Unreadable or missing: fall through and let `newConfig` deal with it.
+    }
+    if (!isFolder) {
+      vscode.window.showInformationMessage('Select a folder to create an sftp.json in.');
+      return;
+    }
+
     const workspaceFolder = vscode.workspace.getWorkspaceFolder(folderUri);
     if (workspaceFolder) {
       const allowed = readDepthSetting();
@@ -42,9 +58,11 @@ export default checkCommand({
         path.join(folderPath, CONFIG_PATH)
       );
       // Warn, then create anyway: the file is what the user asked for, and a
-      // setting they can raise is a better answer than a refusal.
+      // setting they can raise is a better answer than a refusal. Not awaited:
+      // a warning with no action items has no dismiss timer, so awaiting it
+      // would hold the file back until the user closed the notification.
       if (depth > allowed) {
-        await showWarningMessage(
+        showWarningMessage(
           `This folder is ${depth} levels deep; sftp.configSearchDepth is ${allowed}, ` +
             'so the file will not be loaded until you raise the setting.'
         );
