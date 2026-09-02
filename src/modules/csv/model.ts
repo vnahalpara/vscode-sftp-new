@@ -1,5 +1,6 @@
 import { needsQuote } from './format';
 import { CsvOp, SortDirection } from './protocol';
+import { findPlain } from './textMatch';
 import { CsvFormat, CsvRow, CsvTable } from './types';
 
 // Every operation is a pure (table, args) => table. Nothing here mutates its
@@ -202,18 +203,20 @@ export function sortRows(
 // Plain-substring replace of every occurrence. Hand-rolled because
 // String.prototype.replaceAll is ES2021 and a RegExp would make the user's
 // search text a pattern, which is explicitly out of scope for 1.32.0.
+//
+// Every offset comes from findPlain and indexes `value` itself, so the output
+// is built only from slices of the original: text that did not match comes out
+// byte-identical. See textMatch.ts for why that is not free.
 function replacePlain(value: string, find: string, replace: string, matchCase: boolean): string {
-  const haystack = matchCase ? value : value.toLowerCase();
-  const needle = matchCase ? find : find.toLowerCase();
   let out = '';
   let i = 0;
   for (;;) {
-    const at = haystack.indexOf(needle, i);
+    const at = findPlain(value, find, matchCase, i);
     if (at === -1) {
       return out + value.slice(i);
     }
     out += value.slice(i, at) + replace;
-    i = at + needle.length;
+    i = at + find.length;
   }
 }
 

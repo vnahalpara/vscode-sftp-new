@@ -15,6 +15,12 @@ describe('matchCell', () => {
   it('does not match an empty cell', () => {
     expect(matchCell('', 'a', false)).toBe(false);
   });
+  // matchCell decides which rows the grid shows and highlightRanges decides
+  // what it underlines in them: they must agree, so they share findPlain.
+  it('agrees with highlightRanges on a longer lowercase form', () => {
+    expect(matchCell('\u0130stanbul', 'stan', false)).toBe(true);
+    expect(matchCell('\u0130stanbul', 'istanbul', false)).toBe(false);
+  });
 });
 
 describe('highlightRanges', () => {
@@ -39,6 +45,18 @@ describe('highlightRanges', () => {
   });
   it('finds nothing when there is no match', () => {
     expect(highlightRanges('banana', 'zz', false)).toEqual([]);
+  });
+
+  // Offsets must index the ORIGINAL string. Searching 'value.toLowerCase()'
+  // shifted them, because '\u0130'.toLowerCase() is two code units.
+  it('returns offsets into the original string, not its lowercase form', () => {
+    const value = '\u0130stanbul';
+    const at = value.indexOf('stan');
+    expect(highlightRanges(value, 'stan', false)).toEqual([{ start: at, end: at + 4 }]);
+  });
+
+  it('does not report a match that only exists in the folded form', () => {
+    expect(highlightRanges('\u0130stanbul', 'istanbul', false)).toEqual([]);
   });
 });
 

@@ -1,3 +1,5 @@
+import { findPlain } from '../../src/modules/csv/textMatch';
+
 // Pure search logic, kept out of the components so jest can reach it. The
 // grid's search FILTERS rows rather than scrolling between hits, which is why
 // this file returns row indices rather than a cursor.
@@ -7,32 +9,26 @@ export interface MatchRange {
   end: number;
 }
 
-function fold(value: string, matchCase: boolean): string {
-  return matchCase ? value : value.toLowerCase();
-}
-
 export function matchCell(value: string, query: string, matchCase: boolean): boolean {
-  if (query === '') {
-    return false;
-  }
-  return fold(value, matchCase).indexOf(fold(query, matchCase)) !== -1;
+  return findPlain(value, query, matchCase, 0) !== -1;
 }
 
+// Offsets into `value` as the user's cell actually is, never into a folded
+// copy of it -- the highlight is drawn by slicing the original string, and a
+// character whose lowercase form is longer would shift every span after it.
 export function highlightRanges(value: string, query: string, matchCase: boolean): MatchRange[] {
   const out: MatchRange[] = [];
   if (query === '') {
     return out;
   }
-  const haystack = fold(value, matchCase);
-  const needle = fold(query, matchCase);
   let i = 0;
   for (;;) {
-    const at = haystack.indexOf(needle, i);
+    const at = findPlain(value, query, matchCase, i);
     if (at === -1) {
       return out;
     }
-    out.push({ start: at, end: at + needle.length });
-    i = at + needle.length;
+    out.push({ start: at, end: at + query.length });
+    i = at + query.length;
   }
 }
 

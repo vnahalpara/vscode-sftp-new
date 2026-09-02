@@ -341,6 +341,42 @@ describe('replaceAll', () => {
     const table = T();
     expect(replaceAll(table, 'zebra', 'x', undefined, true, true)).toBe(table);
   });
+
+  // The invariant: text that did not match comes out byte-identical. It used
+  // to be searched in `value.toLowerCase()` and then sliced out of `value`,
+  // and '\u0130'.toLowerCase() is TWO code units, so every offset past it was
+  // one too far and the cell came out mangled ('\u0130sSTANul').
+  describe('a lowercase form that is longer than the original', () => {
+    it('replaces the right span of a cell starting with I-with-dot', () => {
+      const table = tableOf([['h'], ['\u0130stanbul']]);
+      expect(tableRows(replaceAll(table, 'stan', 'STAN', undefined, false, true))).toEqual([
+        ['h'],
+        ['\u0130STANbul'],
+      ]);
+    });
+
+    it('leaves the cell untouched when only the folded form would match', () => {
+      // Comparing one same-length window at a time means '\u0130' never matches
+      // a plain 'i'. Missing a match is safe; corrupting the text is not.
+      const table = tableOf([['h'], ['\u0130stanbul']]);
+      expect(replaceAll(table, 'istanbul', 'X', undefined, false, true)).toBe(table);
+    });
+
+    it('does not fold sharp s into ss', () => {
+      // '\u00df'.toLowerCase() is itself, so 'ss' never matches it either way.
+      const table = tableOf([['h'], ['Stra\u00dfe']]);
+      expect(replaceAll(table, 'ss', 'X', undefined, false, true)).toBe(table);
+    });
+
+    it('matches capital sharp s against the small one', () => {
+      // '\u1e9e'.toLowerCase() is '\u00df', same length, so this one does match.
+      const table = tableOf([['h'], ['Stra\u1e9ee']]);
+      expect(tableRows(replaceAll(table, '\u00df', 'ss', undefined, false, true))).toEqual([
+        ['h'],
+        ['Strasse'],
+      ]);
+    });
+  });
 });
 
 describe('applyOp', () => {
