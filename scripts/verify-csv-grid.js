@@ -113,7 +113,20 @@ function serve(dir) {
     response.writeHead(200, { 'Content-Type': types[path.extname(file)] || 'text/plain' });
     response.end(fs.readFileSync(file));
   });
-  return new Promise(resolve => server.listen(HTTP_PORT, '127.0.0.1', () => resolve(server)));
+  return new Promise((resolve, reject) => {
+    // A listen failure is an EVENT, not a throw. Without this the promise
+    // never settles and the script hangs instead of saying what is wrong.
+    server.once('error', error => {
+      reject(
+        error.code === 'EADDRINUSE'
+          ? new Error(
+              'Port ' + HTTP_PORT + ' is already in use. Stop whatever is on it and try again.'
+            )
+          : error
+      );
+    });
+    server.listen(HTTP_PORT, '127.0.0.1', () => resolve(server));
+  });
 }
 
 class Cdp {
@@ -121,20 +134,34 @@ class Cdp {
     this.socket = socket;
     this.id = 0;
     this.pending = new Map();
+    this.failure = null;
     socket.on('message', raw => {
       const message = JSON.parse(raw.toString());
-      const resolve = this.pending.get(message.id);
-      if (resolve) {
+      const entry = this.pending.get(message.id);
+      if (entry) {
         this.pending.delete(message.id);
-        resolve(message.result);
+        entry.resolve(message.result);
       }
     });
+    // For the whole run, not just the opening handshake. Chrome dying mid-run
+    // used to leave every waiting send unsettled, so the script hung forever
+    // instead of failing; and an unhandled 'error' on a ws socket throws.
+    const abort = error => {
+      this.failure = error instanceof Error ? error : new Error(String(error));
+      this.pending.forEach(entry => entry.reject(this.failure));
+      this.pending.clear();
+    };
+    socket.on('error', abort);
+    socket.on('close', () => abort(new Error('the Chrome DevTools socket closed')));
   }
   send(method, params) {
+    if (this.failure) {
+      return Promise.reject(this.failure);
+    }
     this.id += 1;
     const id = this.id;
-    return new Promise(resolve => {
-      this.pending.set(id, resolve);
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
       this.socket.send(JSON.stringify({ id, method, params: params || {} }));
     });
   }
@@ -220,14 +247,27 @@ async function main() {
       '--user-data-dir=' + profile,
       'about:blank',
     ],
-    { stdio: 'ignore' }
+    // Its own process group, so the whole browser can be killed at the end:
+    // Chrome's zygote and renderer children outlive a kill aimed at the
+    // launcher alone, and they keep writing into the profile directory.
+    { stdio: 'ignore', detached: process.platform !== 'win32' }
   );
+  // spawn reports a missing or unrunnable binary as an event, and an
+  // unhandled 'error' on a child process throws out of the event loop where
+  // the try/finally below cannot see it.
+  let chromeError = null;
+  chrome.on('error', error => {
+    chromeError = error;
+  });
 
   let socket;
   try {
     let targets = [];
     for (let attempt = 0; attempt < 50 && targets.length === 0; attempt += 1) {
       await wait(200);
+      if (chromeError) {
+        throw new Error('Chrome could not be started: ' + chromeError.message);
+      }
       try {
         targets = (await getJson('http://127.0.0.1:' + CDP_PORT + '/json/list')).filter(
           t => t.type === 'page'
@@ -375,8 +415,29 @@ async function main() {
     if (socket) {
       socket.close();
     }
-    chrome.kill('SIGKILL');
+    try {
+      process.kill(-chrome.pid, 'SIGKILL');
+    } catch (error) {
+      chrome.kill('SIGKILL');
+    }
     server.close();
+    // Chrome keeps writing to its profile while it dies, and a recursive
+    // remove that races it fails with ENOTEMPTY. The timeout is there because
+    // a child that never started never emits 'exit'.
+    if (chrome.exitCode === null && chrome.signalCode === null) {
+      await new Promise(resolve => {
+        const done = () => resolve();
+        chrome.once('exit', done);
+        setTimeout(done, 3000).unref();
+      });
+    }
+    // The screenshot directory stays -- it is the point of the run. The Chrome
+    // profile is throwaway, and tens of megabytes of it.
+    try {
+      fs.rmSync(profile, { recursive: true, force: true });
+    } catch (error) {
+      console.warn('could not remove the Chrome profile at ' + profile);
+    }
   }
 }
 

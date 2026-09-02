@@ -45,12 +45,27 @@ export default function App() {
   const inFlightRef = useRef(false);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const toastId = useRef(0);
+  // Every toast's dismissal timer, so unmounting does not leave them to fire
+  // setToasts on a gone component.
+  const toastTimers = useRef<number[]>([]);
+
+  useEffect(
+    () => () => {
+      toastTimers.current.forEach(timer => window.clearTimeout(timer));
+      toastTimers.current = [];
+    },
+    []
+  );
 
   const pushToast = useCallback((message: string) => {
     toastId.current += 1;
     const id = toastId.current;
     setToasts(list => list.concat([{ id, message }]));
-    window.setTimeout(() => setToasts(list => list.filter(toast => toast.id !== id)), 6000);
+    const timer = window.setTimeout(() => {
+      setToasts(list => list.filter(toast => toast.id !== id));
+      toastTimers.current = toastTimers.current.filter(other => other !== timer);
+    }, 6000);
+    toastTimers.current.push(timer);
   }, []);
 
   const flush = useCallback(() => {

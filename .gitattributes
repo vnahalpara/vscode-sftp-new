@@ -1,0 +1,4 @@
+# The CSV round-trip corpus is byte-exact on purpose: crlf.csv and the
+# unterminated-quote CRLF fixture ARE their line endings. A Windows checkout
+# with core.autocrlf=true would rewrite them and fail the corpus test.
+src/modules/csv/__tests__/__fixtures__/* -text

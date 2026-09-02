@@ -963,6 +963,12 @@ uses one of them consistently: `\n` throughout, or `\r\n` throughout. A file wit
 or with old CR-only endings, comes back with a single ending throughout — which is what VS Code
 does to that file on open regardless, so any save from any editor would do the same.
 
+**Header row** is on by default: the first row is drawn as the column headers instead of as data,
+and search, sort and Replace All leave it where it is. Turn it off for a file that has no header —
+the headers become `1`, `2`, `3`… and **Rename** disappears from the column menu, because there is
+no header cell left to rename. The row-number gutter always shows the file's own line numbers, so
+with the header on, the first row of data is `2`.
+
 Editing: click a cell and type, or press `Enter` / `F2` to edit what is there. `Enter` commits and
 moves down, `Tab` / `Shift+Tab` move across, `Escape` cancels, `Delete` clears a cell. Arrow keys,
 `Home` / `End` and `Ctrl/Cmd+Home` / `Ctrl/Cmd+End` move around. `Ctrl/Cmd+C` and `Ctrl/Cmd+V` copy

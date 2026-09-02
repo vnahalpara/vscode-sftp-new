@@ -122,6 +122,10 @@ export default function Grid(props: GridProps) {
   const suppressBlurRef = useRef(false);
   // The row a shift-click extends from: the last row clicked without shift.
   const anchorRef = useRef<number | null>(null);
+  // How to end a column drag that is still in progress. The drag's listeners
+  // live on `document`, so unmounting mid-drag would otherwise leave them
+  // there setting state on a component that is gone.
+  const endResizeRef = useRef<(() => void) | null>(null);
 
   const view = useVirtualRows(scrollEl, visibleRows.length);
 
@@ -386,10 +390,21 @@ export default function Grid(props: GridProps) {
     const onUp = () => {
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
+      endResizeRef.current = null;
     };
+    endResizeRef.current = onUp;
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
   };
+
+  useEffect(
+    () => () => {
+      if (endResizeRef.current) {
+        endResizeRef.current();
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     if (props.editRequest) {
