@@ -209,19 +209,6 @@ export function readConfigsFromFile(configPath): Promise<any[]> {
   });
 }
 
-export function tryLoadConfigs(workspace): Promise<any[]> {
-  const configPath = getConfigPath(workspace);
-  return fse.pathExists(configPath).then(
-    exist => {
-      if (exist) {
-        return readConfigsFromFile(configPath);
-      }
-      return [];
-    },
-    _ => []
-  );
-}
-
 // export function getConfig(activityPath: string) {
 //   const config = configTrie.findPrefix(normalizePath(activityPath));
 //   if (!config) {

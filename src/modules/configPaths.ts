@@ -141,3 +141,53 @@ export function selectDiscovered(
 
   return selected.sort((a, b) => a.localeCompare(b));
 }
+
+export interface ConfigEventFolder {
+  fsPath: string;
+}
+
+export type ConfigEventTarget =
+  | { kind: 'load'; configRoot: string; workspaceFolder: string }
+  | { kind: 'tooDeep'; depth: number; configRoot: string }
+  | { kind: 'outside' };
+
+/**
+ * What a save, create or delete of `configPath` should do.
+ *
+ * The innermost containing folder wins, matching
+ * vscode.workspace.getWorkspaceFolder -- and the depth the user is told about
+ * has to be measured from the same folder the loader would have used.
+ */
+export function configEventTarget(
+  configPath: string,
+  folders: ConfigEventFolder[],
+  depth: number,
+  p: PathApi = path
+): ConfigEventTarget {
+  let owner: ConfigEventFolder | null = null;
+  let ownerDepth = -1;
+
+  // A plain loop, not forEach: TypeScript does not un-narrow a `let` that a
+  // closure assigns to, so `owner` would be `never` at the return below.
+  for (const folder of folders) {
+    const fileDepth = configDepth(folder.fsPath, configPath, p);
+    if (fileDepth < 0) {
+      continue;
+    }
+    if (owner === null || fileDepth < ownerDepth) {
+      owner = folder;
+      ownerDepth = fileDepth;
+    }
+  }
+
+  if (owner === null) {
+    return { kind: 'outside' };
+  }
+
+  const configRoot = configRootOf(configPath, p);
+  if (ownerDepth > depth) {
+    return { kind: 'tooDeep', depth: ownerDepth, configRoot };
+  }
+
+  return { kind: 'load', configRoot, workspaceFolder: owner.fsPath };
+}

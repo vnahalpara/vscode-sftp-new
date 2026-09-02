@@ -4,6 +4,7 @@ import {
   CONFIG_SEARCH_MAX_RESULTS,
   clampDepth,
   configDepth,
+  configEventTarget,
   configRootOf,
   isConfigPath,
   relativeConfigRootLabel,
@@ -222,5 +223,73 @@ describe('selectDiscovered', () => {
         win32
       )
     ).toEqual(['C:\\ws\\.vscode\\sftp.json']);
+  });
+});
+
+describe('configEventTarget', () => {
+  const folders = [{ fsPath: '/ws' }, { fsPath: '/other' }];
+
+  it('loads a root-level config against its folder', () => {
+    expect(configEventTarget('/ws/.vscode/sftp.json', folders, 4, posix)).toEqual({
+      kind: 'load',
+      configRoot: '/ws',
+      workspaceFolder: '/ws',
+    });
+  });
+
+  it('loads a nested config against its own config root', () => {
+    expect(
+      configEventTarget('/ws/DevServer/site/.vscode/sftp.json', folders, 4, posix)
+    ).toEqual({
+      kind: 'load',
+      configRoot: '/ws/DevServer/site',
+      workspaceFolder: '/ws',
+    });
+  });
+
+  it('reports a config deeper than the setting, with its depth', () => {
+    expect(
+      configEventTarget('/ws/a/b/c/.vscode/sftp.json', folders, 2, posix)
+    ).toEqual({ kind: 'tooDeep', depth: 3, configRoot: '/ws/a/b/c' });
+  });
+
+  it('loads a config exactly at the depth limit', () => {
+    expect(configEventTarget('/ws/a/b/.vscode/sftp.json', folders, 2, posix)).toEqual({
+      kind: 'load',
+      configRoot: '/ws/a/b',
+      workspaceFolder: '/ws',
+    });
+  });
+
+  it('reports a config outside every workspace folder', () => {
+    expect(configEventTarget('/elsewhere/.vscode/sftp.json', folders, 4, posix)).toEqual({
+      kind: 'outside',
+    });
+  });
+
+  it('reports outside when there are no workspace folders at all', () => {
+    expect(configEventTarget('/ws/.vscode/sftp.json', [], 4, posix)).toEqual({
+      kind: 'outside',
+    });
+  });
+
+  // vscode.workspace.getWorkspaceFolder picks the innermost folder when folders
+  // are nested, and the depth the user is told about has to be measured from
+  // the same folder.
+  it('picks the innermost workspace folder when folders are nested', () => {
+    expect(
+      configEventTarget(
+        '/ws/inner/site/.vscode/sftp.json',
+        [{ fsPath: '/ws' }, { fsPath: '/ws/inner' }],
+        4,
+        posix
+      )
+    ).toEqual({ kind: 'load', configRoot: '/ws/inner/site', workspaceFolder: '/ws/inner' });
+  });
+
+  it('works on win32 paths', () => {
+    expect(
+      configEventTarget('C:\\ws\\a\\.vscode\\sftp.json', [{ fsPath: 'C:\\ws' }], 4, win32)
+    ).toEqual({ kind: 'load', configRoot: 'C:\\ws\\a', workspaceFolder: 'C:\\ws' });
   });
 });
