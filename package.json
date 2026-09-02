@@ -1075,12 +1075,14 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run build:pdfjs && npm run build:webui && npm run compile",
+    "vscode:prepublish": "npm run build:pdfjs && npm run build:webui && npm run build:csv && npm run compile",
     "build:pdfjs": "node scripts/copy-pdfjs.js",
     "compile": "webpack --mode production",
     "dev": "webpack --mode development --watch",
     "build:webui": "vite build --config webui/vite.config.ts",
     "watch:webui": "vite build --config webui/vite.config.ts --watch",
+    "build:csv": "vite build --config webui/csv/vite.config.ts",
+    "watch:csv": "vite build --config webui/csv/vite.config.ts --watch",
     "dev:webui": "node webui/dev/mock-server.js",
     "test": "jest",
     "package": "vsce package",
