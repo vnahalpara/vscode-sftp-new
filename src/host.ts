@@ -2,7 +2,9 @@ import * as vscode from 'vscode';
 import { EXTENSION_NAME } from './constants';
 
 export function getOpenTextDocuments(): vscode.TextDocument[] {
-  return vscode.workspace.textDocuments;
+  // A copy: VS Code exposes this list as readonly, and a caller that
+  // sorted or spliced the original would be mutating the editor's own state.
+  return vscode.workspace.textDocuments.slice();
 }
 
 export function getUserSetting(section: string, resource?: vscode.Uri | null | undefined) {

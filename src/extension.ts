@@ -19,6 +19,7 @@ import { getWorkspaceFolders, setContextValue } from './host';
 import RemoteExplorer from './modules/remoteExplorer';
 import DbExplorer from './modules/dbExplorer';
 import * as dbConnectionManager from './core/dbConnectionManager';
+import { MarkdownViewerProvider } from './modules/markdown/viewer';
 
 async function setupWorkspaceFolder(dir) {
   const configs = await tryLoadConfigs(dir);
@@ -27,7 +28,7 @@ async function setupWorkspaceFolder(dir) {
   });
 }
 
-async function setup(workspaceFolders: vscode.WorkspaceFolder[]) {
+async function setup(workspaceFolders: readonly vscode.WorkspaceFolder[]) {
   // Load every workspace folder's config first, isolating failures so one bad
   // folder doesn't prevent the others from initializing.
   await Promise.all(
@@ -63,6 +64,14 @@ export async function activate(context: vscode.ExtensionContext) {
     keepAlive: vpnSettings.get<boolean>('keepAlive', true),
   });
   serverManager.init(context.extensionPath);
+
+  // Registered here, ABOVE the workspace-folder early return below, on
+  // purpose. Everything after that return is SFTP machinery that needs an
+  // sftp.json to mean anything; the Markdown viewer needs only an .md file.
+  // Registering it after the return would make it silently absent in every
+  // workspace without a profile, and the customEditors contribution in
+  // package.json would then point at a viewType nothing ever provided.
+  context.subscriptions.push(MarkdownViewerProvider.register(context));
 
   const workspaceFolders = getWorkspaceFolders();
   if (!workspaceFolders) {

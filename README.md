@@ -70,6 +70,7 @@ the notes below.
 | SFTP/FTP sync (upload / download / diff / sync) | ✅ | ✅ |
 | Remote Explorer, Go To Folder | ✅ | ✅ |
 | Create tar.gz of a remote folder (**Linux/Unix servers only**) | ✅ | ✅ |
+| Markdown viewer (default for `.md`) and Markdown → PDF | ✅ | ✅ (PDF needs Chrome, Edge or Chromium) |
 | Database: browse, data view (paging/sort/filter), search, SQL runner, cell/row edit, Find Table | ✅ | ✅ |
 | Manage Server (**Linux servers only**) | ✅ | ✅ |
 | VPN tunnel for SFTP **and** database traffic | ✅ | ✅ |
@@ -885,6 +886,41 @@ In sftp.json:
   "ignore": [".vscode", ".git", ".DS_Store"]
 }
 ```
+
+## Markdown viewer and PDF export
+
+Every `.md` / `.markdown` file opens in a **rendered, read-only viewer** by default — headings,
+tables, code blocks and lists laid out the way they will read, following your editor theme. The
+tab shows the file's own name, and the view re-renders live as the file changes (from a
+side-by-side text editor, a formatter, or a download from the remote).
+
+To edit the raw Markdown, use **Open as Text** — on the viewer's toolbar, on the tab's right-click
+menu, or on the file's right-click menu in the Explorer. VS Code's own **Reopen Editor With…**
+works too.
+
+**Not for you?** Put the plain text editor back as the default for Markdown with one setting:
+
+```json
+"workbench.editorAssociations": { "*.md": "default" }
+```
+
+The viewer stays available under **Open With… → Markdown Viewer**.
+
+### Convert to PDF
+
+**Convert to PDF** is on the viewer's toolbar, on the tab and Explorer right-click menus, and in
+the command palette. It renders the document with a print stylesheet — light background regardless
+of your editor theme, page margins, no page breaks inside a code block or table, no browser
+header/footer — and asks where to save the `.pdf`. If the file has unsaved edits, the PDF matches
+what you are looking at, not the copy on disk.
+
+Rendering uses **Google Chrome, Microsoft Edge or Chromium in headless mode**, whichever is
+installed. Nothing is downloaded and nothing touches your real browser profile — each export runs
+in a throwaway profile that is removed afterwards. If none of those browsers is installed, the
+command says so rather than producing a broken file.
+
+Raw HTML inside a Markdown file is shown as text, never executed — in the viewer and in the PDF.
+A README fetched from a remote server is not trusted content.
 
 ## Remote Explorer
 ![remote-explorer-preview](https://raw.githubusercontent.com/Natizyskunk/vscode-sftp/master/assets/showcase/remote-explorer.png)

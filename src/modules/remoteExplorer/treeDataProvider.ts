@@ -71,11 +71,11 @@ export default class RemoteTreeData
   private _rootsMap: Map<Id, ExplorerRoot> | null;
   private _map: Map<vscode.Uri['query'], ExplorerItem>;
 
-  private _onDidChangeFolder: vscode.EventEmitter<ExplorerItem> = new vscode.EventEmitter<
-    ExplorerItem
+  private _onDidChangeFolder: vscode.EventEmitter<ExplorerItem | undefined> = new vscode.EventEmitter<
+    ExplorerItem | undefined
   >();
   private _onDidChangeFile: vscode.EventEmitter<vscode.Uri> = new vscode.EventEmitter<vscode.Uri>();
-  readonly onDidChangeTreeData: vscode.Event<ExplorerItem> = this._onDidChangeFolder.event;
+  readonly onDidChangeTreeData: vscode.Event<ExplorerItem | undefined> = this._onDidChangeFolder.event;
   readonly onDidChange: vscode.Event<vscode.Uri> = this._onDidChangeFile.event;
 
   async refresh(item?: ExplorerItem): Promise<any> {
@@ -85,7 +85,10 @@ export default class RemoteTreeData
       this._roots = null;
       this._rootsMap = null;
 
-      this._onDidChangeFolder.fire();
+      // undefined means "the whole tree changed" to VS Code -- the caches
+      // were just cleared, so that is exactly the message. The emitter is typed
+      // to allow it rather than cast around it.
+      this._onDidChangeFolder.fire(undefined);
       return;
     }
 

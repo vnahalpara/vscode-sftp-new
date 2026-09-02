@@ -1,3 +1,20 @@
+## 1.30.0 - 2026-08-31
+* New Feature : **Markdown viewer.** Every `.md` / `.markdown` file now opens in a rendered,
+  read-only view by default -- headings, tables, code blocks and lists laid out the way they read,
+  following your editor theme, re-rendering live as the file changes. **Open as Text** (viewer
+  toolbar, tab right-click, Explorer right-click) opens the raw Markdown in the normal editor. To
+  make the text editor the default again: `"workbench.editorAssociations": { "*.md": "default" }`.
+  Raw HTML in a Markdown file is shown as text, never executed.
+* New Feature : **Convert to PDF.** From the viewer toolbar, the tab or Explorer right-click menu,
+  or the command palette. Renders with a print stylesheet (light background regardless of editor
+  theme, page margins, no breaks inside code blocks or tables, no browser header/footer) and asks
+  where to save. Uses Google Chrome, Microsoft Edge or Chromium in headless mode, whichever is
+  installed, in a throwaway profile that is cleaned up afterwards; says so plainly if none is found.
+  Unsaved edits are included -- the PDF matches what you are looking at.
+* Internal : `@types/vscode` aligned with the engine (1.40 → 1.64). It had been three years behind
+  the declared minimum, hiding APIs the extension already relies on; aligning it surfaced and fixed
+  four places where existing code was under-typed against VS Code's readonly collections.
+
 ## 1.29.1 - 2026-08-31
 * Fix : the **Logs** tab showed the WRONG END of a log file. The snapshot ran `sed -n '1,Np'`
   and returned the first N lines -- the oldest content -- while the client requested them under
