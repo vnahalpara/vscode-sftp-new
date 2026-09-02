@@ -1,0 +1,92 @@
+import * as path from 'path';
+
+// The subset of node's `path` these helpers use. Declared rather than reusing
+// `typeof path` because `path.posix` and `path.win32` are typed as narrower
+// namespaces in @types/node v9 and are not assignable to it -- and the tests
+// need to run BOTH platforms' rules on a single host.
+export interface PathApi {
+  sep: string;
+  normalize(p: string): string;
+  join(...paths: string[]): string;
+  relative(from: string, to: string): string;
+  dirname(p: string): string;
+  basename(p: string, ext?: string): string;
+  isAbsolute(p: string): boolean;
+}
+
+export const CONFIG_EXCLUDE_GLOB =
+  '**/{node_modules,vendor,.git,dist,build,.cache,bower_components}/**';
+export const CONFIG_SEARCH_MAX_RESULTS = 500;
+export const DEFAULT_CONFIG_SEARCH_DEPTH = 4;
+export const MAX_CONFIG_SEARCH_DEPTH = 10;
+
+const CONFIG_FILENAME = 'sftp.json';
+const VENDOR_FOLDER = '.vscode';
+
+/**
+ * The folder that owns a config file: the parent of its `.vscode` directory.
+ * This is what `context`, `privateKeyPath` and `ignoreFile` resolve against.
+ */
+export function configRootOf(configPath: string, p: PathApi = path): string {
+  return p.dirname(p.dirname(configPath));
+}
+
+export function isConfigPath(fsPath: string, p: PathApi = path): boolean {
+  return (
+    p.basename(fsPath) === CONFIG_FILENAME &&
+    p.basename(p.dirname(fsPath)) === VENDOR_FOLDER
+  );
+}
+
+/**
+ * Directories between `folderPath` and the config file's root; -1 when the
+ * config file is not under the folder at all.
+ *
+ * `relative` does the platform's own comparison -- win32 matches
+ * case-insensitively, posix does not -- so there is no lowercasing here. A
+ * result that escapes the folder shows up either as a leading `..` segment or,
+ * across Windows drives, as an absolute path.
+ */
+export function configDepth(
+  folderPath: string,
+  configPath: string,
+  p: PathApi = path
+): number {
+  const relative = p.relative(folderPath, configRootOf(configPath, p));
+  if (relative === '') {
+    return 0;
+  }
+  if (p.isAbsolute(relative) || relative === '..' || relative.indexOf('..' + p.sep) === 0) {
+    return -1;
+  }
+  return relative.split(p.sep).filter(segment => segment.length > 0).length;
+}
+
+/** 0..10, defaulting to 4 for anything that is not a number. */
+export function clampDepth(value: any): number {
+  if (typeof value !== 'number' || isNaN(value)) {
+    return DEFAULT_CONFIG_SEARCH_DEPTH;
+  }
+  return Math.min(MAX_CONFIG_SEARCH_DEPTH, Math.max(0, Math.floor(value)));
+}
+
+/**
+ * Display text for a config root: '' for the workspace folder itself, and
+ * forward slashes on every platform because this ends up in a tree row next
+ * to a remote path. A root that is not under the folder keeps its absolute
+ * path rather than becoming a wall of `../`.
+ */
+export function relativeConfigRootLabel(
+  folderPath: string,
+  configRoot: string,
+  p: PathApi = path
+): string {
+  const relative = p.relative(folderPath, configRoot);
+  if (relative === '') {
+    return '';
+  }
+  if (p.isAbsolute(relative) || relative === '..' || relative.indexOf('..' + p.sep) === 0) {
+    return configRoot;
+  }
+  return relative.split(p.sep).join('/');
+}
