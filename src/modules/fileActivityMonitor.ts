@@ -16,7 +16,7 @@ import {
   findAllFileService,
   disposeFileService,
 } from './serviceManager';
-import { configEventTarget, ConfigEventFolder } from './configPaths';
+import { configEventTarget, pathKey, ConfigEventFolder } from './configPaths';
 import { readDepthSetting } from './configDiscovery';
 import { reportError, isValidFile, isConfigFile, isInWorkspace } from '../helper';
 import { downloadFile, uploadFile } from '../fileHandlers';
@@ -43,20 +43,22 @@ function refreshExplorers() {
 }
 
 function noticeTooDeep(configPath: string, actual: number, allowed: number) {
-  if (tooDeepNotified.has(configPath)) {
+  if (tooDeepNotified.has(pathKey(configPath))) {
     return;
   }
-  tooDeepNotified.add(configPath);
+  tooDeepNotified.add(pathKey(configPath));
   showInformationMessage(
     `sftp.json at ${vscode.workspace.asRelativePath(configPath)} is ${actual} levels deep, ` +
-      `beyond sftp.configSearchDepth (${allowed}). Raise the setting to load it.`
+      `beyond sftp.configSearchDepth (${allowed}). Raise the setting, then reload the window.`
   );
 }
 
 async function handleConfigSave(uri: vscode.Uri) {
   const allowed = readDepthSetting();
   const target = configEventTarget(uri.fsPath, workspaceFolderPaths(), allowed);
-  if (target.kind === 'outside') {
+  // 'excluded' is silent like 'outside': the startup search skips node_modules
+  // and friends, so loading one here would give a service the next reload drops.
+  if (target.kind === 'outside' || target.kind === 'excluded') {
     return;
   }
   if (target.kind === 'tooDeep') {
@@ -66,7 +68,8 @@ async function handleConfigSave(uri: vscode.Uri) {
 
   // Only this file's own services. Keying on the workspace folder, as this used
   // to, replaced every sibling project's servers on any nested save.
-  findAllFileService(service => service.workspace === target.configRoot).forEach(
+  const configRootKey = pathKey(target.configRoot);
+  findAllFileService(service => pathKey(service.workspace) === configRootKey).forEach(
     disposeFileService
   );
 
@@ -85,18 +88,21 @@ async function handleConfigSave(uri: vscode.Uri) {
 function handleConfigDelete(uri: vscode.Uri) {
   const allowed = readDepthSetting();
   const target = configEventTarget(uri.fsPath, workspaceFolderPaths(), allowed);
-  if (target.kind === 'outside') {
+  // Same silence as the save path: nothing was ever loaded from an excluded
+  // folder, so there is nothing to dispose.
+  if (target.kind === 'outside' || target.kind === 'excluded') {
     return;
   }
   if (target.kind === 'tooDeep') {
     // Nothing was loaded from it, so there is nothing to dispose -- but a
     // deleted file should not keep its notice, in case it comes back.
-    tooDeepNotified.delete(uri.fsPath);
+    tooDeepNotified.delete(pathKey(uri.fsPath));
     return;
   }
 
-  tooDeepNotified.delete(uri.fsPath);
-  findAllFileService(service => service.workspace === target.configRoot).forEach(
+  tooDeepNotified.delete(pathKey(uri.fsPath));
+  const configRootKey = pathKey(target.configRoot);
+  findAllFileService(service => pathKey(service.workspace) === configRootKey).forEach(
     disposeFileService
   );
   refreshExplorers();

@@ -1,5 +1,6 @@
 import * as path from 'path';
 import {
+  CONFIG_EXCLUDED_DIRS,
   CONFIG_EXCLUDE_GLOB,
   CONFIG_SEARCH_MAX_RESULTS,
   clampDepth,
@@ -7,6 +8,8 @@ import {
   configEventTarget,
   configRootOf,
   isConfigPath,
+  isExcludedConfigPath,
+  pathKey,
   relativeConfigRootLabel,
   selectDiscovered,
 } from '../configPaths';
@@ -144,6 +147,10 @@ describe('search constants', () => {
     );
   });
 
+  it('builds the glob from the excluded directory list', () => {
+    expect(CONFIG_EXCLUDE_GLOB).toBe('**/{' + CONFIG_EXCLUDED_DIRS.join(',') + '}/**');
+  });
+
   it('caps the search at 500 results', () => {
     expect(CONFIG_SEARCH_MAX_RESULTS).toBe(500);
   });
@@ -192,6 +199,18 @@ describe('selectDiscovered', () => {
 
   it('drops a result that is not a .vscode/sftp.json', () => {
     expect(selectDiscovered('/ws', null, ['/ws/a/sftp.json'], 4, posix)).toEqual([]);
+  });
+
+  it('drops a result inside an excluded directory', () => {
+    expect(
+      selectDiscovered(
+        '/w',
+        null,
+        ['/w/vendor/x/.vscode/sftp.json', '/w/a/.vscode/sftp.json'],
+        4,
+        posix
+      )
+    ).toEqual(['/w/a/.vscode/sftp.json']);
   });
 
   it('sorts by path', () => {
@@ -291,5 +310,86 @@ describe('configEventTarget', () => {
     expect(
       configEventTarget('C:\\ws\\a\\.vscode\\sftp.json', [{ fsPath: 'C:\\ws' }], 4, win32)
     ).toEqual({ kind: 'load', configRoot: 'C:\\ws\\a', workspaceFolder: 'C:\\ws' });
+  });
+});
+
+describe('isExcludedConfigPath', () => {
+  it('is false for the workspace folder itself', () => {
+    expect(isExcludedConfigPath('/ws', '/ws/.vscode/sftp.json', posix)).toBe(false);
+  });
+
+  it('is true for any excluded segment on the way down', () => {
+    expect(
+      isExcludedConfigPath('/ws', '/ws/a/node_modules/pkg/.vscode/sftp.json', posix)
+    ).toBe(true);
+  });
+
+  it('needs an exact segment, not a prefix', () => {
+    expect(isExcludedConfigPath('/ws', '/ws/dist-old/.vscode/sftp.json', posix)).toBe(false);
+  });
+
+  it('is false for a config outside the folder', () => {
+    expect(isExcludedConfigPath('/ws', '/other/dist/.vscode/sftp.json', posix)).toBe(false);
+  });
+});
+
+describe('configEventTarget exclusions', () => {
+  const folders = [{ fsPath: '/ws' }];
+
+  it('excludes a config directly inside node_modules', () => {
+    expect(
+      configEventTarget('/ws/node_modules/.vscode/sftp.json', folders, 4, posix)
+    ).toEqual({ kind: 'excluded' });
+  });
+
+  it('excludes a config nested deeper inside node_modules', () => {
+    expect(
+      configEventTarget('/ws/node_modules/a/b/.vscode/sftp.json', folders, 4, posix)
+    ).toEqual({ kind: 'excluded' });
+  });
+
+  // Excluded before too deep: the file is never loaded either way, and telling
+  // the user to raise a depth setting that would not help is worse than silence.
+  it('prefers excluded over tooDeep', () => {
+    expect(
+      configEventTarget('/ws/node_modules/a/b/.vscode/sftp.json', folders, 1, posix)
+    ).toEqual({ kind: 'excluded' });
+  });
+
+  it('loads a folder merely named like an excluded one', () => {
+    expect(configEventTarget('/ws/dist-old/.vscode/sftp.json', folders, 4, posix)).toEqual({
+      kind: 'load',
+      configRoot: '/ws/dist-old',
+      workspaceFolder: '/ws',
+    });
+    expect(configEventTarget('/ws/my-vendor/.vscode/sftp.json', folders, 4, posix)).toEqual({
+      kind: 'load',
+      configRoot: '/ws/my-vendor',
+      workspaceFolder: '/ws',
+    });
+  });
+
+  // The win32 filesystem matches case-insensitively, so findFiles would have
+  // skipped this folder whatever the user spelled it.
+  it('matches an excluded directory case-insensitively on win32', () => {
+    expect(
+      configEventTarget('C:\\ws\\Node_Modules\\a\\.vscode\\sftp.json', [{ fsPath: 'C:\\ws' }], 4, win32)
+    ).toEqual({ kind: 'excluded' });
+  });
+
+  it('keeps case-sensitive matching on posix', () => {
+    expect(
+      configEventTarget('/ws/Node_Modules/.vscode/sftp.json', folders, 4, posix)
+    ).toEqual({ kind: 'load', configRoot: '/ws/Node_Modules', workspaceFolder: '/ws' });
+  });
+});
+
+describe('pathKey', () => {
+  it('is stable across win32 case and separator spellings', () => {
+    expect(pathKey('C:\\WS\\Site', win32)).toBe(pathKey('C:/ws/site', win32));
+  });
+
+  it('does not fold case on posix', () => {
+    expect(pathKey('/ws/Site', posix)).not.toBe(pathKey('/ws/site', posix));
   });
 });

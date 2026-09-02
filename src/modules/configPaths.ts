@@ -14,8 +14,18 @@ export interface PathApi {
   isAbsolute(p: string): boolean;
 }
 
-export const CONFIG_EXCLUDE_GLOB =
-  '**/{node_modules,vendor,.git,dist,build,.cache,bower_components}/**';
+// The directories a config search skips. The glob is derived from the list so
+// the two can never drift: the event path checks the list, findFiles the glob.
+export const CONFIG_EXCLUDED_DIRS = [
+  'node_modules',
+  'vendor',
+  '.git',
+  'dist',
+  'build',
+  '.cache',
+  'bower_components',
+];
+export const CONFIG_EXCLUDE_GLOB = '**/{' + CONFIG_EXCLUDED_DIRS.join(',') + '}/**';
 export const CONFIG_SEARCH_MAX_RESULTS = 500;
 export const DEFAULT_CONFIG_SEARCH_DEPTH = 4;
 export const MAX_CONFIG_SEARCH_DEPTH = 10;
@@ -62,6 +72,34 @@ export function configDepth(
   return relative.split(p.sep).filter(segment => segment.length > 0).length;
 }
 
+/**
+ * Whether the config's root sits inside one of `CONFIG_EXCLUDED_DIRS`, i.e. a
+ * directory the startup search skips. A root that IS the folder, or is not
+ * under it at all, is never excluded.
+ *
+ * win32 compares case-insensitively because its filesystem does, so findFiles
+ * would have skipped the folder however the user spelled it.
+ */
+export function isExcludedConfigPath(
+  folderPath: string,
+  configPath: string,
+  p: PathApi = path
+): boolean {
+  const relative = p.relative(folderPath, configRootOf(configPath, p));
+  if (relative === '') {
+    return false;
+  }
+  if (p.isAbsolute(relative) || relative === '..' || relative.indexOf('..' + p.sep) === 0) {
+    return false;
+  }
+
+  const fold = p.sep === '\\';
+  return relative.split(p.sep).some(segment => {
+    const name = fold ? segment.toLowerCase() : segment;
+    return CONFIG_EXCLUDED_DIRS.indexOf(name) !== -1;
+  });
+}
+
 /** 0..10, defaulting to 4 for anything that is not a number. */
 export function clampDepth(value: any): number {
   if (typeof value !== 'number' || isNaN(value)) {
@@ -94,8 +132,9 @@ export function relativeConfigRootLabel(
 // Two spellings of one file must collapse to one entry, or the second load
 // overwrites the first service on the same baseDir. Windows is where this
 // actually happens: the same path comes back with either case and either
-// separator depending on who produced it.
-function pathKey(fsPath: string, p: PathApi): string {
+// separator depending on who produced it. Exported because the event handlers
+// compare config roots the same way.
+export function pathKey(fsPath: string, p: PathApi = path): string {
   const normalized = p.normalize(fsPath);
   return p.sep === '\\' ? normalized.toLowerCase() : normalized;
 }
@@ -136,6 +175,11 @@ export function selectDiscovered(
     if (fileDepth < 0 || fileDepth > depth) {
       return;
     }
+    // Symmetry with the exclude glob: a search that returned one anyway (a
+    // stale index, a caller passing its own list) must not sneak it in.
+    if (isExcludedConfigPath(folderPath, configPath, p)) {
+      return;
+    }
     take(configPath);
   });
 
@@ -149,6 +193,7 @@ export interface ConfigEventFolder {
 export type ConfigEventTarget =
   | { kind: 'load'; configRoot: string; workspaceFolder: string }
   | { kind: 'tooDeep'; depth: number; configRoot: string }
+  | { kind: 'excluded' }
   | { kind: 'outside' };
 
 /**
@@ -182,6 +227,13 @@ export function configEventTarget(
 
   if (owner === null) {
     return { kind: 'outside' };
+  }
+
+  // Before the depth check: an excluded file is not loaded at any depth, so
+  // telling the user to raise a setting that would not help is worse than
+  // saying nothing.
+  if (isExcludedConfigPath(owner.fsPath, configPath, p)) {
+    return { kind: 'excluded' };
   }
 
   const configRoot = configRootOf(configPath, p);
