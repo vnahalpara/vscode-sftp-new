@@ -87,4 +87,80 @@ describe('toFileUrl', () => {
   it('keeps path separators', () => {
     expect(toFileUrl('/a/b/c.html').split('/').length).toBe(6);
   });
+
+  // `%` is the one character whose mishandling is silent: a raw `%2F` in a
+  // folder name must reach Chrome as `%252F`, or it decodes to a slash and
+  // the URL points at a different, nonexistent path.
+  it('encodes a literal percent sign so it is not decoded as an escape', () => {
+    expect(toFileUrl('/tmp/100%/x.html')).toBe('file:///tmp/100%25/x.html');
+  });
+
+  it('percent-encodes unicode', () => {
+    expect(toFileUrl('/tmp/café/x.html')).toBe('file:///tmp/caf%C3%A9/x.html');
+  });
+});
+
+// The Windows branch cannot run through path.resolve on macOS -- resolve would
+// treat `C:\\...` as a relative name and prepend the cwd -- so it is exercised
+// on the pure transformation that follows resolve, by feeding an already-
+// absolute, already-forward-slashed Windows path. What this pins is the
+// leading-slash rule: Chrome wants `file:///C:/...` (three slashes), and the
+// drive-letter colon must survive encoding as a colon.
+describe('toFileUrl on a Windows-shaped path', () => {
+  const realResolve = require('path').resolve;
+  beforeAll(() => {
+    require('path').resolve = (p: string) => p;
+  });
+  afterAll(() => {
+    require('path').resolve = realResolve;
+  });
+
+  it('adds the leading slash a drive-letter path needs and keeps the colon', () => {
+    expect(toFileUrl('C:\\Users\\x\\doc.html')).toBe('file:///C:/Users/x/doc.html');
+  });
+
+  // Only a REAL drive letter keeps its colon. A first segment that merely
+  // contains one is a folder name and is encoded like any other.
+  it('still encodes a colon that is not a drive letter', () => {
+    expect(toFileUrl('/a:b/x.html')).toBe('file:///a%3Ab/x.html');
+  });
+});
+
+describe('looksLikePdf', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { looksLikePdf } = require('../pdf');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'looks-like-pdf-'));
+
+  afterAll(() => {
+    require('fs-extra').removeSync(dir);
+  });
+
+  it('accepts a file that starts with the PDF magic', () => {
+    const p = path.join(dir, 'real.pdf');
+    fs.writeFileSync(p, '%PDF-1.4\n%\u00e2\u00e3\u00cf\u00d3\n1 0 obj');
+    expect(looksLikePdf(p)).toBe(true);
+  });
+
+  // Chrome can save its own error page under a .pdf name; the magic check is
+  // what stops that being reported as a successful export.
+  it('rejects an HTML error page saved with a .pdf name', () => {
+    const p = path.join(dir, 'fake.pdf');
+    fs.writeFileSync(p, '<!doctype html><title>404</title>');
+    expect(looksLikePdf(p)).toBe(false);
+  });
+
+  it('rejects an empty file and a missing file', () => {
+    const p = path.join(dir, 'empty.pdf');
+    fs.writeFileSync(p, '');
+    expect(looksLikePdf(p)).toBe(false);
+    expect(looksLikePdf(path.join(dir, 'nope.pdf'))).toBe(false);
+  });
+
+  it('rejects a file shorter than the magic', () => {
+    const p = path.join(dir, 'short.pdf');
+    fs.writeFileSync(p, '%PD');
+    expect(looksLikePdf(p)).toBe(false);
+  });
 });

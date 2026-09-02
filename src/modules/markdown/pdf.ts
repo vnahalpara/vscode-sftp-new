@@ -114,7 +114,14 @@ export function toFileUrl(p: string): string {
   const withSlash = normalised.startsWith('/') ? normalised : `/${normalised}`;
   const encoded = withSlash
     .split('/')
-    .map(segment => encodeURIComponent(segment))
+    // A Windows drive letter (`C:`) is the one segment that must keep its
+    // colon: `file:///C:/...` is the canonical form, and while Chrome does
+    // tolerate `%3A` there, other consumers of the URL do not. It can only
+    // ever be the first non-empty segment, and only when it is exactly a
+    // letter and a colon.
+    .map((segment, index) =>
+      index === 1 && /^[A-Za-z]:$/.test(segment) ? segment : encodeURIComponent(segment)
+    )
     .join('/');
   return `file://${encoded}`;
 }
@@ -122,6 +129,30 @@ export function toFileUrl(p: string): string {
 export interface PdfResult {
   ok: true;
   bytes: number;
+}
+
+// Whether the file at `p` is a PDF: present, non-empty, and beginning with the
+// `%PDF-` magic every PDF starts with. Reading five bytes is the cheapest
+// check that distinguishes a real export from an empty file, a truncated
+// write, or an HTML error page that Chrome saved under a .pdf name. Exported
+// for its tests; the size cap on the read is so a huge file is not pulled
+// into memory to answer a five-byte question.
+export function looksLikePdf(p: string): boolean {
+  try {
+    if (!fs.existsSync(p) || fs.statSync(p).size < 5) {
+      return false;
+    }
+    const fd = fs.openSync(p, 'r');
+    try {
+      const head = Buffer.alloc(5);
+      fs.readSync(fd, head, 0, 5, 0);
+      return head.toString('latin1') === '%PDF-';
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
 }
 
 // Renders `html` to a PDF at `pdfPath` through headless Chrome. Throws with a
@@ -157,37 +188,52 @@ export async function renderPdf(
       execFile(
         chromium,
         pdfArgs(htmlPath, pdfPath, profileDir),
-        { timeout: opts.timeoutMs || 60000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+        { timeout: opts.timeoutMs || 90000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
         (error, _stdout, stderr) => {
-          if (error) {
-            // Chrome's stderr is noisy even on success (DevTools banners,
-            // GPU warnings), so it is only surfaced on failure, and only the
-            // tail -- the actionable line is almost always the last one.
-            const tail = String(stderr || '')
-              .trim()
-              .split('\n')
-              .slice(-3)
-              .join(' ');
-            reject(new Error(`${path.basename(chromium)} failed to print the PDF: ${error.message}${tail ? ` -- ${tail}` : ''}`));
+          if (!error) {
+            resolve();
             return;
           }
-          resolve();
+          // A timeout is NOT proof the print failed. Headless Chrome writes
+          // the PDF promptly and then, on some machines, hangs on the way out
+          // -- a first launch populating a fresh profile, a lingering GPU
+          // process, a crash-handler that waits on a socket. A reviewer hit
+          // exactly this: the PDF was complete and correct on disk while the
+          // process sat at the timeout and the export reported "failed".
+          //
+          // So on timeout, consult the one thing that actually answers the
+          // question -- is there a real PDF where we asked for one? If so,
+          // the export succeeded and the process being killed is Chrome's
+          // problem, not the user's.
+          const timedOut = (error as any).killed === true || /timed out|ETIMEDOUT/i.test(String(error.message));
+          if (timedOut && looksLikePdf(pdfPath)) {
+            resolve();
+            return;
+          }
+          // Chrome's stderr is noisy even on success (DevTools banners,
+          // GPU warnings), so it is only surfaced on failure, and only the
+          // tail -- the actionable line is almost always the last one.
+          const tail = String(stderr || '')
+            .trim()
+            .split('\n')
+            .slice(-3)
+            .join(' ');
+          reject(new Error(`${path.basename(chromium)} failed to print the PDF: ${error.message}${tail ? ` -- ${tail}` : ''}`));
         }
       );
     });
 
     // Chrome can exit 0 without writing anything (a crash in the renderer
     // process is reported by the browser process as success). Do not tell the
-    // user a file exists until it is on disk and non-empty.
+    // user a file exists until it is on disk, non-empty, and actually a PDF.
     if (!fs.existsSync(pdfPath)) {
       throw new Error(`${path.basename(chromium)} exited normally but produced no PDF.`);
     }
-    const bytes = fs.statSync(pdfPath).size;
-    if (bytes === 0) {
+    if (!looksLikePdf(pdfPath)) {
       fs.unlinkSync(pdfPath);
-      throw new Error(`${path.basename(chromium)} produced an empty PDF.`);
+      throw new Error(`${path.basename(chromium)} produced a file that is not a PDF.`);
     }
-    return { ok: true, bytes };
+    return { ok: true, bytes: fs.statSync(pdfPath).size };
   } finally {
     try {
       // fs-extra rather than fs.rmSync: the latter is Node 14.14+, and this

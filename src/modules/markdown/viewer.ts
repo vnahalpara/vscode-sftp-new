@@ -110,12 +110,23 @@ export class MarkdownViewerProvider implements vscode.CustomTextEditorProvider {
   // by postMessage so the shell never has to be rebuilt.
   //
   // CSP: no `unsafe-inline` for scripts (the one script carries the nonce),
-  // no external hosts at all, and `img-src` limited to https and data: so a
-  // README's badge images still show while nothing can be fetched from an
-  // arbitrary scheme. Inline STYLES are allowed because the rendered document
-  // is styled by an inline <style> block; markdown-it emits no style
-  // attributes of its own with html:false, so this does not widen what the
-  // file's content can do.
+  // no external hosts for anything but images, and `img-src` limited to
+  // https: and data: so a README's badges still show while nothing can be
+  // fetched from an arbitrary scheme.
+  //
+  // Two things about that policy are deliberate trade-offs, not oversights:
+  //
+  //   - `img-src https:` means a remote image in the file IS fetched when the
+  //     document is viewed, so a `![](https://example/pixel.png)` can tell
+  //     its host that someone opened the file. VS Code's own Markdown preview
+  //     behaves the same way, and blocking remote images would break every
+  //     README badge. Documented in the README under the feature.
+  //
+  //   - Inline STYLES are allowed because the document is styled by an inline
+  //     <style> block. With html:false the file cannot inject a <style> tag
+  //     or a style attribute of its own -- the ONLY style attribute markdown-it
+  //     emits is `text-align` on table cells, from the `:---:` column syntax,
+  //     with three fixed values. That is not a vector.
   private shell(webview: vscode.Webview, fileName: string, nonce: string): string {
     const csp = [
       `default-src 'none'`,

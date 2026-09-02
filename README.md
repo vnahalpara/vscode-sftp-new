@@ -922,6 +922,13 @@ command says so rather than producing a broken file.
 Raw HTML inside a Markdown file is shown as text, never executed — in the viewer and in the PDF.
 A README fetched from a remote server is not trusted content.
 
+One thing to know: **remote images in a Markdown file are fetched when you view it**, exactly as
+VS Code's own Markdown preview does. That is what makes README badges work, and it also means a
+document containing `![](https://example.com/pixel.png)` can tell that host someone opened it. If
+that matters for a particular file, open it as text instead.
+
+Requires VS Code 1.67 or newer (April 2022).
+
 ## Remote Explorer
 ![remote-explorer-preview](https://raw.githubusercontent.com/Natizyskunk/vscode-sftp/master/assets/showcase/remote-explorer.png)
 

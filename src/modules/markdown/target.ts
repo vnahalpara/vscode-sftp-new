@@ -17,13 +17,17 @@ export function markdownTargetUri(arg: unknown): vscode.Uri | undefined {
   // active tab there is no activeTextEditor. The tab API names the active
   // tab's input, and for a custom editor that input carries the URI.
   //
-  // Reached through a cast because this repo pins @types/vscode at 1.64 (see
-  // package.json engines) and `window.tabGroups` was added in 1.67. It exists
-  // at runtime on every VS Code that can run this extension's other features;
-  // the guard below is for the types' sake and for an unexpectedly old host,
-  // where the honest answer is "no target", not a crash.
-  const tabGroups = (vscode.window as any).tabGroups;
-  const tab = tabGroups && tabGroups.activeTabGroup && tabGroups.activeTabGroup.activeTab;
-  const input: any = tab && tab.input;
-  return input && input.uri instanceof vscode.Uri ? input.uri : undefined;
+  // `window.tabGroups` arrived in VS Code 1.67, which is why package.json's
+  // engine is `^1.67.0` and not lower: this is the only path that can find
+  // the document when the viewer is the active tab and a command arrives with
+  // no argument (the command palette). An earlier draft claimed the API was
+  // present on any host that could run the extension while the engine still
+  // said 1.64 -- on 1.64-1.66 the palette command would have silently
+  // answered "Open a Markdown file first" with the file open in front of the
+  // user. The engine floor is the fix, not a runtime guard.
+  const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+  const input = tab && tab.input;
+  return input instanceof vscode.TabInputCustom || input instanceof vscode.TabInputText
+    ? input.uri
+    : undefined;
 }

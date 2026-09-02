@@ -11,7 +11,8 @@
   where to save. Uses Google Chrome, Microsoft Edge or Chromium in headless mode, whichever is
   installed, in a throwaway profile that is cleaned up afterwards; says so plainly if none is found.
   Unsaved edits are included -- the PDF matches what you are looking at.
-* Internal : `@types/vscode` aligned with the engine (1.40 → 1.64). It had been three years behind
+* Internal : minimum VS Code raised from 1.64 to **1.67** (April 2022) — the tab API the Markdown
+  commands use to find the active viewer arrived there. `@types/vscode` aligned to match (was 1.40). It had been three years behind
   the declared minimum, hiding APIs the extension already relies on; aligning it surfaced and fixed
   four places where existing code was under-typed against VS Code's readonly collections.
 
