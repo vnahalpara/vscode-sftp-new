@@ -1,7 +1,7 @@
 import { ROW_HEIGHT, virtualWindow } from '../useVirtualRows';
 
 describe('ROW_HEIGHT', () => {
-  it('matches the --csv-row-height in styles.css', () => {
+  it('is the row height the grid lays every row out with', () => {
     expect(ROW_HEIGHT).toBe(24);
   });
 });

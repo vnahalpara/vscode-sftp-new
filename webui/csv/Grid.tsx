@@ -89,16 +89,35 @@ function CellText(props: { value: string; query: string; matchCase: boolean }) {
   return <>{parts}</>;
 }
 
+interface EditingCell {
+  row: number;
+  col: number;
+  value: string;
+}
+
 export default function Grid(props: GridProps) {
   const { rows, width, visibleRows, headers, readOnly, sort, query, matchCase, selectedRows } = props;
 
   const gridRef = useRef<HTMLDivElement | null>(null);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // A callback ref, not a ref object: the empty-file screen renders no scroll
+  // container at all, and an effect keyed on a ref object would never re-run
+  // when the container finally mounts.
+  const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
   const [selected, setSelected] = useState<CellRef | null>(null);
-  const [editing, setEditing] = useState<{ row: number; col: number; value: string } | null>(null);
+  const [editing, setEditing] = useState<EditingCell | null>(null);
   const [overrides, setOverrides] = useState<{ [col: number]: number }>({});
 
-  const view = useVirtualRows(scrollRef, visibleRows.length);
+  // What is being edited RIGHT NOW. `editing` is the last render's snapshot,
+  // and blur runs before a queued setEditing has flushed.
+  const editingRef = useRef<EditingCell | null>(null);
+  // Raised while this component moves focus itself. Focusing the grid blurs
+  // the cell input synchronously, so without this guard Escape would commit
+  // the edit it is meant to throw away and Enter would commit twice.
+  const suppressBlurRef = useRef(false);
+  // The row a shift-click extends from: the last row clicked without shift.
+  const anchorRef = useRef<number | null>(null);
+
+  const view = useVirtualRows(scrollEl, visibleRows.length);
 
   const widths = useMemo(() => {
     const auto = autoWidths(rows, headers, width);
@@ -107,6 +126,11 @@ export default function Grid(props: GridProps) {
 
   const totalWidth = widths.reduce((sum, value) => sum + value, GUTTER_WIDTH);
 
+  const setEditingCell = (next: EditingCell | null) => {
+    editingRef.current = next;
+    setEditing(next);
+  };
+
   const focusGrid = () => {
     if (gridRef.current) {
       gridRef.current.focus();
@@ -114,7 +138,7 @@ export default function Grid(props: GridProps) {
   };
 
   const scrollRowIntoView = (position: number) => {
-    const el = scrollRef.current;
+    const el = scrollEl;
     if (!el) {
       return;
     }
@@ -141,34 +165,44 @@ export default function Grid(props: GridProps) {
       return;
     }
     setSelected({ row, col });
-    setEditing({
+    setEditingCell({
       row,
       col,
       value: replace ? (seed !== undefined ? seed : '') : cellValue(rows, row, col),
     });
   };
 
-  const commitEditing = (
-    current: { row: number; col: number; value: string },
-    move: 'down' | 'left' | 'right' | 'none'
-  ) => {
-    setEditing(null);
+  const commitEditing = (current: EditingCell, move: 'down' | 'left' | 'right' | 'none') => {
+    // The guard goes up first: everything below can move focus, and the blur
+    // that follows is delivered before this function returns.
+    suppressBlurRef.current = true;
+    setEditingCell(null);
     // A commit with an unchanged value sends nothing: an accidental Enter
     // should not put a row in the diff.
     if (current.value !== cellValue(rows, current.row, current.col)) {
       props.onSetCell(current.row, current.col, current.value);
     }
-    const position = visibleRows.indexOf(current.row);
-    if (move === 'down') {
-      moveTo(position + 1, current.col);
-    } else if (move === 'right') {
-      moveTo(position, current.col + 1);
-    } else if (move === 'left') {
-      moveTo(position, current.col - 1);
-    } else {
-      moveTo(position, current.col);
+    // 'none' is the commit a click elsewhere caused. That click has already
+    // chosen the new selection, so moving here would only drag it back.
+    if (move !== 'none') {
+      const position = visibleRows.indexOf(current.row);
+      if (move === 'down') {
+        moveTo(position + 1, current.col);
+      } else if (move === 'right') {
+        moveTo(position, current.col + 1);
+      } else {
+        moveTo(position, current.col - 1);
+      }
+      focusGrid();
     }
+    suppressBlurRef.current = false;
+  };
+
+  const cancelEditing = () => {
+    suppressBlurRef.current = true;
+    setEditingCell(null);
     focusGrid();
+    suppressBlurRef.current = false;
   };
 
   const copyCell = () => {
@@ -276,30 +310,32 @@ export default function Grid(props: GridProps) {
   };
 
   const onInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (!editing) {
+    const current = editingRef.current;
+    if (!current) {
       return;
     }
     if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
-      setEditing(null);
-      focusGrid();
+      cancelEditing();
       return;
     }
     if (event.key === 'Enter') {
       event.preventDefault();
-      commitEditing(editing, 'down');
+      commitEditing(current, 'down');
       return;
     }
     if (event.key === 'Tab') {
       event.preventDefault();
-      commitEditing(editing, event.shiftKey ? 'left' : 'right');
+      commitEditing(current, event.shiftKey ? 'left' : 'right');
     }
   };
 
   const onGutterMouseDown = (event: React.MouseEvent, row: number) => {
-    if (event.shiftKey && selectedRows.length > 0) {
-      const anchor = selectedRows[selectedRows.length - 1];
+    // The grid keeps the keys after a row click, so the arrows still work.
+    focusGrid();
+    if (event.shiftKey && anchorRef.current !== null) {
+      const anchor = anchorRef.current;
       const from = Math.min(anchor, row);
       const to = Math.max(anchor, row);
       const range: number[] = [];
@@ -311,6 +347,8 @@ export default function Grid(props: GridProps) {
       props.onSelectRows(range);
       return;
     }
+    // A click without shift is what the next shift-click extends from.
+    anchorRef.current = row;
     if (event.ctrlKey || event.metaKey) {
       props.onSelectRows(
         selectedRows.indexOf(row) === -1
@@ -358,7 +396,7 @@ export default function Grid(props: GridProps) {
 
   return (
     <div className="csv-grid" ref={gridRef} tabIndex={0} onKeyDown={onKeyDown}>
-      <div className="csv-scroll" ref={scrollRef}>
+      <div className="csv-scroll" ref={setScrollEl}>
         <div className="csv-table" style={{ width: totalWidth }}>
           <div className="csv-head" style={{ height: ROW_HEIGHT }}>
             <div className="csv-gutter csv-gutter-head" style={{ width: GUTTER_WIDTH }} />
@@ -436,12 +474,19 @@ export default function Grid(props: GridProps) {
                             autoFocus
                             value={editing!.value}
                             onChange={event =>
-                              setEditing({ row, col, value: event.target.value })
+                              setEditingCell({ row, col, value: event.target.value })
                             }
                             onKeyDown={onInputKeyDown}
                             onBlur={() => {
-                              if (editing) {
-                                commitEditing(editing, 'none');
+                              if (suppressBlurRef.current) {
+                                // We moved focus ourselves; the commit or the
+                                // cancel has already run.
+                                suppressBlurRef.current = false;
+                                return;
+                              }
+                              const current = editingRef.current;
+                              if (current) {
+                                commitEditing(current, 'none');
                               }
                             }}
                           />

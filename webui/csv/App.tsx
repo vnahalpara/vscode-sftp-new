@@ -108,6 +108,11 @@ export default function App() {
   // rendered.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      // Only the grid screen has a search box to focus; on the others the key
+      // belongs to whatever VS Code would do with it.
+      if (screen !== 'grid') {
+        return;
+      }
       if ((event.ctrlKey || event.metaKey) && (event.key === 'f' || event.key === 'F')) {
         event.preventDefault();
         if (searchRef.current) {
@@ -118,7 +123,7 @@ export default function App() {
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [screen]);
 
   const sendOp = useCallback(
     (op: CsvOp) => {
@@ -163,7 +168,10 @@ export default function App() {
   };
 
   const onAddRow = () => {
-    const at = selectedRows.length > 0 ? Math.max.apply(null, selectedRows) + 1 : rows.length;
+    // reduce, not Math.max.apply: a shift-click range can hold more rows than
+    // a call is allowed arguments.
+    const last = selectedRows.reduce((max, row) => (row > max ? row : max), 0);
+    const at = selectedRows.length > 0 ? last + 1 : rows.length;
     sendOp({ type: 'insertRows', at, count: 1 });
   };
 

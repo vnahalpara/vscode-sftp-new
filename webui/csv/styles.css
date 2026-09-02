@@ -2,8 +2,6 @@
    knowing anything about it. Every var has a fallback for the headless-Chrome
    check in Task 10, where no VS Code theme is present. */
 :root {
-  --csv-row-height: 24px;
-  --csv-gutter: 56px;
   --csv-bg: var(--vscode-editor-background, #1e1e1e);
   --csv-fg: var(--vscode-editor-foreground, #ccc);
   --csv-muted: var(--vscode-descriptionForeground, #999);

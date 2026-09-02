@@ -36,17 +36,17 @@ export function virtualWindow(
   return { start, end: Math.min(total, start + count), padTop: start * rowHeight };
 }
 
-export function useVirtualRows(
-  ref: { current: HTMLElement | null },
-  total: number
-): VirtualWindow {
+// Takes the element itself, not a ref object: the grid does not render a
+// scroll container on the empty-file screen, and an effect keyed on a ref
+// object would never re-run when the container mounted later.
+export function useVirtualRows(container: HTMLElement | null, total: number): VirtualWindow {
   const [scrollTop, setScrollTop] = useState(0);
   // A sane guess until the element is measured; virtualWindow tolerates a
   // zero height, it just renders the buffer.
   const [height, setHeight] = useState(600);
 
   useEffect(() => {
-    const el = ref.current;
+    const el = container;
     if (!el) {
       return undefined;
     }
@@ -59,7 +59,7 @@ export function useVirtualRows(
       el.removeEventListener('scroll', onScroll);
       window.removeEventListener('resize', measure);
     };
-  }, [ref]);
+  }, [container]);
 
   return virtualWindow(scrollTop, height, ROW_HEIGHT, total, BUFFER_ROWS);
 }
