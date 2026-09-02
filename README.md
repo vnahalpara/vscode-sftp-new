@@ -893,7 +893,8 @@ In sftp.json:
 Every `.md` / `.markdown` file opens in a **rendered, read-only viewer** by default — headings,
 tables, code blocks and lists laid out the way they will read, following your editor theme. The
 tab shows the file's own name, and the view re-renders live as the file changes (from a
-side-by-side text editor, a formatter, or a download from the remote).
+side-by-side text editor, a formatter, or a download from the remote). `Ctrl/Cmd+F` searches the
+rendered text.
 
 To edit the raw Markdown, use **Open as Text** — on the viewer's toolbar, on the tab's right-click
 menu, or on the file's right-click menu in the Explorer. VS Code's own **Reopen Editor With…**

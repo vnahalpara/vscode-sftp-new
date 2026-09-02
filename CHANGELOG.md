@@ -1,3 +1,8 @@
+## 1.31.1 - 2026-09-02
+* Fix : **Find in the Markdown viewer.** `Cmd/Ctrl+F` did nothing in the rendered view, because
+  VS Code's find widget for webviews is opt-in and the viewer never asked for it. It now opens
+  VS Code's find widget over the rendered text.
+
 ## 1.31.0 - 2026-08-31
 * New Feature : **PDF viewer.** Every `.pdf` now opens in a built-in viewer -- page navigation,
   zoom presets, find with match counts, rotate, clickable links, keyboard shortcuts, following

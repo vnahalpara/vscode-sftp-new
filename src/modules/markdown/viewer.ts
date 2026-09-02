@@ -36,6 +36,9 @@ export class MarkdownViewerProvider implements vscode.CustomTextEditorProvider {
           // a long document. The cost is memory per hidden viewer, which for
           // a rendered README is small.
           retainContextWhenHidden: true,
+          // VS Code's find widget for webviews is opt-in. Without this,
+          // Cmd/Ctrl+F in the viewer did nothing at all.
+          enableFindWidget: true,
         },
         // One provider instance can serve every open document; it holds no
         // per-document state that is not on the panel itself.
