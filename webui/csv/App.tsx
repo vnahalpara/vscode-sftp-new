@@ -3,6 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fmtBytes } from '../src/format';
 import { CsvOp, HostMessage, delimiterLabel, eolLabel } from '../../src/modules/csv/protocol';
 import { Delimiter, Eol } from '../../src/modules/csv/types';
+import ContextMenu, { MenuItem } from './ContextMenu';
+import FindReplace from './FindReplace';
 import Grid, { CellRef } from './Grid';
 import Toolbar from './Toolbar';
 import { filterRows } from './search';
@@ -32,6 +34,7 @@ export default function App() {
   const [selectedRows, setSelectedRows] = useState<number[]>([]);
   const [editRequest, setEditRequest] = useState<CellRef | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
   // The document version the next op will be based on. A ref, not state: it is
   // read when a message is posted, not when the component renders.
@@ -189,6 +192,47 @@ export default function App() {
     });
   };
 
+  const openRowMenu = (row: number, x: number, y: number) => {
+    if (readOnly) {
+      return;
+    }
+    // Act on the whole selection when the clicked row is part of it, and on
+    // the clicked row alone when it is not.
+    const targets = selectedRows.indexOf(row) !== -1 ? selectedRows : [row];
+    setMenu({
+      x,
+      y,
+      items: [
+        { label: 'Insert Above', run: () => sendOp({ type: 'insertRows', at: row, count: 1 }) },
+        { label: 'Insert Below', run: () => sendOp({ type: 'insertRows', at: row + 1, count: 1 }) },
+        { label: 'Duplicate', run: () => sendOp({ type: 'duplicateRows', rows: targets }) },
+        {
+          label: 'Delete',
+          run: () => {
+            sendOp({ type: 'deleteRows', rows: targets });
+            setSelectedRows([]);
+          },
+        },
+      ],
+    });
+  };
+
+  const openHeaderMenu = (col: number, x: number, y: number) => {
+    if (readOnly) {
+      return;
+    }
+    const items: MenuItem[] = [];
+    // Rename edits the header CELL. With the toggle off there is no header
+    // cell to edit -- the column is called "3" -- so the item is not offered.
+    if (hasHeader && rows.length > 0) {
+      items.push({ label: 'Rename', run: () => setEditRequest({ row: 0, col }) });
+    }
+    items.push({ label: 'Insert Left', run: () => sendOp({ type: 'insertColumn', at: col }) });
+    items.push({ label: 'Insert Right', run: () => sendOp({ type: 'insertColumn', at: col + 1 }) });
+    items.push({ label: 'Delete', run: () => sendOp({ type: 'deleteColumn', col }) });
+    setMenu({ x, y, items });
+  };
+
   if (screen === 'loading') {
     return <div className="csv-screen">Loading…</div>;
   }
@@ -229,7 +273,20 @@ export default function App() {
         onToggleHeader={() => setHasHeader(value => !value)}
         onOpenAsText={() => post({ type: 'openAsText' })}
       >
-        {/* The search and replace controls are added here in Task 9. */}
+        <FindReplace
+          query={query}
+          onQuery={setQuery}
+          matchCase={matchCase}
+          onMatchCase={setMatchCase}
+          scopeCol={scopeCol}
+          onScopeCol={setScopeCol}
+          headers={headers}
+          replaceText={replaceText}
+          onReplaceText={setReplaceText}
+          onReplaceAll={onReplaceAll}
+          readOnly={readOnly}
+          inputRef={searchRef}
+        />
       </Toolbar>
 
       {readOnly ? <div className="csv-banner">{readOnlyReason}</div> : null}
@@ -250,10 +307,14 @@ export default function App() {
         onSelectRows={setSelectedRows}
         onSetCell={(row, col, value) => sendOp({ type: 'setCell', row, col, value })}
         onHeaderClick={onHeaderClick}
-        onRowMenu={() => undefined}
-        onHeaderMenu={() => undefined}
+        onRowMenu={openRowMenu}
+        onHeaderMenu={openHeaderMenu}
         onError={pushToast}
       />
+
+      {menu ? (
+        <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />
+      ) : null}
 
       <div className="csv-toasts">
         {toasts.map(toast => (

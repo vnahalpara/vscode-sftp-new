@@ -297,3 +297,75 @@ body {
   border-radius: 3px;
   background: var(--csv-bg);
 }
+
+/* ---- find & replace --------------------------------------------------- */
+.csv-find {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.csv-text,
+.csv-select {
+  background: var(--csv-input-bg);
+  color: var(--csv-input-fg);
+  border: 1px solid var(--csv-border);
+  border-radius: 3px;
+  height: 22px;
+  padding: 0 6px;
+  font: inherit;
+  box-sizing: border-box;
+}
+
+.csv-text {
+  width: 150px;
+}
+
+.csv-text:focus,
+.csv-select:focus {
+  outline: 1px solid var(--csv-focus);
+  outline-offset: -1px;
+}
+
+.csv-select {
+  max-width: 150px;
+}
+
+.csv-case {
+  min-width: 28px;
+  padding: 0 6px;
+}
+
+.csv-case.csv-on {
+  background: var(--csv-primary-bg);
+  color: var(--csv-primary-fg);
+}
+
+/* ---- context menu ----------------------------------------------------- */
+.csv-menu {
+  position: fixed;
+  z-index: 20;
+  min-width: 150px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+  border: 1px solid var(--csv-border);
+  border-radius: 4px;
+  background: var(--vscode-menu-background, var(--csv-bg));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.csv-menu-item {
+  background: none;
+  border: none;
+  color: var(--vscode-menu-foreground, var(--csv-fg));
+  text-align: left;
+  padding: 4px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.csv-menu-item:hover {
+  background: var(--vscode-menu-selectionBackground, var(--csv-active));
+  color: var(--vscode-menu-selectionForeground, var(--csv-active-fg));
+}

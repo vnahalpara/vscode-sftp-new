@@ -411,7 +411,33 @@ export default function Grid(props: GridProps) {
                   props.onHeaderMenu(col, event.clientX, event.clientY);
                 }}
               >
-                <span className="csv-header-label">{headers[col]}</span>
+                {props.hasHeader && editing !== null && editing.row === 0 && editing.col === col ? (
+                  // Rename edits row 0 itself, which with the header toggle on
+                  // is drawn here rather than in the body.
+                  <input
+                    className="csv-input"
+                    autoFocus
+                    value={editing.value}
+                    onChange={event => setEditingCell({ row: 0, col, value: event.target.value })}
+                    onKeyDown={onInputKeyDown}
+                    onBlur={() => {
+                      if (suppressBlurRef.current) {
+                        suppressBlurRef.current = false;
+                        return;
+                      }
+                      const current = editingRef.current;
+                      // Only the input that owns the current edit may commit
+                      // it; see the body cell's onBlur.
+                      if (current && current.row === 0 && current.col === col) {
+                        commitEditing(current, 'none');
+                      }
+                    }}
+                    onMouseDown={event => event.stopPropagation()}
+                    onClick={event => event.stopPropagation()}
+                  />
+                ) : (
+                  <span className="csv-header-label">{headers[col]}</span>
+                )}
                 {sort && sort.col === col ? (
                   <span className="csv-sort">{sort.direction === 'asc' ? '▲' : '▼'}</span>
                 ) : null}
@@ -485,7 +511,13 @@ export default function Grid(props: GridProps) {
                                 return;
                               }
                               const current = editingRef.current;
-                              if (current) {
+                              // The editor may already have moved on -- Rename
+                              // opens the header cell while a body cell is
+                              // still being edited -- and only the input that
+                              // owns the current edit may commit it. Otherwise
+                              // this blur would write the old value into the
+                              // new cell and close its editor.
+                              if (current && current.row === row && current.col === col) {
                                 commitEditing(current, 'none');
                               }
                             }}
