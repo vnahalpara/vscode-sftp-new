@@ -6,7 +6,7 @@ import logger from '../../logger';
 import { detectFormat } from './format';
 import { parseCsv } from './parse';
 import { serializeCsv } from './serialize';
-import { applyOp, tableRows } from './model';
+import { applyOp, tableRows, tableWidth } from './model';
 import { CsvOp, HostMessage, WebviewMessage } from './protocol';
 import { CsvTable } from './types';
 import {
@@ -15,6 +15,7 @@ import {
   isStaleOp,
   isTooLarge,
   readOnlyReasonFor,
+  validateOp,
 } from './editorLogic';
 import { buildCsvShell } from './shell';
 
@@ -22,6 +23,13 @@ import { buildCsvShell } from './shell';
 // the `activeCustomEditorId` when-clauses on the tab menus, so a change here
 // must be mirrored there.
 export const CSV_EDITOR_ID = 'sftp.csvEditor';
+
+// How long an outside change is left to settle before the grid re-reads the
+// file. A text editor open beside the grid fires a change event per keystroke,
+// and every resync re-parses the whole file and deep-copies every row into a
+// message -- unthrottled, that is the slowest thing this editor can be asked
+// to do. Short enough that nobody sees the grid lag behind.
+const RESYNC_DEBOUNCE_MS = 150;
 
 // What the provider keeps for one open document. Shared by every panel
 // showing that document, and dropped when the last one closes.
@@ -34,6 +42,12 @@ interface DocumentModel {
   // The tail of this document's op queue. Ops are chained onto it so only one
   // is ever between `applyOp` and its applyEdit; see the `op` branch below.
   inFlight: Promise<void>;
+  // An outside change has landed that the model has not been re-read for yet,
+  // and the timer that will do it. `dirty` is the load-bearing half: the
+  // reparse may be late, but it must never be SKIPPED, so every path that
+  // touches the model flushes first.
+  dirty: boolean;
+  resyncTimer: NodeJS.Timer | null;
 }
 
 // A file the grid will refuse is not worth parsing -- the rows would be built
@@ -143,6 +157,31 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
       model.table = readTable(text, path.basename(document.uri.path));
     };
 
+    // Bring the model up to date with the document NOW, cancelling any pending
+    // debounce. Every path that reads or writes `model.table` calls this
+    // first: an op applied to a stale model would serialize the stale table
+    // over whatever changed the file underneath us.
+    const flush = () => {
+      if (model.resyncTimer !== null) {
+        clearTimeout(model.resyncTimer);
+        model.resyncTimer = null;
+      }
+      if (!model.dirty) {
+        return;
+      }
+      model.dirty = false;
+      reparse();
+      sendTable();
+    };
+
+    const scheduleResync = () => {
+      model.dirty = true;
+      if (model.resyncTimer !== null) {
+        clearTimeout(model.resyncTimer);
+      }
+      model.resyncTimer = setTimeout(flush, RESYNC_DEBOUNCE_MS);
+    };
+
     const changeSub = vscode.workspace.onDidChangeTextDocument(event => {
       if (event.document.uri.toString() !== key) {
         return;
@@ -157,18 +196,25 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
         return;
       }
       // Undo, redo, a side-by-side text editor, a download from the remote.
-      reparse();
-      sendTable();
+      // Only marked here; the reparse itself is debounced. The echo check
+      // above is NOT -- the mark is consumed once per event, so deferring it
+      // would leave a stale mark for the next event to match.
+      scheduleResync();
     });
 
     const fail = (error: unknown) => {
-      // A rejection is not necessarily an Error -- a thrown string from the
-      // webview boundary would otherwise make `error.message` undefined and
-      // the grid show an empty complaint.
-      const e = error instanceof Error ? error : new Error(String(error));
-      logger.error(e, 'csv editor message');
-      send({ type: 'error', message: e.message });
-      sendTable();
+      try {
+        // A rejection is not necessarily an Error -- a thrown string from the
+        // webview boundary would otherwise make `error.message` undefined and
+        // the grid show an empty complaint.
+        const e = error instanceof Error ? error : new Error(String(error));
+        logger.error(e, 'csv editor message');
+        send({ type: 'error', message: e.message });
+        sendTable();
+      } catch {
+        // fail is the tail of the op chain, and postMessage on a disposed
+        // panel throws. There is nothing left to report the failure to.
+      }
     };
 
     const messageSub = panel.webview.onDidReceiveMessage((message: WebviewMessage) => {
@@ -179,9 +225,10 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
         if (message.type === 'ready') {
           // Re-parse rather than trusting the model: a webview is recreated
           // on some theme and settings changes and sends `ready` again, and
-          // the document may have moved on in between.
-          reparse();
-          sendTable();
+          // the document may have moved on in between. Done as a flush so a
+          // pending debounce timer cannot fire a second resync behind it.
+          model.dirty = true;
+          flush();
           return;
         }
         if (message.type === 'openAsText') {
@@ -218,11 +265,15 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
                 op,
                 send,
                 sendTable,
-                reparse,
+                flush,
                 readOnlyReason
               )
             )
-            .catch(fail);
+            .catch(fail)
+            // fail is defensive, not infallible. A rejected `inFlight` would
+            // make every later op for this document skip its `.then`, so the
+            // grid would sit unresponsive for the rest of the session.
+            .catch(() => undefined);
         }
       } catch (error) {
         fail(error);
@@ -232,6 +283,12 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
     panel.onDidDispose(() => {
       changeSub.dispose();
       messageSub.dispose();
+      // The pending callback closes over THIS panel's sendTable, so it would
+      // post into a disposed webview.
+      if (model.resyncTimer !== null) {
+        clearTimeout(model.resyncTimer);
+        model.resyncTimer = null;
+      }
       this.release(key);
     });
   }
@@ -247,6 +304,8 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
       lastWritten: null,
       panels: 1,
       inFlight: Promise.resolve(),
+      dirty: false,
+      resyncTimer: null,
     };
     this.models.set(key, model);
     return model;
@@ -270,9 +329,13 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
     op: CsvOp,
     send: (message: HostMessage) => void,
     sendTable: () => void,
-    reparse: () => void,
+    flush: () => void,
     readOnlyReason: string | undefined
   ): Promise<void> {
+    // FIRST, before every other check: the model must describe the document as
+    // it is right now. Applying an op to a model that is one debounce behind
+    // would serialize the stale table over the change that made it stale.
+    flush();
     if (isTooLarge(document.getText().length)) {
       // Defence in depth. A grid told `tooLarge` shows no rows and so should
       // never send an op, but the model behind an over-limit document is the
@@ -294,7 +357,15 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
       return;
     }
 
-    const next = applyOp(model.table, op);
+    // The grid is ours, but its messages are not trusted: see validateOp.
+    const checked = validateOp(op, model.table.rows.length, tableWidth(model.table));
+    if (typeof checked === 'string') {
+      send({ type: 'error', message: checked });
+      sendTable();
+      return;
+    }
+
+    const next = applyOp(model.table, checked);
     const text = serializeCsv(next);
     if (text === document.getText()) {
       // A no-op edit. Skipping the WorkspaceEdit avoids an undo step that
@@ -327,8 +398,13 @@ export class CsvEditorProvider implements vscode.CustomTextEditorProvider {
       // keeping `next` here would quietly revert that change, because the next
       // op would pass isStaleOp against the new version and then be serialized
       // from this stale table.
-      reparse();
-      sendTable();
+      //
+      // The mark goes first: this text is not in the document any more, so no
+      // change event can be its echo, and leaving it armed would let a later
+      // change that happens to produce it be swallowed as one.
+      model.lastWritten = null;
+      model.dirty = true;
+      flush();
       return;
     }
     model.table = next;
