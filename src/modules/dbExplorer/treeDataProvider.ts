@@ -3,14 +3,18 @@ import { getAllFileService } from '../serviceManager';
 import { getDbClient } from '../../core/dbConnectionManager';
 import { DatabaseConfig } from '../../core/dbClient';
 import { COMMAND_DB_OPEN_TABLE } from '../../constants';
+import { groupByWorkspaceFolder, shouldGroup } from '../explorerGrouping';
+import { workspaceFolderRecords } from '../workspaceFolders';
 import logger from '../../logger';
 
-export type DbNodeKind = 'connection' | 'database' | 'table' | 'column';
+export type DbNodeKind = 'workspace' | 'connection' | 'database' | 'table' | 'column';
 
 export interface DbNode {
   kind: DbNodeKind;
   label: string;
   description?: string;
+  // set on 'workspace' and 'connection': the containing workspace folder's path
+  workspaceFolder?: string;
   // carried down the tree so any node can reach its connection/database
   fileService?: any;
   config?: any;
@@ -37,14 +41,21 @@ export default class DbTreeDataProvider implements vscode.TreeDataProvider<DbNod
   }
 
   getTreeItem(node: DbNode): vscode.TreeItem {
-    const collapsible =
-      node.kind === 'column'
-        ? vscode.TreeItemCollapsibleState.None
-        : vscode.TreeItemCollapsibleState.Collapsed;
+    let collapsible: vscode.TreeItemCollapsibleState;
+    if (node.kind === 'column') {
+      collapsible = vscode.TreeItemCollapsibleState.None;
+    } else if (node.kind === 'workspace') {
+      collapsible = vscode.TreeItemCollapsibleState.Expanded;
+    } else {
+      collapsible = vscode.TreeItemCollapsibleState.Collapsed;
+    }
     const item = new vscode.TreeItem(node.label, collapsible);
     item.description = node.description;
     item.contextValue = node.kind;
     switch (node.kind) {
+      case 'workspace':
+        item.iconPath = themeIcon('root-folder');
+        break;
       case 'connection':
         item.iconPath = themeIcon('server-environment');
         break;
@@ -64,9 +75,13 @@ export default class DbTreeDataProvider implements vscode.TreeDataProvider<DbNod
 
   async getChildren(node?: DbNode): Promise<DbNode[]> {
     if (!node) {
-      return this._connections();
+      return this._topLevel();
     }
     switch (node.kind) {
+      case 'workspace':
+        return this._connections().filter(
+          connection => connection.workspaceFolder === node.workspaceFolder
+        );
       case 'connection':
         return this._databases(node);
       case 'database':
@@ -76,6 +91,24 @@ export default class DbTreeDataProvider implements vscode.TreeDataProvider<DbNod
       default:
         return [];
     }
+  }
+
+  private _topLevel(): DbNode[] {
+    const connections = this._connections();
+    const records = workspaceFolderRecords();
+    if (!shouldGroup(records)) {
+      return connections;
+    }
+
+    return groupByWorkspaceFolder(
+      connections,
+      connection => connection.workspaceFolder || '',
+      records
+    ).map(group => ({
+      kind: 'workspace' as DbNodeKind,
+      label: group.folder.name,
+      workspaceFolder: group.folder.fsPath,
+    }));
   }
 
   private _connections(): DbNode[] {
@@ -94,6 +127,7 @@ export default class DbTreeDataProvider implements vscode.TreeDataProvider<DbNod
         kind: 'connection',
         label: config.name || config.host,
         description: config.host,
+        workspaceFolder: fileService.workspaceFolder,
         fileService,
         config,
       });

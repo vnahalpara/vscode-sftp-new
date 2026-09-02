@@ -1,2 +1,8 @@
 export { default } from './explorer';
-export { ExplorerItem, ExplorerRoot } from './treeDataProvider';
+export {
+  ExplorerItem,
+  ExplorerRoot,
+  ExplorerChild,
+  ExplorerGroup,
+  isExplorerGroup,
+} from './treeDataProvider';

@@ -15,6 +15,9 @@ import {
 } from '../../constants';
 import { getAllFileService } from '../serviceManager';
 import { getExtensionSetting } from '../ext';
+import { relativeConfigRootLabel } from '../configPaths';
+import { groupByWorkspaceFolder, shouldGroup } from '../explorerGrouping';
+import { workspaceFolderRecords } from '../workspaceFolders';
 import { sizeDescription } from './sizeDescription';
 
 type Id = number;
@@ -40,7 +43,7 @@ function makePreivewUrl(uri: vscode.Uri) {
   });
 }
 
-interface ExplorerChild {
+export interface ExplorerChild {
   resource: Resource;
   isDirectory: boolean;
   size?: number;
@@ -54,9 +57,34 @@ export interface ExplorerRoot extends ExplorerChild {
   };
 }
 
-export type ExplorerItem = ExplorerRoot | ExplorerChild;
+// A workspace folder heading. It has no remote resource of its own, which is
+// why every place that reaches for `.resource` has to narrow it away first.
+export interface ExplorerGroup {
+  kind: 'group';
+  workspaceFolder: vscode.WorkspaceFolder;
+  isDirectory: true;
+}
 
-function dirFirstSort(fileA: ExplorerItem, fileB: ExplorerItem) {
+export type ExplorerItem = ExplorerGroup | ExplorerRoot | ExplorerChild;
+
+export function isExplorerGroup(item: ExplorerItem): item is ExplorerGroup {
+  return (item as ExplorerGroup).kind === 'group';
+}
+
+// @types/vscode marks the ThemeIcon(id) constructor public from 1.45; the cast
+// mirrors dbExplorer's so both trees build icons the same way.
+function themeIcon(id: string): vscode.ThemeIcon {
+  return new (vscode.ThemeIcon as any)(id);
+}
+
+function configRootDescription(root: ExplorerRoot): string | undefined {
+  const fileService = root.explorerContext.fileService;
+  // `workspace` is the config root; `workspaceFolder` is the folder it sits in.
+  const label = relativeConfigRootLabel(fileService.workspaceFolder, fileService.workspace);
+  return label === '' ? undefined : label;
+}
+
+function dirFirstSort(fileA: ExplorerChild, fileB: ExplorerChild) {
   if (fileA.isDirectory === fileB.isDirectory) {
     return fileA.resource.fsPath.localeCompare(fileB.resource.fsPath);
   }
@@ -68,6 +96,7 @@ export default class RemoteTreeData
   implements vscode.TreeDataProvider<ExplorerItem>, vscode.TextDocumentContentProvider {
   private _roots: ExplorerRoot[] | null;
   private _rootsMap: Map<Id, ExplorerRoot> | null;
+  private _groups: Map<string, ExplorerGroup> | null;
   private _map: Map<vscode.Uri['query'], ExplorerItem>;
 
   private _onDidChangeFolder: vscode.EventEmitter<ExplorerItem | undefined> = new vscode.EventEmitter<
@@ -83,6 +112,7 @@ export default class RemoteTreeData
       // clear cache
       this._roots = null;
       this._rootsMap = null;
+      this._groups = null;
 
       // undefined means "the whole tree changed" to VS Code -- the caches
       // were just cleared, so that is exactly the message. The emitter is typed
@@ -91,14 +121,23 @@ export default class RemoteTreeData
       return;
     }
 
+    // A group owns no resource; firing it is enough to have VS Code re-ask for
+    // its children.
+    if (isExplorerGroup(item)) {
+      this._onDidChangeFolder.fire(item);
+      return;
+    }
+
     if (item.isDirectory) {
       this._onDidChangeFolder.fire(item);
 
       // refresh top level files as well
       const children = await this.getChildren(item);
-      children
-        .filter(i => !i.isDirectory)
-        .forEach(i => this._onDidChangeFile.fire(makePreivewUrl(i.resource.uri)));
+      children.forEach(child => {
+        if (!isExplorerGroup(child) && !child.isDirectory) {
+          this._onDidChangeFile.fire(makePreivewUrl(child.resource.uri));
+        }
+      });
     } else {
       const parent = await this.getParent(item);
       if (parent) {
@@ -109,6 +148,15 @@ export default class RemoteTreeData
   }
 
   getTreeItem(item: ExplorerItem): vscode.TreeItem {
+    if (isExplorerGroup(item)) {
+      return {
+        label: item.workspaceFolder.name,
+        iconPath: themeIcon('root-folder'),
+        contextValue: 'workspaceGroup',
+        collapsibleState: vscode.TreeItemCollapsibleState.Expanded,
+      };
+    }
+
     const isRoot = (item as ExplorerRoot).explorerContext !== undefined;
     let customLabel;
     if (isRoot) {
@@ -120,10 +168,15 @@ export default class RemoteTreeData
     return {
       label: customLabel,
       resourceUri: item.resource.uri,
-      description: sizeDescription(
-        { isDirectory: item.isDirectory, isRoot, size: (item as ExplorerChild).size },
-        getExtensionSetting().showSizeInRemoteExplorer
-      ),
+      // A root says WHERE its config lives -- empty for a root-level one.
+      // sizeDescription has always returned undefined for a root, so there is
+      // nothing of it to keep here.
+      description: isRoot
+        ? configRootDescription(item as ExplorerRoot)
+        : sizeDescription(
+            { isDirectory: item.isDirectory, isRoot, size: (item as ExplorerChild).size },
+            getExtensionSetting().showSizeInRemoteExplorer
+          ),
       collapsibleState: item.isDirectory ? vscode.TreeItemCollapsibleState.Collapsed : undefined,
       contextValue: isRoot ? 'root' : item.isDirectory ? 'folder' : 'file',
       command: item.isDirectory
@@ -140,7 +193,14 @@ export default class RemoteTreeData
 
   async getChildren(item?: ExplorerItem): Promise<ExplorerItem[]> {
     if (!item) {
-      return this._getRoots();
+      return this._getTopLevel();
+    }
+
+    if (isExplorerGroup(item)) {
+      const folderPath = item.workspaceFolder.uri.fsPath;
+      return this._getRoots().filter(
+        root => root.explorerContext.fileService.workspaceFolder === folderPath
+      );
     }
 
     const root = this.findRoot(item.resource.uri);
@@ -162,34 +222,51 @@ export default class RemoteTreeData
       return !ignore.ignores(relativePath);
     }
 
-    return fileEntries
-      .filter(filterFile)
-      .map(file => {
-        const isDirectory = file.type === FileType.Directory;
-        const newResource = UResource.updateResource(item.resource, {
-          remotePath: file.fspath,
-        });
-        const mapItem = this._map.get(newResource.uri.query);
-        if (mapItem) {
-          // keep the size current across refreshes (the cache persists items)
-          (mapItem as ExplorerChild).size = file.size;
-          return mapItem;
-        } else {
-          const newItem = {
-            resource: UResource.updateResource(item.resource, {
-              remotePath: file.fspath,
-            }),
-            isDirectory,
-            size: file.size,
-          };
-          this._map.set(newItem.resource.uri.query, newItem);
-          return newItem;
-        }
-      })
-      .sort(dirFirstSort);
+    // Annotated, so the cached-item branch is checked against ExplorerChild
+    // rather than widening the array to ExplorerItem and pushing a group into
+    // dirFirstSort's parameter type. Nothing a remote listing produces is a
+    // group.
+    const children: ExplorerChild[] = fileEntries.filter(filterFile).map(file => {
+      const isDirectory = file.type === FileType.Directory;
+      const newResource = UResource.updateResource(item.resource, {
+        remotePath: file.fspath,
+      });
+      const mapItem = this._map.get(newResource.uri.query);
+      if (mapItem) {
+        // keep the size current across refreshes (the cache persists items)
+        (mapItem as ExplorerChild).size = file.size;
+        return mapItem as ExplorerChild;
+      } else {
+        const newItem = {
+          resource: UResource.updateResource(item.resource, {
+            remotePath: file.fspath,
+          }),
+          isDirectory,
+          size: file.size,
+        };
+        this._map.set(newItem.resource.uri.query, newItem);
+        return newItem;
+      }
+    });
+
+    return children.sort(dirFirstSort);
   }
 
-  async getParent(item: ExplorerChild): Promise<ExplorerItem> {
+  async getParent(item: ExplorerItem): Promise<ExplorerItem | undefined> {
+    if (isExplorerGroup(item)) {
+      return undefined;
+    }
+
+    if ((item as ExplorerRoot).explorerContext !== undefined) {
+      const records = workspaceFolderRecords();
+      if (!shouldGroup(records)) {
+        return undefined;
+      }
+      const folderPath = (item as ExplorerRoot).explorerContext.fileService.workspaceFolder;
+      const owner = records.filter(record => record.fsPath === folderPath)[0];
+      return owner ? this._groupFor(owner.workspaceFolder) : undefined;
+    }
+
     const resourceUri = item.resource.uri;
     const root = this.findRoot(resourceUri);
     if (!root) {
@@ -254,7 +331,7 @@ export default class RemoteTreeData
   }
 
   showItem(item: ExplorerItem): void {
-    if (item.isDirectory) {
+    if (isExplorerGroup(item) || item.isDirectory) {
       return;
     }
 
@@ -266,6 +343,41 @@ export default class RemoteTreeData
     // included -- and falls through to the text editor for everything else,
     // which is exactly what showTextDocument did.
     vscode.commands.executeCommand('vscode.open', makePreivewUrl(item.resource.uri));
+  }
+
+  private _getTopLevel(): ExplorerItem[] {
+    const roots = this._getRoots();
+    const records = workspaceFolderRecords();
+    if (!shouldGroup(records)) {
+      return roots;
+    }
+
+    return groupByWorkspaceFolder(
+      roots,
+      root => root.explorerContext.fileService.workspaceFolder,
+      records
+    ).map(group => this._groupFor(group.folder.workspaceFolder));
+  }
+
+  // Cached because VS Code identifies tree nodes by object identity: getParent
+  // has to hand back the same group object getChildren produced, or reveal and
+  // targeted refresh miss it.
+  private _groupFor(folder: vscode.WorkspaceFolder): ExplorerGroup {
+    if (!this._groups) {
+      this._groups = new Map();
+    }
+    const key = folder.uri.fsPath;
+    const existing = this._groups.get(key);
+    if (existing) {
+      return existing;
+    }
+    const group: ExplorerGroup = {
+      kind: 'group',
+      workspaceFolder: folder,
+      isDirectory: true,
+    };
+    this._groups.set(key, group);
+    return group;
   }
 
   private _getRoots(): ExplorerRoot[] {

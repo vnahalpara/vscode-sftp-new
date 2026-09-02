@@ -8,7 +8,7 @@ import { UResource } from '../../core';
 import { toRemotePath } from '../../helper';
 import { REMOTE_SCHEME } from '../../constants';
 import { getFileService } from '../serviceManager';
-import RemoteTreeDataProvider, { ExplorerItem } from './treeDataProvider';
+import RemoteTreeDataProvider, { ExplorerItem, isExplorerGroup } from './treeDataProvider';
 
 export default class RemoteExplorer {
   private _explorerView: vscode.TreeView<ExplorerItem>;
@@ -39,7 +39,7 @@ export default class RemoteExplorer {
   }
 
   refresh(item?: ExplorerItem) {
-    if (item && !UResource.isRemote(item.resource.uri)) {
+    if (item && !isExplorerGroup(item) && !UResource.isRemote(item.resource.uri)) {
       const uri = item.resource.uri;
       const fileService = getFileService(uri);
       if (!fileService) {
@@ -74,10 +74,13 @@ export default class RemoteExplorer {
   }
 
   private _refreshSelection() {
-    if (this._explorerView.selection.length) {
-      this._explorerView.selection.forEach(item => this.refresh(item));
-    } else {
+    const selection = this._explorerView.selection;
+    // A group stands for the whole folder, and there is nothing under it this
+    // view could refresh piecemeal -- so refresh the tree, as the spec asks.
+    if (!selection.length || selection.some(isExplorerGroup)) {
       this.refresh();
+      return;
     }
+    selection.forEach(item => this.refresh(item));
   }
 }

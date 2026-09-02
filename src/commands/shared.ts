@@ -2,7 +2,7 @@ import * as path from 'path';
 import { Uri, window } from 'vscode';
 import { FileType } from '../core';
 import { getAllFileService } from '../modules/serviceManager';
-import { ExplorerItem } from '../modules/remoteExplorer';
+import { ExplorerChild } from '../modules/remoteExplorer';
 import { getActiveTextEditor } from '../host';
 import { listFiles, toLocalPath, simplifyPath } from '../helper';
 
@@ -125,9 +125,9 @@ export function uriFromExplorerContextOrEditorContext(item, items): undefined | 
     } else {
       return item;
     }
-  } else if ((item as ExplorerItem).resource) {
+  } else if ((item as ExplorerChild).resource) {
     // from remote explorer
-    if (Array.isArray(items) && (items[0] as ExplorerItem).resource) {
+    if (Array.isArray(items) && (items[0] as ExplorerChild).resource) {
       // multi-select in remote explorer
       return items.map(_ => _.resource.uri);
     } else {
@@ -149,7 +149,7 @@ export function selectFolderFallbackToConfigContext(item, items): Promise<undefi
       } else {
         return Promise.resolve(item);
       }
-    } else if ((item as ExplorerItem).resource) {
+    } else if ((item as ExplorerChild).resource) {
       // from remote explorer
       return Promise.resolve(item.resource.uri);
     }
