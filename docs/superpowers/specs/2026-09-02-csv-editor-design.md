@@ -82,10 +82,11 @@ the grid pads them visually with empty cells.
 
 ### Format detection (`format.ts`)
 
-- **Delimiter**: over the first 50 non-empty lines, count each candidate (`,` `;` `\t` `|`)
-  outside quotes on each line. For each candidate take the most common per-line count (its
-  mode); the candidate's score is the number of lines that have exactly that count, and a mode
-  of 0 scores 0. Pick the highest score; tie → the higher mode; still tied → the order
+- **Delimiter**: over the first 50 non-empty records (a record is one logical CSV row, which
+  may span several physical lines when a quoted cell contains a newline), count each candidate
+  (`,` `;` `\t` `|`) outside quotes in each record. For each candidate take the most common
+  per-record count (its mode); the candidate's score is the number of records that have exactly
+  that count, and a mode of 0 scores 0. Pick the highest score; tie → the higher mode; still tied → the order
   `,` `;` `\t` `|`. Every score 0: comma, or tab when the file name ends in `.tsv`.
 - **EOL**: the first line ending found; `\n` if none.
 - **finalNewline**: text ends with the EOL.

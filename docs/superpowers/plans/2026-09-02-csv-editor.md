@@ -88,15 +88,20 @@ a `.catch` on that call that does exactly what the `catch` block does: log via `
 send `{ type: 'error', message }`, then `sendTable()`. Leave the synchronous `try`/`catch` in
 place for the other branches.
 
-**A3 — Task 2, `format.ts`, `detectDelimiter`: do not record a line that began inside a quoted
-field.** Capture `const startedInQuotes = inQuotes;` at the top of each line's scan, and change
-the skip condition to `if (line.length === 0 || startedInQuotes) { continue; }` (still after the
-scan, so the quote state carries forward). A continuation line of a multi-line quoted cell has a
-count of 0 (or a partial count for the part after the closing quote) and is not evidence about
-the delimiter; without this, a file whose every row has a two-line address halves the real
-delimiter's score. Add one test to `format-test.ts`: a file where every data row has an embedded
-newline inside a quoted cell still detects the comma, and the continuation lines do not count
-toward the 50-line sample.
+**A3 (revised after Task 2 implementation) — Task 2, `format.ts`, `detectDelimiter`: count per
+logical record, not per physical line.** The first version of this amendment said "skip a line that
+began inside a quoted field". That drops the delimiters of a record whose FIRST column is
+multi-line (`"line one\nline two";x` — the `;` is on a continuation line), so such a file fell back
+to comma. The rule that satisfies the rationale in both directions: a record is the run of physical
+lines up to and including the first line that ends with `inQuotes === false`; a record's count for
+each candidate is the SUM of that candidate's outside-quotes occurrences across its physical lines;
+a record whose text is empty (a blank line) is skipped; the sample is the first 50 records. The
+quote state still carries across lines. Tests in `format-test.ts` must cover: the brief's original
+fixture with the multi-line cell in the FIRST column (`'a;b\n"line one\nline two";x\n"p\nq";y\n'`
+detects `;`); the same with the multi-line cell in the LAST column (detects `;`); and that
+continuation lines do not count toward the 50-record sample (a file whose 50 records each span two
+lines still detects its delimiter from all 50, and one whose delimiter only appears after record 50
+is not seen). Ruling recorded in the ledger.
 
 **A4 — Task 6, `editor.ts`, `acquire()`: skip parsing when the text is over the limit.** A file
 the grid will refuse should not be parsed at open just to be thrown away; when
