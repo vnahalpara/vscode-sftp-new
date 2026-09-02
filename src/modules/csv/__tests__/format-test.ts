@@ -36,7 +36,12 @@ describe('detectDelimiter', () => {
     expect(detectDelimiter(text, 'x.csv')).toBe(';');
   });
 
-  it('finds the delimiter on a file with newlines inside quoted cells', () => {
+  it('carries quote state across lines so an embedded newline does not hide the delimiter', () => {
+    const text = 'a;b\n"line one\nline two";x\n"p\nq";y\n';
+    expect(detectDelimiter(text, 'x.csv')).toBe(';');
+  });
+
+  it('finds the delimiter when the multi-line cell is the last column', () => {
     const text = 'a;b\nx;"line one\nline two"\ny;"p\nq"\n';
     expect(detectDelimiter(text, 'x.csv')).toBe(';');
   });
@@ -68,17 +73,29 @@ describe('detectDelimiter', () => {
     expect(detectDelimiter('a,b,c\n1,2\n3,4,5,6\n', 'x.csv')).toBe(',');
   });
 
-  it('does not spend the sample on the continuation lines of multi-line cells', () => {
-    // Every row spans two physical lines and only the first carries evidence.
-    // The first 25 rows read as a semicolon file and the next 25 as a comma
-    // file, so the comma only wins if the 50-line sample reaches all 50 rows.
-    // Sampling the continuations would stop at row 25 and answer ';'.
+  it('samples 50 records even when every record spans two physical lines', () => {
+    // 100 physical lines. The first 25 records carry a comma as well, so the
+    // semicolon only wins once records 26-50 are sampled -- which per-line
+    // counting never reaches, because its budget runs out at record 25.
     let text = '';
     for (let i = 0; i < 25; i += 1) {
-      text += 'x;"p\nq"\n';
+      text += 'a,b;"p\nq"\n';
     }
     for (let i = 0; i < 25; i += 1) {
-      text += 'a,b,"c\nd"\n';
+      text += 'a;"p\nq"\n';
+    }
+    expect(detectDelimiter(text, 'x.csv')).toBe(';');
+  });
+
+  it('stops at 50 records, so a later delimiter cannot win', () => {
+    // 50 ragged comma records, then 50 semicolon records that would outscore
+    // them if the sampler ran past its budget.
+    let text = '';
+    for (let i = 0; i < 25; i += 1) {
+      text += 'a,b\na,b,c\n';
+    }
+    for (let i = 0; i < 50; i += 1) {
+      text += 'a;b\n';
     }
     expect(detectDelimiter(text, 'x.csv')).toBe(',');
   });

@@ -4,7 +4,7 @@ import { CsvFormat, Delimiter, DELIMITERS, Eol } from './types';
 // How much of the file the two detectors look at. Both are sampling
 // heuristics -- reading a 10MB export end to end twice to learn its delimiter
 // would be the slowest thing the editor does.
-const SAMPLE_LINES = 50;
+const SAMPLE_RECORDS = 50;
 const QUOTE_SCAN_ROWS = 1000;
 const QUOTE_SCAN_BYTES = 256 * 1024;
 
@@ -46,29 +46,28 @@ function modeOf(values: number[]): number {
   return best;
 }
 
-// Score each candidate over the first SAMPLE_LINES sampled lines: take the
-// most common per-line count, and score the candidate by how many lines hit
+// Score each candidate over the first SAMPLE_RECORDS records: take the most
+// common per-record count, and score the candidate by how many records hit
 // exactly that count. A mode of 0 means the character does not separate
 // anything, so it scores 0.
 //
-// The quote state is NOT reset per line. A quoted field may span lines, and
-// resetting would count the delimiters of every line after an embedded
-// newline as if they were inside quotes.
-//
-// A line that BEGAN inside quotes is scanned (to carry the state forward) but
-// not sampled: it is the tail of a multi-line cell, so its count is 0 or a
-// fragment, and letting it score would halve the real delimiter on any file
-// whose every row holds a two-line address.
+// Counting is per RECORD, not per physical line, and the quote state carries
+// across lines. A quoted cell may hold a newline, and a continuation line
+// carries either nothing or only the tail of its record: counting per line
+// halves the real delimiter's score, and misses it entirely when the
+// multi-line cell is the first column and every delimiter of the record sits
+// on a continuation line.
 export function detectDelimiter(text: string, fileName: string): Delimiter {
   const counts: number[][] = DELIMITERS.map(() => []);
   const lines = text.split(/\r\n|\n/);
   let inQuotes = false;
   let collected = 0;
+  let perRecord = DELIMITERS.map(() => 0);
+  let recordChars = 0;
 
-  for (let l = 0; l < lines.length && collected < SAMPLE_LINES; l += 1) {
+  for (let l = 0; l < lines.length && collected < SAMPLE_RECORDS; l += 1) {
     const line = lines[l];
-    const startedInQuotes = inQuotes;
-    const perLine = DELIMITERS.map(() => 0);
+    recordChars += line.length;
     for (let i = 0; i < line.length; i += 1) {
       const ch = line.charAt(i);
       if (ch === '"') {
@@ -80,16 +79,22 @@ export function detectDelimiter(text: string, fileName: string): Delimiter {
       }
       const d = delimiterIndex(ch);
       if (d !== -1) {
-        perLine[d] += 1;
+        perRecord[d] += 1;
       }
     }
-    if (line.length === 0 || startedInQuotes) {
-      continue;
+    if (inQuotes) {
+      continue; // the record runs on into the next line
     }
-    for (let d = 0; d < DELIMITERS.length; d += 1) {
-      counts[d].push(perLine[d]);
+    // An empty record is a blank line: no evidence, and it must not eat a
+    // slot in the sample.
+    if (recordChars > 0) {
+      for (let d = 0; d < DELIMITERS.length; d += 1) {
+        counts[d].push(perRecord[d]);
+      }
+      collected += 1;
     }
-    collected += 1;
+    perRecord = DELIMITERS.map(() => 0);
+    recordChars = 0;
   }
 
   let bestIndex = -1;
