@@ -538,6 +538,7 @@ You can see the full list of configuration options [here](https://github.com/Nat
     - [Simple](#simple)
     - [Profiles](#profiles)
     - [Multiple Context](#multiple-context)
+    - [Nested sftp.json files](#nested-sftpjson-files)
     - [Connection Hopping](#connection-hopping)
       - [Single Hop](#single-hop)
       - [Multiple Hop](#multiple-hop)
@@ -614,6 +615,60 @@ The context must **not be same**.
 ```
 
 _Note：_ `name` is required in this mode.
+
+### Nested sftp.json files
+A workspace folder can hold many projects, each with its own config. Every
+`.vscode/sftp.json` under a workspace folder is loaded, not just the one at the
+top:
+
+```
+DevServer/
+  site-one/.vscode/sftp.json
+  site-two/.vscode/sftp.json
+hostkicker/.vscode/sftp.json
+```
+
+Each file's own folder — the one holding its `.vscode` directory — is its
+**config root**. `context`, `privateKeyPath` and `ignoreFile` resolve against
+that folder, so a nested config is written exactly like a top-level one. Files
+inside that folder use that config; files elsewhere in the workspace folder use
+the workspace folder's own top-level config, if it has one.
+
+`sftp.configSearchDepth` (default `4`, maximum `10`) limits how many folder
+levels below each workspace folder are searched. `0` searches only the workspace
+folder itself, which is the behaviour before this feature. `node_modules`,
+`vendor`, `.git`, `dist`, `build`, `.cache` and `bower_components` are never
+searched, your own `files.exclude` setting does not apply to this search, and it
+stops at 500 results per workspace folder. **Reload the window after changing
+the setting.** The workspace folder's own `.vscode/sftp.json` is always loaded
+directly, whatever the setting says.
+
+Saving, creating or deleting one nested `sftp.json` in the editor reloads only
+that config's servers; the others keep running. A file deeper than the setting,
+or inside one of the skipped folders, is not loaded — saving a too-deep file
+says so once per session. A config changed outside the editor (a `git checkout`,
+say) is not picked up: reload the window. Removing a workspace folder unloads
+every server under it, nested ones included.
+
+Two configs that resolve to the same folder still collide, as two profiles
+always have: the later one wins, so give them different `context` values. The
+log names both files.
+
+With two or more workspace folders open, the SFTP Explorer and Databases views
+show one heading per folder, with that folder's servers inside; a folder with no
+server is not shown. With a single workspace folder the views look as they
+always have. In the SFTP Explorer each server row also shows, in grey, where its
+config root sits inside the folder — blank for a top-level config.
+
+To create a config for a nested project, right-click its folder in the file
+Explorer and choose **SFTP: Create Config Here**. It writes
+`<folder>/.vscode/sftp.json` from the template and opens it, or just opens the
+file if one is already there; from the Command Palette it asks you to pick a
+folder. A folder deeper than `sftp.configSearchDepth` gets a warning and the
+file anyway.
+
+_Note：_ a VS Code workspace folder nested inside another workspace folder is
+not supported here — the inner folder's configs would be found twice.
 
 ### Connection Hopping
 You can connect to a target server through a proxy with ssh protocol.

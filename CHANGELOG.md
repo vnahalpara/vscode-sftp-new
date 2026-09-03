@@ -1,3 +1,25 @@
+## 1.33.0 - 2026-09-03
+* New Feature : **Nested `sftp.json` files.** Every `.vscode/sftp.json` under a workspace folder
+  is now loaded, not just the one at the top, so a folder holding many projects gets a server per
+  project. Each file's own folder is its config root, so `context`, `privateKeyPath` and
+  `ignoreFile` resolve exactly as they do for a top-level config. `sftp.configSearchDepth`
+  (default 4, 0 = top level only, max 10) bounds the search, which skips `node_modules`, `vendor`,
+  `.git`, `dist`, `build`, `.cache` and `bower_components` -- your own `files.exclude` does not
+  apply -- and stops at 500 results per workspace folder; reload the window after changing it. The
+  workspace folder's own config is always read directly whatever the setting says, and a file that
+  fails to parse costs you that project only.
+* New Feature : **Grouped Explorer and Databases views.** With two or more workspace folders open,
+  both views show one heading per folder with that folder's servers inside, in workspace-folder
+  order, omitting folders with no server. A single-folder workspace is unchanged. In the SFTP
+  Explorer each server row now also says, in grey, where its config lives inside the folder.
+* New Feature : **SFTP: Create Config Here.** Right-click any folder in the file Explorer to
+  create (or open) its `.vscode/sftp.json`. A folder deeper than `sftp.configSearchDepth` is
+  created anyway, with a warning naming both numbers.
+* Fix : **a nested `sftp.json` save no longer replaces its neighbours.** The config handlers
+  resolved a saved file to its workspace folder and disposed every service of that folder, so
+  saving one project's config took out every sibling project's servers and resolved their paths
+  against the wrong folder. They now key on the saved file's own config root.
+
 ## 1.32.0 - 2026-09-03
 * New Feature : **CSV editor.** Every `.csv` and `.tsv` file now opens in a grid by default --
   sortable columns, a row-number gutter, in-place editing, row and column operations, and a search
