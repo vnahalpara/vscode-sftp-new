@@ -164,3 +164,57 @@ describe('looksLikePdf', () => {
     expect(looksLikePdf(p)).toBe(false);
   });
 });
+
+// `isCompletePdf` is what ends the wait for Chrome: Chrome 152 headless writes
+// the whole PDF and then never exits, so the finished file -- header AND the
+// `%%EOF` trailer that is written last -- is the only trustworthy signal that
+// the print is done.
+describe('isCompletePdf', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { isCompletePdf } = require('../pdf');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'complete-pdf-'));
+  const write = (name: string, body: string) => {
+    const p = path.join(dir, name);
+    fs.writeFileSync(p, body);
+    return p;
+  };
+
+  afterAll(() => {
+    require('fs-extra').removeSync(dir);
+  });
+
+  it('accepts a file with both the magic and the trailer', () => {
+    expect(isCompletePdf(write('done.pdf', '%PDF-1.4\n1 0 obj\nendobj\n%%EOF\n'))).toBe(true);
+  });
+
+  // The half-written state this exists to catch: Chrome has started the file
+  // but has not closed it, so reporting success would hand over a broken PDF.
+  it('rejects a file that starts like a PDF but has no trailer', () => {
+    expect(isCompletePdf(write('partial.pdf', '%PDF-1.4\n1 0 obj\nendobj\nstream'))).toBe(false);
+  });
+
+  it('accepts a trailer followed by blank lines and spaces', () => {
+    expect(isCompletePdf(write('padded.pdf', '%PDF-1.4\n1 0 obj\n%%EOF\n \r\n\n'))).toBe(true);
+  });
+
+  // `%%EOF` buried in the middle is not a finished document.
+  it('rejects a trailer that is not at the end', () => {
+    expect(isCompletePdf(write('early.pdf', '%PDF-1.4\n%%EOF\nand then more content here'))).toBe(false);
+  });
+
+  it('rejects a file too short to hold a header and a trailer', () => {
+    expect(isCompletePdf(write('short.pdf', '%PDF-1.4\n'))).toBe(false);
+  });
+
+  it('rejects a missing file', () => {
+    expect(isCompletePdf(path.join(dir, 'nope.pdf'))).toBe(false);
+  });
+
+  // Chrome saves its own error page under the requested .pdf name; a long
+  // enough HTML page would otherwise pass a length check.
+  it('rejects an HTML error page saved with a .pdf name', () => {
+    expect(isCompletePdf(write('fake.pdf', '<!doctype html><title>404 Not Found</title><body>no</body>'))).toBe(false);
+  });
+});

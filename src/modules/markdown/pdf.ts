@@ -1,4 +1,4 @@
-import { execFile } from 'child_process';
+import { ChildProcess, execFile, ExecFileOptions } from 'child_process';
 import * as fs from 'fs';
 import * as fse from 'fs-extra';
 import * as os from 'os';
@@ -155,6 +155,65 @@ export function looksLikePdf(p: string): boolean {
   }
 }
 
+// Whether the file at `p` is a FINISHED PDF: it starts with the `%PDF-` magic
+// and ends with the `%%EOF` trailer that closes every PDF. That trailer is
+// written last, so its presence is the signal that Chrome has finished the
+// document -- which is what lets an export stop waiting for a browser that has
+// done its job but not exited (see `renderPdf`).
+//
+// Only the first five and last sixteen bytes are read; a PDF can be tens of
+// megabytes and none of the middle answers this question. Sixteen bytes is
+// enough to find `%%EOF` past the trailing newline (or few) that writers leave
+// after it, which is why the tail is trimmed of trailing whitespace first.
+export function isCompletePdf(p: string): boolean {
+  try {
+    if (!fs.existsSync(p)) {
+      return false;
+    }
+    const size = fs.statSync(p).size;
+    if (size < 16) {
+      return false;
+    }
+    const fd = fs.openSync(p, 'r');
+    try {
+      const head = Buffer.alloc(5);
+      fs.readSync(fd, head, 0, 5, 0);
+      if (head.toString('latin1') !== '%PDF-') {
+        return false;
+      }
+      const tail = Buffer.alloc(16);
+      fs.readSync(fd, tail, 0, 16, size - 16);
+      return /%%EOF$/.test(tail.toString('latin1').replace(/[\r\n\t ]+$/, ''));
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+
+// Kills a spawned browser and the helper processes it forked. A negative PID
+// addresses the whole process group, which is why the child is spawned
+// detached; without it Chrome's renderer and GPU processes outlive the browser
+// process. Windows has no process groups to signal, and a child that has
+// already gone leaves the kill throwing ESRCH -- neither is worth failing an
+// export that has its PDF.
+function killTree(child: ChildProcess): void {
+  try {
+    if (process.platform !== 'win32') {
+      process.kill(-child.pid, 'SIGKILL');
+      return;
+    }
+  } catch {
+    /* fall through to the plain kill below */
+  }
+  try {
+    child.kill('SIGKILL');
+  } catch {
+    /* already gone */
+  }
+}
+
 // Renders `html` to a PDF at `pdfPath` through headless Chrome. Throws with a
 // message a user can act on -- naming the missing browser, or Chrome's own
 // stderr -- rather than a bare exit code.
@@ -166,7 +225,7 @@ export function looksLikePdf(p: string): boolean {
 export async function renderPdf(
   html: string,
   pdfPath: string,
-  opts: { chromium?: string; timeoutMs?: number } = {}
+  opts: { chromium?: string; timeoutMs?: number; pollMs?: number } = {}
 ): Promise<PdfResult> {
   const chromium =
     opts.chromium || findChromium(process.platform, os.homedir(), p => fs.existsSync(p));
@@ -185,42 +244,104 @@ export async function renderPdf(
     fs.mkdirSync(profileDir);
 
     await new Promise<void>((resolve, reject) => {
-      execFile(
+      // Chrome 152 headless writes the PDF in about a second and then never
+      // exits. Waiting for the process to end meant every export sat at the
+      // 90s timeout and only then reported success -- a ninety-second wait for
+      // a one-second job.
+      //
+      // So the finished FILE, not the finished process, is what ends the wait:
+      // it is the only signal Chrome gives that is actually reliable. The
+      // process is killed once the file is complete, and the timeout stays on
+      // only as a backstop for a Chrome that never writes anything.
+      let completed = false;
+      let poller: NodeJS.Timer | null = null;
+      let previousSize = -1;
+      const stopPolling = () => {
+        if (poller) {
+          clearInterval(poller);
+          poller = null;
+        }
+      };
+
+      const spawnOpts: ExecFileOptions = {
+        timeout: opts.timeoutMs || 90000,
+        windowsHide: true,
+        maxBuffer: 4 * 1024 * 1024,
+      };
+      // Its own process group, so the kill below takes Chrome's renderer and
+      // GPU helpers with it -- killing the browser process alone can leave
+      // them running and holding the profile directory open. Assigned through
+      // a cast because `detached` is missing from the @types/node v9 this repo
+      // pins, though Node has supported it since long before v9.
+      (spawnOpts as any).detached = process.platform !== 'win32';
+
+      const child = execFile(
         chromium,
         pdfArgs(htmlPath, pdfPath, profileDir),
-        { timeout: opts.timeoutMs || 90000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+        spawnOpts,
         (error, _stdout, stderr) => {
-          if (!error) {
-            resolve();
-            return;
+          try {
+            // The kill we asked for reaches this callback as an error with
+            // `killed: true`. The PDF was already whole when we sent it.
+            if (completed || !error) {
+              resolve();
+              return;
+            }
+            // A timeout is NOT proof the print failed. Headless Chrome writes
+            // the PDF promptly and then, on some machines, hangs on the way out
+            // -- a first launch populating a fresh profile, a lingering GPU
+            // process, a crash-handler that waits on a socket. A reviewer hit
+            // exactly this: the PDF was complete and correct on disk while the
+            // process sat at the timeout and the export reported "failed".
+            //
+            // So on timeout, consult the one thing that actually answers the
+            // question -- is there a real PDF where we asked for one? If so,
+            // the export succeeded and the process being killed is Chrome's
+            // problem, not the user's.
+            const timedOut = (error as any).killed === true || /timed out|ETIMEDOUT/i.test(String(error.message));
+            if (timedOut && looksLikePdf(pdfPath)) {
+              resolve();
+              return;
+            }
+            // Chrome's stderr is noisy even on success (DevTools banners,
+            // GPU warnings), so it is only surfaced on failure, and only the
+            // tail -- the actionable line is almost always the last one.
+            const tail = String(stderr || '')
+              .trim()
+              .split('\n')
+              .slice(-3)
+              .join(' ');
+            reject(new Error(`${path.basename(chromium)} failed to print the PDF: ${error.message}${tail ? ` -- ${tail}` : ''}`));
+          } finally {
+            stopPolling();
+            // A no-op when Chrome has already gone, but on the timeout path
+            // Node kills only the browser process -- this takes the rest of
+            // its process group with it.
+            killTree(child);
           }
-          // A timeout is NOT proof the print failed. Headless Chrome writes
-          // the PDF promptly and then, on some machines, hangs on the way out
-          // -- a first launch populating a fresh profile, a lingering GPU
-          // process, a crash-handler that waits on a socket. A reviewer hit
-          // exactly this: the PDF was complete and correct on disk while the
-          // process sat at the timeout and the export reported "failed".
-          //
-          // So on timeout, consult the one thing that actually answers the
-          // question -- is there a real PDF where we asked for one? If so,
-          // the export succeeded and the process being killed is Chrome's
-          // problem, not the user's.
-          const timedOut = (error as any).killed === true || /timed out|ETIMEDOUT/i.test(String(error.message));
-          if (timedOut && looksLikePdf(pdfPath)) {
-            resolve();
-            return;
-          }
-          // Chrome's stderr is noisy even on success (DevTools banners,
-          // GPU warnings), so it is only surfaced on failure, and only the
-          // tail -- the actionable line is almost always the last one.
-          const tail = String(stderr || '')
-            .trim()
-            .split('\n')
-            .slice(-3)
-            .join(' ');
-          reject(new Error(`${path.basename(chromium)} failed to print the PDF: ${error.message}${tail ? ` -- ${tail}` : ''}`));
         }
       );
+
+      poller = setInterval(() => {
+        let size = -1;
+        try {
+          size = isCompletePdf(pdfPath) ? fs.statSync(pdfPath).size : -1;
+        } catch {
+          size = -1;
+        }
+        // Two polls at the same size before believing it. Chrome writes the
+        // file in one go, so this never costs more than a single extra poll,
+        // but a `%%EOF` seen mid-write in some future Chrome would otherwise
+        // hand the user a half-written document.
+        const stable = size >= 0 && size === previousSize;
+        previousSize = size;
+        if (!stable) {
+          return;
+        }
+        completed = true;
+        stopPolling();
+        killTree(child);
+      }, opts.pollMs || 150);
     });
 
     // Chrome can exit 0 without writing anything (a crash in the renderer
