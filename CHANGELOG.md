@@ -1,3 +1,10 @@
+## 1.33.2 - 2026-09-03
+* Fix : **Markdown → PDF export no longer waits 90 seconds.** Chrome finished writing the PDF in
+  about a second and then never exited, and the export sat waiting for it until the 90-second
+  timeout before reporting success. The export now finishes the moment the PDF on disk is complete
+  and closes Chrome itself, so a document that took a minute and a half to save now takes a couple
+  of seconds. The 90-second timeout stays as a backstop for a browser that never writes anything.
+
 ## 1.33.1 - 2026-09-03
 * Fix : **Wide tables in Markdown → PDF.** A table wider than the page was cut off at the paper's
   edge -- the viewer's sideways scroll has no meaning on paper, and every column past the margin

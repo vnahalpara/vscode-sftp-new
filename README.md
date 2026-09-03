@@ -985,9 +985,9 @@ a cell wrap, a table that runs past the bottom of a page repeats its header row 
 and long lines in a code block wrap too.
 
 Rendering uses **Google Chrome, Microsoft Edge or Chromium in headless mode**, whichever is
-installed. Nothing is downloaded and nothing touches your real browser profile — each export runs
-in a throwaway profile that is removed afterwards. If none of those browsers is installed, the
-command says so rather than producing a broken file.
+installed, and takes a few seconds. Nothing is downloaded and nothing touches your real browser
+profile — each export runs in a throwaway profile that is removed afterwards. If none of those
+browsers is installed, the command says so rather than producing a broken file.
 
 Raw HTML inside a Markdown file is shown as text, never executed — in the viewer and in the PDF.
 A README fetched from a remote server is not trusted content.
