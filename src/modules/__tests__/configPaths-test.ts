@@ -229,6 +229,29 @@ describe('selectDiscovered', () => {
     ]);
   });
 
+  // By code unit, not by locale: localeCompare's answer depends on the host's
+  // ICU data, so the tree order would differ between machines. Uppercase sorts
+  // before lowercase here, which localeCompare does not do.
+  it('sorts by code unit, not by locale', () => {
+    expect(
+      selectDiscovered(
+        '/ws',
+        null,
+        [
+          '/ws/apple/.vscode/sftp.json',
+          '/ws/Banana/.vscode/sftp.json',
+          '/ws/_lib/.vscode/sftp.json',
+        ],
+        4,
+        posix
+      )
+    ).toEqual([
+      '/ws/Banana/.vscode/sftp.json',
+      '/ws/_lib/.vscode/sftp.json',
+      '/ws/apple/.vscode/sftp.json',
+    ]);
+  });
+
   // Windows hands the same file back with either case or either separator
   // depending on who asked; loading it twice would put two services on one
   // baseDir and lose one of them.
@@ -269,7 +292,7 @@ describe('configEventTarget', () => {
   it('reports a config deeper than the setting, with its depth', () => {
     expect(
       configEventTarget('/ws/a/b/c/.vscode/sftp.json', folders, 2, posix)
-    ).toEqual({ kind: 'tooDeep', depth: 3, configRoot: '/ws/a/b/c' });
+    ).toEqual({ kind: 'tooDeep', actual: 3, configRoot: '/ws/a/b/c' });
   });
 
   it('loads a config exactly at the depth limit', () => {
@@ -411,5 +434,13 @@ describe('configDepth for a folder about to get a config', () => {
 
   it('is -1 for a folder outside the workspace folder', () => {
     expect(depthOfNewConfigIn('/ws', '/elsewhere/a')).toBe(-1);
+  });
+
+  // The command warns about an excluded folder instead of about depth: raising
+  // the setting would not make an excluded file load.
+  it('is excluded, and also too deep, inside a skipped directory', () => {
+    const configPath = posix.join('/ws/node_modules/a/b', '.vscode', 'sftp.json');
+    expect(isExcludedConfigPath('/ws', configPath, posix)).toBe(true);
+    expect(configDepth('/ws', configPath, posix)).toBe(3);
   });
 });

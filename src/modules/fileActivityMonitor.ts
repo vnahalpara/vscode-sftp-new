@@ -95,7 +95,7 @@ async function handleConfigSave(uri: vscode.Uri) {
     return;
   }
   if (target.kind === 'tooDeep') {
-    noticeTooDeep(uri.fsPath, target.depth, allowed);
+    noticeTooDeep(uri.fsPath, target.actual, allowed);
     return;
   }
 

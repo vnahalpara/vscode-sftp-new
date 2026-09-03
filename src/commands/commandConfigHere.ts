@@ -4,7 +4,7 @@ import * as fse from 'fs-extra';
 import { COMMAND_CONFIG_HERE, CONFIG_PATH } from '../constants';
 import { newConfig } from '../modules/config';
 import { showOpenDialog, showWarningMessage } from '../host';
-import { configDepth } from '../modules/configPaths';
+import { configDepth, isExcludedConfigPath } from '../modules/configPaths';
 import { readDepthSetting } from '../modules/configDiscovery';
 import { checkCommand } from './abstract/createCommand';
 
@@ -50,17 +50,25 @@ export default checkCommand({
       return;
     }
 
+    // Warn, then create anyway: the file is what the user asked for, and a
+    // reason it will not load is a better answer than a refusal. Not awaited:
+    // a warning with no action items has no dismiss timer, so awaiting it
+    // would hold the file back until the user closed the notification. At most
+    // one warning, and the ones that no setting can fix come first.
     const workspaceFolder = vscode.workspace.getWorkspaceFolder(folderUri);
-    if (workspaceFolder) {
-      const allowed = readDepthSetting();
-      const depth = configDepth(
-        workspaceFolder.uri.fsPath,
-        path.join(folderPath, CONFIG_PATH)
+    const configPath = path.join(folderPath, CONFIG_PATH);
+    if (!workspaceFolder) {
+      showWarningMessage(
+        'This folder is not inside a workspace folder, so the file will not be loaded.'
       );
-      // Warn, then create anyway: the file is what the user asked for, and a
-      // setting they can raise is a better answer than a refusal. Not awaited:
-      // a warning with no action items has no dismiss timer, so awaiting it
-      // would hold the file back until the user closed the notification.
+    } else if (isExcludedConfigPath(workspaceFolder.uri.fsPath, configPath)) {
+      showWarningMessage(
+        'This folder is inside an excluded directory (node_modules, vendor, .git, ' +
+          'dist, build, .cache, bower_components), so the file will not be loaded.'
+      );
+    } else {
+      const allowed = readDepthSetting();
+      const depth = configDepth(workspaceFolder.uri.fsPath, configPath);
       if (depth > allowed) {
         showWarningMessage(
           `This folder is ${depth} levels deep; sftp.configSearchDepth is ${allowed}, ` +

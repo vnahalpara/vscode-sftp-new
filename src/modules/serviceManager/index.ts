@@ -79,6 +79,9 @@ export function createFileService(config: any, configRoot: string, workspaceFold
         `${path.join(configRoot, CONFIG_PATH)}. The later one wins; ` +
         'give them different "context" values.'
     );
+    // The loser is about to be replaced in the trie, and nothing else holds a
+    // reference to it: without this its watcher and connections leak.
+    disposeFileService(claimed);
   }
 
   const service = new FileService(normalizedBasePath, configRoot, workspaceFolder, config);

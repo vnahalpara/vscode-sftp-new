@@ -16,7 +16,7 @@ export interface PathApi {
 
 // The directories a config search skips. The glob is derived from the list so
 // the two can never drift: the event path checks the list, findFiles the glob.
-export const CONFIG_EXCLUDED_DIRS = [
+export const CONFIG_EXCLUDED_DIRS: ReadonlyArray<string> = [
   'node_modules',
   'vendor',
   '.git',
@@ -183,7 +183,9 @@ export function selectDiscovered(
     take(configPath);
   });
 
-  return selected.sort((a, b) => a.localeCompare(b));
+  // By code unit, not localeCompare: its answer depends on the host's ICU
+  // data, and this order is what the tree shows.
+  return selected.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 export interface ConfigEventFolder {
@@ -192,7 +194,7 @@ export interface ConfigEventFolder {
 
 export type ConfigEventTarget =
   | { kind: 'load'; configRoot: string; workspaceFolder: string }
-  | { kind: 'tooDeep'; depth: number; configRoot: string }
+  | { kind: 'tooDeep'; actual: number; configRoot: string }
   | { kind: 'excluded' }
   | { kind: 'outside' };
 
@@ -238,7 +240,7 @@ export function configEventTarget(
 
   const configRoot = configRootOf(configPath, p);
   if (ownerDepth > depth) {
-    return { kind: 'tooDeep', depth: ownerDepth, configRoot };
+    return { kind: 'tooDeep', actual: ownerDepth, configRoot };
   }
 
   return { kind: 'load', configRoot, workspaceFolder: owner.fsPath };

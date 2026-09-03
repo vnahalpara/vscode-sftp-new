@@ -10,6 +10,11 @@ import {
   selectDiscovered,
 } from './configPaths';
 
+// A search that never returns would hold activation open forever, so it is
+// given a deadline. Whatever it found by then is used; the workspace folder's
+// own config is read separately and is never at risk.
+export const CONFIG_SEARCH_TIMEOUT_MS = 10000;
+
 // A workspace folder reduced to what discovery needs, so callers can pass a
 // plain record and the pure helpers stay testable.
 export interface DiscoveryFolder {
@@ -42,16 +47,28 @@ export async function discoverConfigFiles(
 
   let found: string[] = [];
   if (depth > 0) {
+    const tokenSource = new vscode.CancellationTokenSource();
+    const timeout = setTimeout(() => tokenSource.cancel(), CONFIG_SEARCH_TIMEOUT_MS);
     try {
       const uris = await vscode.workspace.findFiles(
         new vscode.RelativePattern(folder.fsPath, '**/.vscode/sftp.json'),
         CONFIG_EXCLUDE_GLOB,
-        CONFIG_SEARCH_MAX_RESULTS
+        CONFIG_SEARCH_MAX_RESULTS,
+        tokenSource.token
       );
       found = uris.map(uri => uri.fsPath);
+      if (tokenSource.token.isCancellationRequested) {
+        logger.warn(
+          `config search in ${folder.fsPath} gave up after ` +
+            `${CONFIG_SEARCH_TIMEOUT_MS}ms; using the ${found.length} file(s) it found`
+        );
+      }
     } catch (error) {
       logger.warn(`config search failed in ${folder.fsPath}: ${error && error.message}`);
       found = [];
+    } finally {
+      clearTimeout(timeout);
+      tokenSource.dispose();
     }
   }
 
