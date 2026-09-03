@@ -36,10 +36,16 @@
     "onCommand:sftp.markdown.openAsText",
     "onCommand:sftp.config",
     "onCommand:sftp.config.here",
+    "workspaceContains:.vscode/sftp.json",
     "workspaceContains:**/.vscode/sftp.json"
   ],
   "icon": "resources/icon.png",
   "main": "./dist/extension",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  },
   "contributes": {
     "customEditors": [
       {

@@ -650,6 +650,11 @@ says so once per session. A config changed outside the editor (a `git checkout`,
 say) is not picked up: reload the window. Removing a workspace folder unloads
 every server under it, nested ones included.
 
+A nested `sftp.json` inside a repository you did not write is loaded like any
+other one — its host, its credentials and its `uploadOnSave` all take effect —
+so the extension stays off in untrusted workspaces. Only trust a workspace whose
+nested configs you trust.
+
 Two configs that resolve to the same folder still collide, as two profiles
 always have: the later one wins, so give them different `context` values. The
 log names both files.
