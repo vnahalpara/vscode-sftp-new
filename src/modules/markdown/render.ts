@@ -114,8 +114,26 @@ export const PRINT_THEME_CSS = `
 @page { margin: 18mm 16mm; }
 body { margin: 0; }
 .md-body { max-width: none; padding: 0; font-size: 11.5pt; }
-.md-body pre, .md-body blockquote, .md-body table, .md-body img { break-inside: avoid; }
+.md-body blockquote, .md-body img { break-inside: avoid; }
 .md-body h1, .md-body h2, .md-body h3 { break-after: avoid; }
+
+/* Paper has no sideways scroll. The shared stylesheet makes a table a
+   scrollable block so the VIEWER can pan a wide one; printed, that same rule
+   silently clips every column past the page edge, and \`overflow-x: auto\` on a
+   <pre> clips a long line the same way. So on paper a table is a table again,
+   bounded by the page width, and anything unbreakable inside it -- a URL, a
+   credential -- wraps mid-token rather than running off the sheet. These rules
+   come AFTER the shared block in the printed document, which is what lets them
+   win without !important. Tables and code blocks may now break across pages
+   (one taller than a page has to); it is the ROW that must not split, and the
+   header row repeats on each page so a continued table stays readable. */
+.md-body table { display: table; width: 100%; max-width: 100%; overflow: visible; table-layout: auto; font-size: 9.5pt; break-inside: auto; }
+.md-body thead { display: table-header-group; }
+.md-body tr { break-inside: avoid; }
+.md-body th, .md-body td { overflow-wrap: anywhere; word-break: break-word; hyphens: manual; vertical-align: top; }
+.md-body table code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.md-body pre { white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; break-inside: auto; }
+.md-body pre code { white-space: inherit; }
 `;
 
 // A complete, self-contained HTML document -- what headless Chrome prints. No

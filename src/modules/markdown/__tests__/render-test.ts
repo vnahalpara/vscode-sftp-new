@@ -105,7 +105,50 @@ describe('the shared stylesheet', () => {
     }
   });
 
-  it('avoids page breaks inside a code block or table when printing', () => {
+  it('avoids page breaks inside a blockquote or image when printing', () => {
     expect(PRINT_THEME_CSS).toContain('break-inside: avoid');
+  });
+});
+
+// Paper has no sideways scroll: the shared rules that let the viewer pan a
+// wide table clip it in the PDF instead. These pin the print overrides.
+describe('printing a document wider than the page', () => {
+  const html = renderPrintDocument('| a | b |\n|---|---|\n| 1 | 2 |\n', 't');
+
+  // Order is the whole fix -- same specificity, so the later rule wins.
+  it('turns a table back into a table, after the shared block rule', () => {
+    expect(html.indexOf('.md-body table { display: table')).toBeGreaterThan(
+      html.indexOf('.md-body table { border-collapse: collapse')
+    );
+    expect(PRINT_THEME_CSS).toContain('width: 100%');
+  });
+
+  it('wraps an unbreakable string inside a cell rather than clipping it', () => {
+    expect(PRINT_THEME_CSS).toContain('overflow-wrap: anywhere');
+  });
+
+  // A table or code block taller than a page must be allowed to break; it is
+  // the row that must not split.
+  it('lets a long table and a long code block break across pages', () => {
+    const avoid = PRINT_THEME_CSS.split('\n').filter(line => line.indexOf('break-inside: avoid') !== -1);
+    expect(avoid.join('\n')).not.toMatch(/\.md-body table\b/);
+    expect(avoid.join('\n')).not.toMatch(/\.md-body pre\b/);
+    expect(PRINT_THEME_CSS).toContain('.md-body tr { break-inside: avoid; }');
+  });
+
+  it('repeats the header row on every page', () => {
+    expect(PRINT_THEME_CSS).toContain('.md-body thead { display: table-header-group; }');
+  });
+
+  // The repeat rule only applies if the renderer actually emits a <thead>.
+  it('renders a six-column table with a thead for that rule to act on', () => {
+    const header = '| a | b | c | d | e | f |\n|---|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 | 6 |\n';
+    const body = renderMarkdownBody(header);
+    expect(body).toContain('<thead>');
+    expect(body).toContain('<th>f</th>');
+  });
+
+  it('lets a long line in a code block wrap', () => {
+    expect(PRINT_THEME_CSS).toContain('.md-body pre { white-space: pre-wrap;');
   });
 });
