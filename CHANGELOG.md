@@ -1,3 +1,11 @@
+## 1.33.1 - 2026-09-03
+* Fix : **Wide tables in Markdown → PDF.** A table wider than the page was cut off at the paper's
+  edge -- the viewer's sideways scroll has no meaning on paper, and every column past the margin
+  simply vanished. Printed tables now fit the page width, and a long unbreakable string in a cell
+  (a URL, a key) wraps instead of running off the sheet. A table taller than a page carries its
+  header row onto each new page, and rows are never split down the middle. Long lines in a code
+  block wrap for the same reason. The viewer is unchanged and still scrolls a wide table sideways.
+
 ## 1.33.0 - 2026-09-03
 * New Feature : **Nested `sftp.json` files.** Every `.vscode/sftp.json` under a workspace folder
   is now loaded, not just the one at the top, so a folder holding many projects gets a server per

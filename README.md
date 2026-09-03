@@ -976,9 +976,13 @@ The viewer stays available under **Open With… → Markdown Viewer**.
 
 **Convert to PDF** is on the viewer's toolbar, on the tab and Explorer right-click menus, and in
 the command palette. It renders the document with a print stylesheet — light background regardless
-of your editor theme, page margins, no page breaks inside a code block or table, no browser
+of your editor theme, page margins, no page break in the middle of a table row, no browser
 header/footer — and asks where to save the `.pdf`. If the file has unsaved edits, the PDF matches
 what you are looking at, not the copy on disk.
+
+A table too wide for the page is fitted to it rather than cut off: long unbreakable strings inside
+a cell wrap, a table that runs past the bottom of a page repeats its header row on the next one,
+and long lines in a code block wrap too.
 
 Rendering uses **Google Chrome, Microsoft Edge or Chromium in headless mode**, whichever is
 installed. Nothing is downloaded and nothing touches your real browser profile — each export runs
