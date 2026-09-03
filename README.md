@@ -643,12 +643,15 @@ stops at 500 results per workspace folder. **Reload the window after changing
 the setting.** The workspace folder's own `.vscode/sftp.json` is always loaded
 directly, whatever the setting says.
 
-Saving, creating or deleting one nested `sftp.json` in the editor reloads only
-that config's servers; the others keep running. A file deeper than the setting,
-or inside one of the skipped folders, is not loaded — saving a too-deep file
-says so once per session. A config changed outside the editor (a `git checkout`,
-say) is not picked up: reload the window. Removing a workspace folder unloads
-every server under it, nested ones included.
+Saving, creating, deleting or changing one nested `sftp.json` reloads only that
+config's servers; the others keep running. The change can come from the editor,
+a terminal or a `git checkout` — all of them are picked up, and one save is one
+reload. A file deeper than the setting, or inside one of the skipped folders, is
+not loaded — saving a too-deep file says so once per session. Removing a
+workspace folder unloads every server under it, nested ones included.
+
+Lowering `sftp.configSearchDepth` does not unload servers that are already
+loaded: reload the window after changing the setting.
 
 A nested `sftp.json` inside a repository you did not write is loaded like any
 other one — its host, its credentials and its `uploadOnSave` all take effect —
@@ -669,8 +672,9 @@ To create a config for a nested project, right-click its folder in the file
 Explorer and choose **SFTP: Create Config Here**. It writes
 `<folder>/.vscode/sftp.json` from the template and opens it, or just opens the
 file if one is already there; from the Command Palette it asks you to pick a
-folder. A folder deeper than `sftp.configSearchDepth` gets a warning and the
-file anyway.
+folder. A folder that will not be loaded — deeper than
+`sftp.configSearchDepth`, inside one of the skipped directories, or outside
+every workspace folder — gets a warning saying why, and the file anyway.
 
 _Note：_ a VS Code workspace folder nested inside another workspace folder is
 not supported here — the inner folder's configs would be found twice.

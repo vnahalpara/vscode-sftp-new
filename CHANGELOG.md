@@ -13,8 +13,16 @@
   order, omitting folders with no server. A single-folder workspace is unchanged. In the SFTP
   Explorer each server row now also says, in grey, where its config lives inside the folder.
 * New Feature : **SFTP: Create Config Here.** Right-click any folder in the file Explorer to
-  create (or open) its `.vscode/sftp.json`. A folder deeper than `sftp.configSearchDepth` is
-  created anyway, with a warning naming both numbers.
+  create (or open) its `.vscode/sftp.json`. A folder whose config will not be loaded -- deeper
+  than `sftp.configSearchDepth`, inside a skipped directory, or outside every workspace folder --
+  is created anyway, after a warning saying which of those it is.
+* New Feature : **config changes from outside the editor now reload too.** Creating, deleting,
+  saving *or* changing a config file reloads that config's servers, whether the change came from
+  the editor, a terminal or a `git checkout` -- 1.32.0 needed a window reload for anything the
+  editor did not save. Triggers are coalesced per file, so one save is still one reload.
+* New Feature : **Workspace Trust.** A nested `sftp.json` carries a host, credentials and
+  `uploadOnSave` like any other config, so the extension now declares itself unsupported in
+  untrusted workspaces and stays off until you trust the workspace.
 * Fix : **a nested `sftp.json` save no longer replaces its neighbours.** The config handlers
   resolved a saved file to its workspace folder and disposed every service of that folder, so
   saving one project's config took out every sibling project's servers and resolved their paths
