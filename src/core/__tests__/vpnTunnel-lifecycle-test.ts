@@ -120,6 +120,10 @@ async function harness(
     speaksSocks5: async () => false,
     killPid: () => undefined,
     spawnProcess: fakeWireproxy(state) as any,
+    // No filesystem lookup: what gets "spawned" here is a fake, and which
+    // wireproxy the machine running the suite happens to have installed must
+    // not change what these tests see.
+    resolveWireproxy: name => ({ path: name, tried: [] }),
     ...overrides,
   });
 
@@ -442,6 +446,28 @@ describe('storage directory', () => {
     loaded = mod;
 
     expect(() => mod.markerPathFor({ configFile: '/nowhere/wg0.conf' })).toThrow(/init/);
+  });
+});
+
+describe('finding wireproxy', () => {
+  test('spawns the resolved path, not the name that was looked up', async () => {
+    // The bug this guards: a GUI-launched VS Code has "/opt/homebrew/bin"
+    // nowhere on its PATH, so spawning the bare name is ENOENT on a machine
+    // where wireproxy is installed and works.
+    const state: FakeState = { spawns: 0, children: [] };
+    const fake = fakeWireproxy(state);
+    const spawned: string[] = [];
+    const h = await harness({
+      resolveWireproxy: () => ({ path: '/opt/homebrew/bin/wireproxy', tried: [] }),
+      spawnProcess: ((bin: string, args: string[]) => {
+        spawned.push(bin);
+        return fake(bin, args);
+      }) as any,
+    });
+
+    await h.mod.acquire(h.vpn);
+
+    expect(spawned).toEqual(['/opt/homebrew/bin/wireproxy']);
   });
 });
 

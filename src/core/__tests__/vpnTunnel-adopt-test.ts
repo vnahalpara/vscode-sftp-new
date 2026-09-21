@@ -140,6 +140,9 @@ async function harness(overrides: Deps): Promise<Harness> {
     speaksSocks5: async () => false,
     killPid: () => undefined,
     spawnProcess: fakeWireproxy(state) as any,
+    // See the same override in vpnTunnel-lifecycle-test.ts: the lookup must
+    // not depend on what is installed where this suite runs.
+    resolveWireproxy: name => ({ path: name, tried: [] }),
     ...overrides,
   });
 

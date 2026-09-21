@@ -5,6 +5,7 @@ import * as net from 'net';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { spawn, ChildProcess } from 'child_process';
+import { resolveBinary, isExecutable, ResolvedBinary } from './resolveBinary';
 import logger from '../logger';
 
 /**
@@ -313,6 +314,9 @@ export interface TunnelDeps {
   speaksSocks5(port: number, timeoutMs?: number): Promise<boolean>;
   killPid(pid: number): void;
   spawnProcess(bin: string, args: string[]): ChildProcess;
+  // Injected alongside the spawn so a test's fake wireproxy is never subject
+  // to what is or is not installed on the machine running the test.
+  resolveWireproxy(name: string): ResolvedBinary;
 }
 
 const defaultDeps: TunnelDeps = {
@@ -335,6 +339,13 @@ const defaultDeps: TunnelDeps = {
   speaksSocks5: (port, timeoutMs) => probeSocks5(port, timeoutMs),
   killPid: pid => process.kill(pid),
   spawnProcess: (bin, args) => spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] }),
+  resolveWireproxy: name =>
+    resolveBinary(name, {
+      pathEnv: process.env.PATH,
+      platform: process.platform,
+      homeDir: os.homedir(),
+      exists: isExecutable,
+    }),
 };
 
 let deps: TunnelDeps = defaultDeps;
@@ -664,7 +675,12 @@ async function startTunnel(vpn: VpnOption, key: string, port: number): Promise<T
   // 0600: the file embeds the WireGuard private key.
   fs.writeFileSync(mergedConfPath, mergedConf, { mode: 0o600 });
 
-  const bin = vpn.wireproxyPath || 'wireproxy';
+  // Resolved rather than spawned by bare name: a GUI-launched VS Code gets a
+  // PATH with nothing but the system prefixes on it, so "wireproxy" alone is
+  // ENOENT on a machine where wireproxy is installed and works. See
+  // resolveBinary.ts.
+  const wireproxy = deps.resolveWireproxy(vpn.wireproxyPath || 'wireproxy');
+  const bin = wireproxy.path;
   const child = deps.spawnProcess(bin, ['-c', mergedConfPath]);
 
   let exited = false;
@@ -744,8 +760,15 @@ async function startTunnel(vpn: VpnOption, key: string, port: number): Promise<T
       /* ignore */
     }
     if (spawnError && spawnError.code === 'ENOENT') {
+      // Naming the directories matters here: the usual cause is a VS Code
+      // whose PATH is missing the one wireproxy is actually in, and the list
+      // is what makes that visible rather than baffling.
+      const searched = wireproxy.tried.length
+        ? ` Searched: ${wireproxy.tried.join(', ')}.`
+        : '';
       throw new Error(
-        `wireproxy not found (tried "${bin}"). Install it (e.g. "brew install wireproxy") ` +
+        `wireproxy not found (tried "${bin}").${searched} ` +
+          `Install it (e.g. "brew install wireproxy") ` +
           `or set "vpn.wireproxyPath" in your sftp.json.`
       );
     }
