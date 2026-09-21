@@ -1,3 +1,14 @@
+## 1.33.3 - 2026-09-21
+* Fix : **`wireproxy not found` when VS Code is started from the Dock.** A VS Code launched from
+  the Dock or Spotlight -- rather than from a terminal -- is given a bare `PATH` of
+  `/usr/bin:/bin:/usr/sbin:/sbin`, with no shell profile applied, so a `wireproxy` installed by
+  Homebrew or `go install` was invisible to the VPN tunnel and every connection using one failed
+  with `wireproxy not found` even though the same command ran fine in a terminal. The lookup now
+  searches `PATH` first and then `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`,
+  `~/go/bin`, `~/.local/bin` and Linuxbrew's prefix, and the error, if it still cannot find it,
+  now lists every folder it looked in. An explicit `vpn.wireproxyPath` is still used exactly as
+  written.
+
 ## 1.33.2 - 2026-09-03
 * Fix : **Markdown → PDF export no longer waits 90 seconds.** Chrome finished writing the PDF in
   about a second and then never exited, and the export sat waiting for it until the 90-second

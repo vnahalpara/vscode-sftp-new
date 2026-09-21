@@ -781,6 +781,10 @@ Notes:
   clear error in the SFTP output channel.
 - Composable with `hop`: the VPN carries the first outbound connection, then hops proceed inside it.
 - Connections sharing the same `configFile` reuse a single `wireproxy` process.
+- The lookup does not depend on `PATH` alone. A VS Code started from the Dock or Spotlight gets a
+  minimal `PATH` with no shell profile applied, so as well as `PATH` the extension looks in
+  `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, `~/go/bin`, `~/.local/bin` and
+  Linuxbrew's prefix. Anywhere else, set `vpn.wireproxyPath`.
 
 #### The SOCKS port is now stable per config file
 
