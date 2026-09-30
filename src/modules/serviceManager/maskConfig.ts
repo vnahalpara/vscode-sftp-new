@@ -118,8 +118,9 @@ const SAFE_KEYS = new Set([
   'remoteExplorer',
   'filesExclude',
   'order',
-  // vpn -- all paths, ports and timeouts; the WireGuard keys live in
-  // `configFile`, not in sftp.json
+  // vpn -- true/false, or the deprecated object form whose fields (paths,
+  // ports and timeouts, all now ignored) are still printed so old profiles
+  // log what they say; the WireGuard keys were never in sftp.json
   'vpn',
   'type',
   'configFile',

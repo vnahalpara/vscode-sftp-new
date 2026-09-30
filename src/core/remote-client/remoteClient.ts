@@ -1,5 +1,4 @@
 import CustomError from '../customError';
-import { VpnOption } from '../vpnTunnel';
 
 export interface ConnectOption {
   // common
@@ -18,7 +17,9 @@ export interface ConnectOption {
   agent?: string;
   sock?: any;
   hop?: ConnectOption | ConnectOption[];
-  vpn?: VpnOption;
+  // true routes through the "sftp.vpn.proxy" SOCKS5 proxy. The pre-1.34.0
+  // object form still arrives here from old profiles and means the same.
+  vpn?: boolean | object;
   limitOpenFilesOnRemote?: boolean | number;
 
   // ftp-only

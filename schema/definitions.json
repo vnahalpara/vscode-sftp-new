@@ -324,36 +324,24 @@
         "description": "Shell command(s) to run in the terminal after the SSH connection is established. A single string or an array of strings."
       },
       "vpn": {
-        "type": "object",
-        "description": "Route only this connection through a userspace WireGuard SOCKS5 tunnel (wireproxy). Requires the wireproxy binary. SFTP only.",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": ["wireguard"],
-            "description": "Tunnel type. Only \"wireguard\" is supported.",
-            "default": "wireguard"
+        "description": "Route this connection through your always-on SOCKS5 VPN proxy (the \"sftp.vpn.proxy\" setting, default 127.0.0.1:1080). The extension does not start or stop that proxy. SFTP only.",
+        "anyOf": [
+          {
+            "type": "boolean",
+            "description": "true: connect through the VPN proxy set in \"sftp.vpn.proxy\". false (or leaving vpn out): connect directly."
           },
-          "configFile": {
-            "type": "string",
-            "description": "Path to the WireGuard .conf downloaded from your VPN provider (e.g. ~/surfshark/us-nyc-st004.conf). Contains the private key."
-          },
-          "wireproxyPath": {
-            "type": "string",
-            "description": "Path to the wireproxy binary. Defaults to looking it up on PATH.",
-            "default": "wireproxy"
-          },
-          "socksPort": {
-            "type": "number",
-            "description": "Local SOCKS5 port for the tunnel. 0 (default) derives a stable port from this VPN config file's path, inside the sftp.vpn.portRange range, so the same .conf lands on the same port across restarts. Set a number to pin an exact port.",
-            "default": 0
-          },
-          "healthCheckTimeout": {
-            "type": "number",
-            "description": "Milliseconds to wait for the tunnel's SOCKS port to come up before failing.",
-            "default": 15000
+          {
+            "type": "object",
+            "description": "Deprecated: use \"vpn\": true. This older form is still accepted and now means the same as true; its fields are ignored.",
+            "properties": {
+              "type": { "description": "Ignored." },
+              "configFile": { "description": "Ignored." },
+              "wireproxyPath": { "description": "Ignored." },
+              "socksPort": { "description": "Ignored." },
+              "healthCheckTimeout": { "description": "Ignored." }
+            }
           }
-        },
-        "required": ["configFile"]
+        ]
       },
       "database": {
         "type": "array",

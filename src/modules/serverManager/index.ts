@@ -45,8 +45,7 @@ let starting: Promise<Running> | null = null;
 // lands mid-start orphans that start rather than being overwritten by it.
 let generation = 0;
 // webpack rewrites __dirname in the bundle, so the extension's install
-// directory has to be handed to us at activation time — the same way
-// vpnTunnel receives globalStoragePath.
+// directory has to be handed to us at activation time.
 let extensionRoot: string | null = null;
 
 export function init(extensionPath: string): void {

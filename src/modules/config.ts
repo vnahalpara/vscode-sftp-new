@@ -35,20 +35,14 @@ const configScheme = {
   algorithms: Joi.any(),
   sshConfigPath: Joi.string(),
   sshCustomParams: Joi.string(),
-  vpn: {
-    type: Joi.string().valid('wireguard'),
-    configFile: Joi.string().required(),
-    wireproxyPath: Joi.string(),
-    // 0 is legal and is the documented default: it means "no explicit port,
-    // derive one from the config path" (see vpnTunnel.isUsablePort), and both
-    // README.md and schema/definitions.json document it, so VS Code's own
-    // completion inside sftp.json offers it. A min of 1 here rejected the
-    // whole profile -- not just its vpn block -- and with it plain SFTP
-    // transfers and the database features for anyone who had taken the
-    // editor's suggestion.
-    socksPort: Joi.number().integer().min(0).max(65535),
-    healthCheckTimeout: Joi.number().integer(),
-  },
+  // true/false, or the pre-1.34.0 object form, which now means the same as
+  // true. Deliberately ANY object: its fields (configFile, socksPort, ...)
+  // described a tunnel the extension no longer starts, so nothing reads them,
+  // and a rejection here fails the whole profile -- not just its vpn block.
+  // That is how a `.min(1)` on the old socksPort once broke plain SFTP
+  // transfers and the database features for anyone who had taken the
+  // editor's suggested default of 0.
+  vpn: Joi.alternatives([Joi.boolean(), Joi.object()]),
   // Deliberately permissive: any array of strings validates, including an
   // empty array (which means "archive everything") and an empty string.
   // Unsafe patterns are filtered at runtime by isSafeExclude

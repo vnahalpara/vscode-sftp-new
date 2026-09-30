@@ -35,16 +35,58 @@ describe('validateConfig: vpn.socksPort', () => {
     expect(validateConfig(profile({ configFile: '~/wg0.conf', socksPort: 21080 }))).toBeNull();
   });
 
-  test('rejects a negative port', () => {
-    expect(validateConfig(profile({ configFile: '~/wg0.conf', socksPort: -1 }))).not.toBeNull();
+  // Since 1.34.0 the object form only means "use the VPN": the extension no
+  // longer starts a tunnel, so socksPort is read by nothing. Rejecting a value
+  // nothing reads would fail the whole profile for no benefit.
+  test('accepts a negative port, which is now ignored', () => {
+    expect(validateConfig(profile({ configFile: '~/wg0.conf', socksPort: -1 }))).toBeNull();
   });
 
-  test('rejects a port above 65535', () => {
-    expect(validateConfig(profile({ configFile: '~/wg0.conf', socksPort: 70000 }))).not.toBeNull();
+  test('accepts a port above 65535, which is now ignored', () => {
+    expect(validateConfig(profile({ configFile: '~/wg0.conf', socksPort: 70000 }))).toBeNull();
   });
 
   test('a profile with no vpn block at all still validates', () => {
     expect(validateConfig(profile())).toBeNull();
+  });
+});
+
+describe('validateConfig: vpn as a boolean', () => {
+  test('accepts true', () => {
+    expect(validateConfig(profile(true))).toBeNull();
+  });
+
+  test('accepts false', () => {
+    expect(validateConfig(profile(false))).toBeNull();
+  });
+
+  test('accepts the full legacy object form', () => {
+    const vpn = {
+      type: 'wireguard',
+      configFile: '~/wg0.conf',
+      wireproxyPath: '/opt/homebrew/bin/wireproxy',
+      socksPort: 21080,
+      healthCheckTimeout: 15000,
+    };
+    expect(validateConfig(profile(vpn))).toBeNull();
+  });
+
+  test('accepts a legacy object without configFile, which is now ignored', () => {
+    expect(validateConfig(profile({ socksPort: 21080 }))).toBeNull();
+  });
+
+  test('accepts a legacy object with keys it never knew', () => {
+    expect(validateConfig(profile({ configFile: '~/wg0.conf', somethingNew: 1 }))).toBeNull();
+  });
+
+  test('rejects a string, since "true" is not true', () => {
+    expect(validateConfig(profile('true'))).not.toBeNull();
+  });
+
+  test('still validates the rest of the profile alongside vpn: true', () => {
+    const config = profile(true);
+    delete config.host;
+    expect(validateConfig(config)).not.toBeNull();
   });
 });
 

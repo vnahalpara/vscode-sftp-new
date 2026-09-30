@@ -176,6 +176,18 @@ describe('redactProfile', () => {
     expect(out.hasCloudflare).toBe(false);
   });
 
+  it('reports hasVpn for vpn: true', () => {
+    expect(redactProfile('/ws', { ...CONFIG, vpn: true } as any).hasVpn).toBe(true);
+  });
+
+  it('reports hasVpn for the legacy object form', () => {
+    expect(redactProfile('/ws', CONFIG).hasVpn).toBe(true);
+  });
+
+  it('reports no vpn for vpn: false', () => {
+    expect(redactProfile('/ws', { ...CONFIG, vpn: false } as any).hasVpn).toBe(false);
+  });
+
   it('exposes hasCloudflare but never the token', () => {
     const TOKEN = 'cf-secret-token-value';
     const redacted = redactProfile('/ws', {

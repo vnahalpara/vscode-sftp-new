@@ -1,6 +1,7 @@
 import * as crypto from 'crypto';
 import { targetOption, hasRootCreds } from './privilege';
 import { hasCloudflare } from './ops/cloudflare';
+import { usesVpn } from '../../core/vpnRoute';
 
 export interface RedactedProfile {
   id: string;
@@ -74,7 +75,7 @@ export function redactProfile(workspace: string, config: any): RedactedProfile {
     protocol: config.protocol || 'sftp',
     remotePath: config.remotePath || '/',
     workspace,
-    hasVpn: Boolean(config.vpn && config.vpn.configFile),
+    hasVpn: usesVpn(config.vpn),
     hasDatabase: Array.isArray(config.database) && config.database.length > 0,
     // A boolean only -- never CLOUDFLARE_ZONE_ID/CLOUDFLARE_API_TOKEN
     // themselves. This object is serialised straight to the browser; the

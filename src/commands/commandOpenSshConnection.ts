@@ -4,7 +4,8 @@ import { getAllFileService } from '../modules/serviceManager';
 import { ExplorerRoot } from '../modules/remoteExplorer';
 import { interpolate } from '../utils';
 import { reportError } from '../helper';
-import * as vpnTunnel from '../core/vpnTunnel';
+import * as vpnProxy from '../core/vpnProxy';
+import { socksProxyCommand } from '../core/vpnRoute';
 import { checkCommand } from './abstract/createCommand';
 
 const isWindows = process.platform === 'win32';
@@ -90,18 +91,19 @@ export default checkCommand({
       remoteConfig = item.config;
     }
 
-    // If this connection uses a VPN, bring the tunnel up and route ssh through
-    // its SOCKS5 proxy so the terminal egresses from the same (allowlisted) IP
-    // as file transfers. Requires `nc` with SOCKS support (default on macOS/Linux).
+    // If this connection uses the VPN, route ssh through the always-on SOCKS5
+    // proxy so the terminal egresses from the same (allowlisted) IP as file
+    // transfers. Requires `nc` with SOCKS support (default on macOS/Linux).
     let proxyCommand;
-    if (remoteConfig.vpn) {
-      try {
-        const socksPort = await vpnTunnel.acquire(remoteConfig.vpn);
-        proxyCommand = `nc -X 5 -x 127.0.0.1:${socksPort} %h %p`;
-      } catch (error) {
-        reportError(error, 'open ssh in terminal (vpn)');
-        return;
+    try {
+      const route = vpnProxy.routeFor(remoteConfig.vpn);
+      if (route.kind === 'shared') {
+        await vpnProxy.ensureSharedProxy(route.proxy);
+        proxyCommand = socksProxyCommand(route.proxy);
       }
+    } catch (error) {
+      reportError(error, 'open ssh in terminal (vpn)');
+      return;
     }
 
     const sshConfig = {
@@ -113,40 +115,6 @@ export default checkCommand({
     };
     const terminal = vscode.window.createTerminal(remoteConfig.name);
 
-    // Release the tunnel reference when this terminal is closed.
-    //
-    // This is not the only way the extension stops running: closing the whole
-    // VS Code window (rather than just this terminal) never fires
-    // onDidCloseTerminal, so this handler simply never runs. That is fine --
-    // vpnTunnel.disposeAll() on deactivate() kills every tunnel THIS window
-    // started, ignoring both the refcount and "sftp.vpn.keepAlive", so the
-    // window-close path is covered there instead. It deliberately does NOT
-    // signal a tunnel this window merely ADOPTED from another one -- that
-    // process belongs to a live extension host next door, and killing it
-    // would drop that window's transfer mid-flight. Do not "fix" the apparent
-    // leak by adding a release() on deactivate/window-close too: acquire() is
-    // only ever called once per terminal, so a second release() here would
-    // double-release and prematurely kill a tunnel a still-open terminal
-    // elsewhere is relying on.
-    //
-    // Worth knowing what that leans on, though: with "sftp.vpn.keepAlive" at
-    // its default of true, release() never kills anything, so disposeAll() is
-    // the *only* teardown in the normal path -- and it is best effort. VS Code
-    // skips deactivate() entirely if the extension host crashes or is force
-    // quit, and wireproxy survives that: spawn() without `detached` only keeps
-    // the child in our process group, which on macOS and Linux kills nothing
-    // -- the process is reparented to init and goes on holding its port. The
-    // leak is bounded anyway, and for the better reason that its marker
-    // survives with it: the next run recognises that marker and adopts or
-    // reaps the tunnel rather than accumulating another beside it.
-    if (remoteConfig.vpn) {
-      const sub = vscode.window.onDidCloseTerminal(closed => {
-        if (closed === terminal) {
-          vpnTunnel.release(remoteConfig.vpn);
-          sub.dispose();
-        }
-      });
-    }
     let sshCommand;
     if (shouldUseAgent(remoteConfig)) {
       sshCommand = getSshCommand(sshConfig);

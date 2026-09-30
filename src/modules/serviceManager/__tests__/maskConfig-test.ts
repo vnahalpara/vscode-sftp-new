@@ -116,6 +116,14 @@ describe('maskConfig', () => {
     expect(masked.CLOUDFLARE_ZONE_ID).toBe('023e105f4ecef8ad9ca31a8372d0c353');
   });
 
+  it('prints a boolean vpn as it is', () => {
+    expect(maskConfig({ ...CONFIG, vpn: true }).vpn).toBe(true);
+  });
+
+  it('prints vpn: false as it is', () => {
+    expect(maskConfig({ ...CONFIG, vpn: false }).vpn).toBe(false);
+  });
+
   it('masks inside nested blocks rather than passing the block through whole', () => {
     const masked = maskConfig(CONFIG);
     expect(masked.database[0].password).toBe(MASK);

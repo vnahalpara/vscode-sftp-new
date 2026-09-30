@@ -6,7 +6,7 @@ import app from './app';
 import initCommands from './initCommands';
 import { reportError } from './helper';
 import fileActivityMonitor from './modules/fileActivityMonitor';
-import * as vpnTunnel from './core/vpnTunnel';
+import * as vpnProxy from './core/vpnProxy';
 import * as serverManager from './modules/serverManager';
 import { readConfigsFromFile } from './modules/config';
 import { configRootOf } from './modules/configPaths';
@@ -71,15 +71,13 @@ export async function activate(context: vscode.ExtensionContext) {
     reportError(error, 'initCommands');
   }
 
-  // Writable location for generated VPN tunnel configs (contains private keys).
-  // "sftp.vpn.*" is read once here rather than on every acquire()/release(),
+  // "sftp.vpn.proxy" is read once here rather than on every connection,
   // matching how sftp.printDebugLog/sftp.debug are documented: change it, then
   // reload window.
-  const vpnSettings = vscode.workspace.getConfiguration('sftp.vpn');
-  vpnTunnel.init(context.globalStoragePath, {
-    portRange: vpnSettings.get<string>('portRange'),
-    keepAlive: vpnSettings.get<boolean>('keepAlive', true),
-  });
+  vpnProxy.init({ proxy: vscode.workspace.getConfiguration('sftp.vpn').get<string>('proxy') });
+  // Not awaited: deleting files older versions left behind must not hold up
+  // activation, and it never rejects.
+  vpnProxy.removeLegacyTunnelFiles(context.globalStoragePath);
   serverManager.init(context.extensionPath);
 
   // Registered here, ABOVE the workspace-folder early return below, on
@@ -174,7 +172,6 @@ export async function activate(context: vscode.ExtensionContext) {
 export function deactivate() {
   fileActivityMonitor.destory();
   getAllFileService().forEach(disposeFileService);
-  vpnTunnel.disposeAll();
   // serverManager BEFORE dbConnectionManager: an export in flight in the
   // Database tab reaches its cleanup in a `finally` (dbExportStream.ts)
   // whether it finishes, fails, or is aborted -- and that cleanup runs an

@@ -1,5 +1,5 @@
 import * as net from 'net';
-import { probeSocks5 } from '../vpnTunnel';
+import { probeSocks5 } from '../vpnProxy';
 
 // Port 0 everywhere: the OS hands back a free ephemeral port, so these tests
 // never collide with a real service or flake on a busy machine.
@@ -70,11 +70,9 @@ describe('probeSocks5', () => {
   });
 
   test('resolves false for a malformed port instead of rejecting', async () => {
-    // These reach the probe from a marker file, which is just JSON on disk: a
-    // truncated write or a hand-edit can leave a negative, fractional or NaN
-    // port behind. net.connect() validates the port synchronously and throws,
-    // so without a guard the throw would escape as a rejected promise from a
-    // call site that only ever handles a boolean.
+    // net.connect() validates the port synchronously and throws, so without a
+    // guard a bad port would escape as a rejected promise from a call site
+    // that only ever handles a boolean.
     for (const port of [-1, 70000, NaN, 1.5, 0]) {
       await expect(probeSocks5(port, 50)).resolves.toBe(false);
     }

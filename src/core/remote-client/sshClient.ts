@@ -6,8 +6,8 @@ import localFs from '../localFs';
 import { FileSystem, RemoteFileSystem, SFTPFileSystem } from '../fs';
 import logger from '../../logger';
 import CustomError from '../customError';
-import * as vpnTunnel from '../vpnTunnel';
-import { VpnOption } from '../vpnTunnel';
+import * as vpnProxy from '../vpnProxy';
+import { ProxyAddress } from '../vpnRoute';
 
 let MAX_OPEN_FD_NUM = 222;
 
@@ -16,7 +16,6 @@ export default class SSHClient extends RemoteClient {
   private hoppingClients: SSHClient[];
   private _opendFdNum: number = 0;
   private _queuedFdRequireCall: Array<(...args: any[]) => any> = [];
-  private _vpnHandle?: VpnOption;
 
   _initClient() {
     return new Client();
@@ -44,15 +43,18 @@ export default class SSHClient extends RemoteClient {
 
     let lastOption: ConnectOption = option;
     let fs: FileSystem | RemoteFileSystem = localFs;
-    let sock;
+    // A hop's client is handed the socket to use (the VPN socket, or a stream
+    // forwarded through the previous hop). Starting from undefined dropped it,
+    // and the hop dialled its host directly -- outside the VPN.
+    let sock = option.sock;
 
     // VPN: route the first outbound TCP connection (the final host, or the first
-    // hop when hopping) through the userspace WireGuard SOCKS5 proxy. ssh2 then
+    // hop when hopping) through the user's always-on SOCKS5 VPN proxy. ssh2 then
     // tunnels SSH over this socket via its existing `sock` option.
-    if (vpn) {
-      const socksPort = await vpnTunnel.acquire(vpn);
-      this._vpnHandle = vpn;
-      sock = await this._makeVpnSock(socksPort, option.host, option.port || 22);
+    const route = vpnProxy.routeFor(vpn);
+    if (route.kind === 'shared') {
+      await vpnProxy.ensureSharedProxy(route.proxy);
+      sock = await this._makeVpnSock(route.proxy, option.host, option.port || 22);
     }
 
     if (
@@ -345,10 +347,10 @@ export default class SSHClient extends RemoteClient {
     });
   }
 
-  private async _makeVpnSock(socksPort: number, dstHost, dstPort): Promise<any> {
-    logger.info(`routing ${dstHost}:${dstPort} through VPN SOCKS5 127.0.0.1:${socksPort}`);
+  private async _makeVpnSock(proxy: ProxyAddress, dstHost, dstPort): Promise<any> {
+    logger.info(`routing ${dstHost}:${dstPort} through VPN SOCKS5 ${proxy.host}:${proxy.port}`);
     const { socket } = await SocksClient.createConnection({
-      proxy: { host: '127.0.0.1', port: socksPort, type: 5 },
+      proxy: { host: proxy.host, port: proxy.port, type: 5 },
       command: 'connect',
       // pass the hostname (not a pre-resolved IP) so DNS happens inside the tunnel
       destination: { host: dstHost, port: dstPort },
@@ -450,11 +452,6 @@ export default class SSHClient extends RemoteClient {
     if (this.hoppingClients) {
       // last connect first end
       this.hoppingClients.reverse().forEach(client => client.end());
-    }
-
-    if (this._vpnHandle) {
-      vpnTunnel.release(this._vpnHandle);
-      this._vpnHandle = undefined;
     }
   }
 
