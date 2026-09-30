@@ -74,7 +74,7 @@ the notes below.
 | PDF viewer (default for `.pdf`, local and remote) | ✅ | ✅ |
 | Database: browse, data view (paging/sort/filter), search, SQL runner, cell/row edit, Find Table | ✅ | ✅ |
 | Manage Server (**Linux servers only**) | ✅ | ✅ |
-| VPN tunnel for SFTP **and** database traffic | ✅ | ✅ |
+| VPN proxy for SFTP **and** database traffic | ✅ | ✅ |
 | Open SSH in Terminal (plain) | ✅ | ✅ |
 | Open SSH in Terminal **through the VPN** | ⚠️ needs `nc` (see note) | ✅ |
 | `ssh_prefix` using `sshpass` | ⚠️ `sshpass` is Unix-only | ✅ |
@@ -459,16 +459,9 @@ a shared screen and don't paste the URL anywhere.
   - macOS / Linux: `code --install-extension vaibhav-sftp-plus-<version>.vsix --force`
   - Windows (PowerShell): `code --install-extension .\vaibhav-sftp-plus-<version>.vsix --force`
 
-### VPN tunnel — install `wireproxy`
-Download the binary for your OS from the [wireproxy releases](https://github.com/whyvl/wireproxy/releases):
-- **macOS:** grab `wireproxy_darwin_arm64` (Apple Silicon) or `_amd64` (Intel), put it on your `PATH`,
-  then clear the quarantine flag: `xattr -d com.apple.quarantine /path/to/wireproxy`.
-- **Windows:** grab `wireproxy_windows_amd64.exe`, save it somewhere like `C:\tools\wireproxy.exe`,
-  and point the config at it:
-  ```json
-  "vpn": { "type": "wireguard", "configFile": "C:\\Users\\you\\surfshark\\nyc.conf", "wireproxyPath": "C:\\tools\\wireproxy.exe" }
-  ```
-- If the binary isn't on `PATH`, set `vpn.wireproxyPath` to its full path on either OS.
+### VPN — nothing to install for the extension
+`"vpn": true` connects through a SOCKS5 proxy you run yourself; the extension does not need
+`wireproxy` or any other binary. See [VPN (per-connection static IP)](#vpn-per-connection-static-ip).
 
 ### Database — nothing to install locally
 The DB features tunnel through the same SSH connection and run `mysql` **on the server**, so they
@@ -735,147 +728,64 @@ local -> hopa -> hopb -> target
 }
 ```
 
-### VPN Tunnel (per-connection static IP)
+### VPN (per-connection static IP)
 
 Some servers only accept SSH/SFTP from an allowlisted **static IP**. Instead of routing
-your whole machine through a VPN (which needs admin rights), this routes **only this one
-SFTP connection** through a userspace WireGuard tunnel that exposes a local SOCKS5 proxy.
-The rest of your machine is untouched and no root/admin is required. **SFTP only.**
-
-**One-time setup**
-
-1. Install [`wireproxy`](https://github.com/whyvl/wireproxy) — download the prebuilt binary for
-   your OS/arch from the [releases page](https://github.com/whyvl/wireproxy/releases) (or build it
-   with `go install github.com/whyvl/wireproxy/cmd/wireproxy@latest`). It is not in Homebrew core.
-   Make sure the binary is on your `PATH`, or point `vpn.wireproxyPath` at it.
-   On macOS, downloaded binaries may need the quarantine flag cleared:
-   `xattr -d com.apple.quarantine /path/to/wireproxy`.
-2. In your VPN provider's dashboard, do the **WireGuard Manual Setup** for the static-IP
-   location and download the `.conf` (it contains your private key). For Surfshark this is
-   *VPN → Manual Setup → WireGuard*, then the **Static IP** location (e.g.
-   `us-nyc-st004.prod.surfshark.com`). Save it somewhere like `~/surfshark/us-nyc-st004.conf`.
-3. Ask the server admin to allowlist that location's **egress IP** (the IP the VPN shows).
+your whole machine through a VPN, this routes **only the profiles you choose** through a
+SOCKS5 proxy that **you keep running** — for example [`wireproxy`](https://github.com/whyvl/wireproxy)
+with your VPN provider's WireGuard `.conf`, started at login. The extension only connects
+through it: it does **not** start, stop or restart that proxy. **SFTP only.**
 
 ```json
 {
   "name": "Locked-down server",
   "host": "1.2.3.4",
   "protocol": "sftp",
-  "port": 22,
   "username": "username",
   "remotePath": "/var/www",
-  "vpn": {
-    "type": "wireguard",
-    "configFile": "~/surfshark/us-nyc-st004.conf",
-    "wireproxyPath": "wireproxy", // optional; defaults to PATH lookup
-    "socksPort": 0,               // optional; 0 (default) = derive a stable port, see below
-    "healthCheckTimeout": 15000   // optional; ms to wait for the tunnel
-  }
+  "vpn": true
 }
 ```
 
-Notes:
-- The downloaded `.conf` holds your WireGuard private key — keep it out of source control.
-  The extension writes a working copy into its storage with `0600` permissions and never logs it.
-- WireGuard needs outbound **UDP 51820**; corporate firewalls that block it will fail with a
-  clear error in the SFTP output channel.
+- `"vpn": true` — connect through the proxy in the **`sftp.vpn.proxy`** setting (`host:port`,
+  default `"127.0.0.1:1080"`). A malformed value falls back to the default with a warning in
+  the SFTP output channel. Change it, then reload the window.
+- `"vpn": false`, or no `vpn` at all — connect directly.
+- Before each connection the extension checks the proxy answers SOCKS5 (no authentication).
+  If it does not, the connection fails at once with *"VPN proxy is not answering on
+  127.0.0.1:1080 …"* — start your proxy, or fix `sftp.vpn.proxy`.
+- The server's host name is handed to the proxy unresolved, so DNS happens inside the tunnel.
 - Composable with `hop`: the VPN carries the first outbound connection, then hops proceed inside it.
-- Connections sharing the same `configFile` reuse a single `wireproxy` process.
-- The lookup does not depend on `PATH` alone. A VS Code started from the Dock or Spotlight gets a
-  minimal `PATH` with no shell profile applied, so as well as `PATH` the extension looks in
-  `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, `~/go/bin`, `~/.local/bin` and
-  Linuxbrew's prefix. Anywhere else, set `vpn.wireproxyPath`.
+- Database features and Manage Server ride the same SSH connection, so they use the VPN too.
+  **Open SSH in Terminal** routes `ssh` through the proxy with `nc` (see
+  [Terminal-only notes](#terminal-only-notes)).
+- Every `"vpn": true` profile uses the same proxy, so they all leave from the same IP.
 
-#### The SOCKS port is now stable per config file
+One way to run the proxy with wireproxy: add a SOCKS5 section to a copy of your WireGuard
+`.conf` (it holds your private key — keep it out of source control), then run
+`wireproxy -c /path/to/that.conf` from a launchd agent (macOS) or systemd user unit (Linux):
 
-Without an explicit `vpn.socksPort`, the extension no longer picks a random free port on
-every restart. It derives a port deterministically from the WireGuard config file's path,
-inside a configurable range, so the same `.conf` always lands on the same port across
-window reloads — anything that hard-codes it (a `ProxyCommand`, a note in `sftp.json`)
-keeps working instead of going stale.
+```ini
+[Socks5]
+BindAddress = 127.0.0.1:1080
+```
 
-- **`sftp.vpn.portRange`** (string, default `"21000-21999"`) — the range the deterministic
-  port is chosen from. Accepts `"low-high"`; anything else (missing dash, reversed bounds,
-  out of the 1024–65535 range) silently falls back to the default rather than breaking
-  connections.
-- **`sftp.vpn.keepAlive`** (boolean, default `true`) — leave the tunnel running when the
-  last SFTP/terminal session using it disconnects, so the next connection reuses it instead
-  of paying wireproxy's startup and health-check cost again. Set to `false` to kill the
-  tunnel as soon as its last user releases it, as before. Either way, closing VS Code (or
-  disabling the extension) tears down every tunnel that window itself started — as long as
-  the extension gets to shut down cleanly. A force-quit or a crashed extension host skips
-  that teardown entirely, and the tunnel is left holding its port until the next connection
-  adopts or replaces it.
+#### Upgrading from 1.33 or earlier
 
-An explicit `vpn.socksPort` in a profile still always wins over the derived port — it is
-never silently moved.
+Earlier versions started their own `wireproxy` for each `"vpn": { "configFile": … }` profile.
+That is gone:
 
-#### Why a running tunnel is only ever adopted, not just reused
-
-When the derived (or pinned) port is already occupied, the extension does not simply assume
-it can use whatever is listening there. A port that answers a SOCKS5 handshake only proves
-that *something* speaks SOCKS5 on it — not that it is this extension's tunnel, and not that
-it goes where you expect. Any other process on the machine can bind a port in the same range
-and speak SOCKS5 back. Trusting that alone would route your SSH session — password or key
-included — through a proxy chosen by whichever process won the race to that port; on a
-shared or already-compromised machine that is a straightforward man-in-the-middle.
-
-So the extension only reuses ("adopts") an already-running listener when **all** of the
-following hold:
-1. A marker file it wrote itself, in its own extension storage directory, exists for that
-   config file.
-2. The marker's recorded port matches the port in question.
-3. The marker's recorded process ID is still alive.
-4. The marker was written since the machine last booted (a marker surviving a reboot names a
-   process ID that has, with certainty, been recycled onto something unrelated).
-5. The port still answers a SOCKS5 handshake.
-
-If any single one of those fails, the extension does not adopt — it either starts its own
-tunnel on a free port, or, when `vpn.socksPort` pins an exact port, fails the connection
-outright rather than silently sharing that port with an unknown process.
-
-**A tunnel of ours that stops responding may be terminated.** If everything above says a
-listener is our own previous tunnel except the live SOCKS5 answer — it is ours, its process
-is alive, but it has stopped talking — the extension re-probes it a few more times (to rule
-out a slow machine rather than a dead one) and, only if it still never answers, sends it
-`SIGTERM` before starting its replacement. This never happens to a process the extension did
-not itself record in a marker it trusts; a listener that fails any of the five adoption
-checks above is left alone, not signalled.
-
-**An adopted tunnel is never torn down by the window that adopted it.** The marker directory
-is shared by every VS Code window of the same install, so a tunnel that passes all five
-checks may equally well belong to another window that is open and transferring right now —
-nothing recorded in the marker can tell "a previous run" from "the window next to this one".
-So closing a window (or, with `keepAlive: false`, simply disconnecting) tears down only the
-tunnels *that* window started; one it adopted is dropped from its own bookkeeping and left
-running, exactly as `keepAlive: true` would leave it. Its marker stays on disk, so the next
-connection adopts it again — and if it has genuinely wedged in the meantime, the reap above
-still cleans it up.
-
-#### Upgrading from before 1.26.0
-
-**A tunnel left running by 1.25.0 or earlier can never be adopted**, because those builds
-left nothing behind to identify it by. The ownership marker is new in 1.26.0 — no earlier
-build wrote one — and without a marker a listener cannot clear any of the five checks above.
-In practice, on the first connection after upgrading:
-
-- Without a pinned `vpn.socksPort`, the old build put its tunnel on a *random* free port and
-  recorded it nowhere. The new build derives a fixed port instead, and never looks at the
-  random one, so an old tunnel still running is simply never found: it keeps running and
-  holding its port, orphaned, until the machine restarts or you stop it yourself. Your
-  connection itself is unaffected — a fresh tunnel starts on the derived port. This costs one
-  leftover `wireproxy` per VPN config file, at most once.
-- **If you have `vpn.socksPort` pinned**, the old tunnel is sitting on exactly the port the
-  new build wants. With no marker to prove that listener is ours, the new build **refuses to
-  start**, with an error naming the port — it no longer silently proceeds and shares the port
-  with a process it can't verify (that silent sharing was the security gap this release
-  closes). You'll see something like *"VPN SOCKS port … is already in use by something this
-  extension did not start"*.
-
-**To recover:** find and stop the leftover `wireproxy` process (e.g. `pgrep wireproxy` /
-`ps aux | grep wireproxy`, then stop the one holding the port named in the error), or
-restart the machine. Either clears the stale listener and the next connection starts (or
-re-derives) a tunnel normally.
+- Old `"vpn": { … }` objects still validate and still connect: they now mean the same as
+  `"vpn": true` and go through `sftp.vpn.proxy`. Their fields (`type`, `configFile`,
+  `wireproxyPath`, `socksPort`, `healthCheckTimeout`) are ignored, and each connection logs a
+  one-line note in the SFTP output channel. Switch them to `"vpn": true` when convenient.
+- Start your own proxy before connecting. Point it at the same WireGuard `.conf` you used
+  before, so the IP the server allowlists does not change.
+- The `sftp.vpn.portRange` and `sftp.vpn.keepAlive` settings are gone.
+- On start-up the extension deletes the files older versions kept in its own storage: working
+  copies of your WireGuard configs (which contained your private key) and tunnel tracking files.
+  It does **not** stop any `wireproxy` an older version left running — stop that yourself
+  (`pgrep -fl wireproxy`), taking care not to stop your always-on one.
 
 ### Database (MySQL over SSH)
 

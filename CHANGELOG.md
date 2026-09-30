@@ -1,3 +1,35 @@
+## 1.34.0 - 2026-09-30
+* New Feature : **`"vpn": true`.** A profile can now route its connection through a SOCKS5 VPN
+  proxy you keep running yourself -- for example an always-on `wireproxy` started at login --
+  instead of a tunnel the extension starts. Where the proxy is comes from the new
+  `sftp.vpn.proxy` setting (`host:port`, default `127.0.0.1:1080`); a malformed value falls back
+  to the default with a warning in the output channel. Before each connection the proxy is
+  checked, and if it is not answering the connection fails at once with a message saying so,
+  rather than with whatever the SSH library makes of a refused socket. SFTP, the database
+  features, Manage Server and Open SSH in Terminal all use it. `"vpn": false`, or no `vpn`, is a
+  direct connection as before.
+* Removed : **The extension no longer starts, stops or manages a VPN tunnel.** This is a
+  behaviour change. Everything that ran `wireproxy` for you is gone: the per-profile process,
+  the working copy of your WireGuard config, port derivation, adoption of a running tunnel,
+  keep-alive and the `wireproxy` lookup added in 1.33.3. The `sftp.vpn.portRange` and
+  `sftp.vpn.keepAlive` settings are removed. You now need your own always-on proxy running
+  before you connect; point it at the same WireGuard `.conf` so the IP your servers allowlist
+  does not change.
+* Upgrade note : **Old `"vpn": { "configFile": ... }` profiles keep working** -- they still
+  validate, and now mean the same as `"vpn": true`, so they connect through `sftp.vpn.proxy`.
+  Their fields (`type`, `configFile`, `wireproxyPath`, `socksPort`, `healthCheckTimeout`) are
+  ignored, and each connection logs one line in the output channel suggesting `"vpn": true`.
+  No popup, no validation error.
+* Fix : **`hop` profiles now really use the VPN.** The first hop's SSH connection was handed
+  the VPN socket and then ignored it, dialling the bastion straight from your own IP. It now
+  goes through the proxy. The same mistake made the second and later hops of a multi-hop chain
+  dial their host directly instead of going through the hop before; they now follow the chain.
+* Security : **Old tunnel files are deleted.** On start-up the extension removes the `vpn`
+  folder older versions kept in its own storage, which held working copies of your WireGuard
+  configs (private key included) and tunnel tracking files. It does not stop any `wireproxy`
+  an older version left running: a recorded process ID may since belong to something else, and
+  your always-on proxy may be a `wireproxy` too. Stop a leftover one yourself.
+
 ## 1.33.3 - 2026-09-21
 * Fix : **`wireproxy not found` when VS Code is started from the Dock.** A VS Code launched from
   the Dock or Spotlight -- rather than from a terminal -- is given a bare `PATH` of
